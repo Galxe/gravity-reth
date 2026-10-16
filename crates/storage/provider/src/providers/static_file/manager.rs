@@ -2029,31 +2029,21 @@ impl<N: NodePrimitives> ChangeSetReader for StaticFileProvider<N> {
         &self,
         block_number: BlockNumber,
     ) -> ProviderResult<Vec<reth_db_api::models::AccountBeforeTx>> {
-        let provider = match self.get_segment_provider_from_block(
-            StaticFileSegment::AccountChangeSets,
-            block_number,
-            None,
-        ) {
-            Ok(provider) => provider,
-            Err(ProviderError::MissingStaticFileBlock(_, _)) => return Ok(Vec::new()),
-            Err(err) => return Err(err),
-        };
-
-        if let Some(offset) = provider.read_changeset_offset(block_number)? {
-            let mut cursor = provider.cursor()?;
-            let mut changeset = Vec::with_capacity(offset.num_changes() as usize);
-
-            for i in offset.changeset_range() {
-                if let Some(change) =
-                    cursor.get_one::<reth_db::static_file::AccountChangesetMask>(i.into())?
-                {
-                    changeset.push(change)
-                }
-            }
-            Ok(changeset)
-        } else {
-            Ok(Vec::new())
+        let segment = StaticFileSegment::AccountChangeSets;
+        let provider = self.get_segment_provider_from_block(segment, block_number, None)?;
+        // Empty blocks have an offset with zero rows; missing offsets are unavailable history.
+        let offset = provider
+            .read_changeset_offset(block_number)?
+            .ok_or(ProviderError::MissingStaticFileBlock(segment, block_number))?;
+        let mut cursor = provider.cursor()?;
+        let mut changeset = Vec::with_capacity(offset.num_changes() as usize);
+        for i in offset.changeset_range() {
+            let change = cursor
+                .get_one::<reth_db::static_file::AccountChangesetMask>(i.into())?
+                .ok_or(ProviderError::MissingStaticFileBlock(segment, block_number))?;
+            changeset.push(change);
         }
+        Ok(changeset)
     }
 }
 
@@ -2062,44 +2052,32 @@ impl<N: NodePrimitives> StorageChangeSetReader for StaticFileProvider<N> {
         &self,
         block_number: BlockNumber,
     ) -> ProviderResult<Vec<(reth_db_api::models::BlockNumberAddress, StorageEntry)>> {
-        let provider = match self.get_segment_provider_from_block(
-            StaticFileSegment::StorageChangeSets,
-            block_number,
-            None,
-        ) {
-            Ok(provider) => provider,
-            Err(ProviderError::MissingStaticFileBlock(_, _)) => return Ok(Vec::new()),
-            Err(err) => return Err(err),
-        };
-
-        if let Some(offset) = provider.read_changeset_offset(block_number)? {
-            let mut cursor = provider.cursor()?;
-            let mut changeset = Vec::with_capacity(offset.num_changes() as usize);
-
-            for i in offset.changeset_range() {
-                if let Some(change) =
-                    cursor.get_one::<reth_db::static_file::StorageChangesetMask>(i.into())?
-                {
-                    let block_address =
-                        reth_db_api::models::BlockNumberAddress((block_number, change.address));
-                    let entry = StorageEntry { key: change.key, value: change.value };
-                    changeset.push((block_address, entry));
-                }
-            }
-            Ok(changeset)
-        } else {
-            Ok(Vec::new())
+        let segment = StaticFileSegment::StorageChangeSets;
+        let provider = self.get_segment_provider_from_block(segment, block_number, None)?;
+        // Empty blocks have an offset with zero rows; missing offsets are unavailable history.
+        let offset = provider
+            .read_changeset_offset(block_number)?
+            .ok_or(ProviderError::MissingStaticFileBlock(segment, block_number))?;
+        let mut cursor = provider.cursor()?;
+        let mut changeset = Vec::with_capacity(offset.num_changes() as usize);
+        for i in offset.changeset_range() {
+            let change = cursor
+                .get_one::<reth_db::static_file::StorageChangesetMask>(i.into())?
+                .ok_or(ProviderError::MissingStaticFileBlock(segment, block_number))?;
+            let block_address =
+                reth_db_api::models::BlockNumberAddress((block_number, change.address));
+            let entry = StorageEntry { key: change.key, value: change.value };
+            changeset.push((block_address, entry));
         }
+        Ok(changeset)
     }
 }
 
 impl<N: NodePrimitives> StaticFileProvider<N> {
     /// Converts a range to a bounded `RangeInclusive` capped to the highest static file block.
     ///
-    /// This is necessary because static file iteration beyond the tip would loop forever:
-    /// blocks beyond the static file tip return `Ok(empty)` which is indistinguishable from
-    /// blocks with no changes. We cap the end to the highest available block regardless of
-    /// whether the input was unbounded or an explicit large value like `BlockNumber::MAX`.
+    /// Unbounded ranges and explicit `BlockNumber::MAX` stop at the committed file tip.
+    /// Missing blocks inside this range are errors, including files removed by pruning.
     fn bound_range(
         &self,
         range: impl RangeBounds<BlockNumber>,

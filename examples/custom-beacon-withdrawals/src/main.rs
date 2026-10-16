@@ -121,6 +121,8 @@ impl BlockExecutorFactory for CustomEvmConfig {
     }
 }
 
+impl reth_ethereum::evm::primitives::ConfigureEvmForRead for CustomEvmConfig {}
+
 impl ConfigureEvm for CustomEvmConfig {
     type Primitives = <EthEvmConfig as ConfigureEvm>::Primitives;
     type Error = <EthEvmConfig as ConfigureEvm>::Error;

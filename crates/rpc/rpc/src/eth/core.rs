@@ -70,6 +70,8 @@ pub struct EthApi<N: RpcNodeCore, Rpc: RpcConvert> {
     /// All nested fields bundled together.
     #[deref]
     pub(super) inner: Arc<EthApiInner<N, Rpc>>,
+    /// Selects live execution reads, live RPC reads, or a captured request context.
+    pub(super) read_context: EthApiReadContext<N>,
 }
 
 impl<N, Rpc> Clone for EthApi<N, Rpc>
@@ -78,8 +80,38 @@ where
     Rpc: RpcConvert,
 {
     fn clone(&self) -> Self {
-        Self { inner: self.inner.clone() }
+        Self { inner: self.inner.clone(), read_context: self.read_context.clone() }
     }
+}
+
+impl<N: RpcNodeCore, Rpc: RpcConvert> EthApi<N, Rpc> {
+    /// Returns the provider selected for this handler.
+    pub fn provider(&self) -> &N::Provider {
+        match &self.read_context {
+            EthApiReadContext::Node => self.inner.components.provider(),
+            EthApiReadContext::LiveRpc => self.inner.provider(),
+            EthApiReadContext::View { provider, .. } => provider,
+        }
+    }
+
+    /// EVM configuration paired with the selected provider.
+    pub fn evm_config(&self) -> &N::Evm {
+        match &self.read_context {
+            EthApiReadContext::Node | EthApiReadContext::LiveRpc => self.inner.evm_config(),
+            EthApiReadContext::View { evm, .. } => evm,
+        }
+    }
+}
+
+/// Keeps the selected provider and auxiliary EVM reads in the same request context.
+#[derive(Clone)]
+pub(super) enum EthApiReadContext<N: RpcNodeCore> {
+    /// Internal execution and on-chain configuration reads use the live node provider.
+    Node,
+    /// RPC requests capture their view when they begin reading related state.
+    LiveRpc,
+    /// A captured provider paired with the EVM configuration that reads from it.
+    View { provider: N::Provider, evm: N::Evm },
 }
 
 impl
@@ -162,7 +194,7 @@ where
     }
 
     fn evm_config(&self) -> &Self::Evm {
-        self.inner.evm_config()
+        self.evm_config()
     }
 
     fn network(&self) -> &Self::Network {
@@ -170,7 +202,7 @@ where
     }
 
     fn provider(&self) -> &Self::Provider {
-        self.inner.provider()
+        self.provider()
     }
 }
 
@@ -226,6 +258,8 @@ where
 pub struct EthApiInner<N: RpcNodeCore, Rpc: RpcConvert> {
     /// The components of the node.
     components: N,
+    /// Provider used by RPC reads, independently of execution's node provider.
+    provider: N::Provider,
     /// All configured Signers
     signers: SignersForRpc<N::Provider, Rpc::Network>,
     /// The async cache frontend for eth related data
@@ -319,10 +353,10 @@ where
         force_blob_sidecar_upcasting: bool,
     ) -> Self {
         let signers = parking_lot::RwLock::new(Default::default());
+        let provider = components.provider().clone();
         // get the block number of the latest block
         let starting_block = U256::from(
-            components
-                .provider()
+            provider
                 .header_by_number_or_tag(BlockNumberOrTag::Latest)
                 .ok()
                 .flatten()
@@ -339,6 +373,7 @@ where
 
         Self {
             components,
+            provider,
             signers,
             eth_cache,
             gas_oracle,
@@ -365,6 +400,12 @@ where
             force_blob_sidecar_upcasting,
         }
     }
+
+    /// Overrides the provider without replacing the node's execution components.
+    pub(crate) fn with_provider(mut self, provider: N::Provider) -> Self {
+        self.provider = provider;
+        self
+    }
 }
 
 impl<N, Rpc> EthApiInner<N, Rpc>
@@ -374,8 +415,8 @@ where
 {
     /// Returns a handle to data on disk.
     #[inline]
-    pub fn provider(&self) -> &N::Provider {
-        self.components.provider()
+    pub const fn provider(&self) -> &N::Provider {
+        &self.provider
     }
 
     /// Returns a handle to the transaction response builder.
@@ -574,7 +615,7 @@ mod tests {
     use crate::{eth::helpers::types::EthRpcConverter, EthApi, EthApiBuilder};
     use alloy_consensus::{Block, BlockBody, Header};
     use alloy_eips::BlockNumberOrTag;
-    use alloy_primitives::{Signature, B256, U64};
+    use alloy_primitives::{Address, Signature, B256, U256, U64};
     use alloy_rpc_types::FeeHistory;
     use alloy_rpc_types_eth::{Bundle, TransactionRequest};
     use jsonrpsee_types::error::INVALID_PARAMS_CODE;
@@ -584,12 +625,14 @@ mod tests {
     use reth_ethereum_primitives::TransactionSigned;
     use reth_evm_ethereum::EthEvmConfig;
     use reth_network_api::noop::NoopNetwork;
+    use reth_primitives_traits::{Block as _, SealedHeader};
     use reth_provider::{
-        test_utils::{MockEthProvider, NoopProvider},
+        providers::BlockchainProvider,
+        test_utils::{create_test_provider_factory, MockEthProvider, NoopProvider},
         PruneCheckpointReader, StageCheckpointReader,
     };
     use reth_rpc_eth_api::{node::RpcNodeCoreAdapter, EthApiServer};
-    use reth_storage_api::{BlockReader, BlockReaderIdExt, StateProviderFactory};
+    use reth_storage_api::{BlockReader, BlockReaderIdExt, ProviderReadView, StateProviderFactory};
     use reth_testing_utils::generators;
     use reth_transaction_pool::test_utils::{testing_pool, TestPool};
 
@@ -607,6 +650,7 @@ mod tests {
             > + BlockReader
             + ChainSpecProvider<ChainSpec = ChainSpec>
             + StateProviderFactory
+            + ProviderReadView
             + CanonStateSubscriptions<Primitives = reth_ethereum_primitives::EthPrimitives>
             + StageCheckpointReader
             + PruneCheckpointReader
@@ -623,6 +667,106 @@ mod tests {
             EthEvmConfig::new(provider.chain_spec()),
         )
         .build()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ordinary_rpc_does_not_wait_for_consistent_view() {
+        use reth_db_api::database::Database;
+        use reth_rpc_eth_api::helpers::EthState;
+        use std::{sync::mpsc, time::Duration};
+
+        use reth_storage_api::{BlockWriter, StageCheckpointWriter, StorageLocation};
+        let factory = create_test_provider_factory();
+        let genesis = reth_ethereum_primitives::Block::default().seal_slow();
+        let writer = factory.provider_rw().unwrap();
+        writer
+            .insert_block(genesis.clone().try_recover().unwrap(), StorageLocation::Database)
+            .unwrap();
+        writer.update_pipeline_stages(0, false).unwrap();
+        writer.commit().unwrap();
+        let provider =
+            BlockchainProvider::with_latest(factory.clone(), genesis.clone_sealed_header())
+                .unwrap();
+        let eth_api = build_test_eth_api(provider.rpc_provider());
+
+        let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let commit = std::thread::spawn(move || {
+            factory.db_ref().with_write_lock(|| {
+                locked_tx.send(()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            });
+        });
+        locked_rx.await.unwrap();
+        let trie_api = eth_api.clone();
+        let address = Address::repeat_byte(0x71);
+        let mut trie_query = tokio::spawn(async move {
+            let (account, proof) = tokio::join!(
+                EthState::get_account(&trie_api, address, BlockNumberOrTag::Latest.into()),
+                EthState::get_proof(&trie_api, address, Vec::new(), None).unwrap(),
+            );
+            assert!(account.unwrap().is_none());
+            let proof = proof.unwrap();
+            assert_eq!(proof.balance, U256::ZERO);
+            assert_eq!(proof.nonce, 0);
+            assert_eq!(proof.storage_hash, alloy_consensus::constants::EMPTY_ROOT_HASH);
+        });
+
+        let balance = tokio::time::timeout(
+            Duration::from_secs(5),
+            EthState::balance(&eth_api, address, None),
+        )
+        .await
+        .expect("ordinary RPC must not wait for a consistent view")
+        .unwrap();
+        assert_eq!(balance, U256::ZERO);
+        assert!(tokio::time::timeout(Duration::from_millis(50), &mut trie_query).await.is_err());
+        release_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), trie_query).await.unwrap().unwrap();
+        commit.join().unwrap();
+    }
+
+    #[test]
+    fn access_list_completes_with_one_blocking_worker() {
+        use reth_rpc_eth_api::helpers::EthCall;
+        use std::time::Duration;
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let result = runtime.block_on(async {
+            let provider = MockEthProvider::default();
+            let block = Block {
+                header: Header { number: 12_244_000, gas_limit: 30_000_000, ..Default::default() },
+                body: BlockBody::default(),
+            };
+            let hash = SealedHeader::seal_slow(block.header.clone()).hash();
+            provider.add_block(hash, block);
+            let eth_api = build_test_eth_api(provider);
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                EthCall::create_access_list_at(
+                    &eth_api,
+                    TransactionRequest {
+                        to: Some(Address::repeat_byte(0x22).into()),
+                        gas: Some(100_000),
+                        gas_price: Some(0),
+                        ..Default::default()
+                    },
+                    Some(hash.into()),
+                    None,
+                ),
+            )
+            .await
+        });
+        // A deadlocked request must not prevent the runtime from shutting down after the timeout.
+        runtime.shutdown_background();
+        let response = result.expect("access-list request exhausted the blocking pool").unwrap();
+        assert!(response.error.is_none());
+        assert_eq!(response.gas_used, U256::from(21_000));
     }
 
     // Function to prepare the EthApi with mock data

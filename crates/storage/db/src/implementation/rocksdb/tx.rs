@@ -6,13 +6,14 @@ use crate::{
 };
 use parking_lot::Mutex;
 use reth_db_api::{
+    database::DatabaseSnapshot,
     table::{Compress, Decompress, DupSort, Encode, Table, TableImporter},
     tables,
     transaction::{DbTx, DbTxMut},
 };
 use reth_storage_errors::db::DatabaseErrorInfo;
-use rocksdb::{WriteOptions, DB};
-use std::{sync::Arc, thread};
+use rocksdb::{SnapshotWithThreadMode, WriteOptions, DB};
+use std::{any::Any, sync::Arc, thread, time::Instant};
 
 use crate::set_fail_point;
 pub(crate) use cursor::{RO, RW};
@@ -34,14 +35,14 @@ pub(crate) use cursor::{RO, RW};
 ///
 /// # Write Batches
 ///
-/// Each DB instance has a corresponding `WriteBatch` wrapped in Arc<Mutex<_>>:
+/// Read-write transactions give each DB instance a `WriteBatch` wrapped in Arc<Mutex<_>>:
 /// - Arc enables sharing the batch across threads spawned during parallel commits
 /// - Mutex provides interior mutability, allowing batch modifications through shared references
 /// - Separate batches ensure writes to different DBs can be built concurrently
 ///
-/// During commit, if both `account_batch` and `storage_batch` contain data, they are committed
-/// in parallel using `thread::scope`. The `state_batch` is always committed last to ensure
-/// atomicity - if state commit succeeds, the entire transaction is considered successful.
+/// The state batch is sync-written first, followed by non-empty trie batches in parallel.
+/// Each batch is atomic within its database; commits are not atomic across the three databases.
+/// Reads use the selected live or snapshot sources and do not include pending batch entries.
 ///
 /// # Type Parameter
 ///
@@ -49,28 +50,18 @@ pub(crate) use cursor::{RO, RW};
 /// from read-write (RW) transactions at compile time, enabling type-safe cursor APIs.
 pub struct Tx<K: cursor::TransactionKind> {
     /// State database instance (accounts, storage, receipts, history indices).
-    /// Committed last to act as the commit coordinator.
-    state_db: Arc<DB>,
+    state: DbReadSource,
 
     /// Account trie database instance (Merkle Patricia Trie for account state).
-    /// Can be committed in parallel with `storage_db`.
-    account_db: Arc<DB>,
+    /// Can be committed in parallel with the storage trie database.
+    accounts: DbReadSource,
 
     /// Storage trie database instance (Merkle Patricia Trie for contract storage).
-    /// Can be committed in parallel with `account_db`.
-    storage_db: Arc<DB>,
+    /// Can be committed in parallel with the account trie database.
+    storages: DbReadSource,
 
-    /// Write batch for state database.
-    /// Arc<Mutex<_>> enables shared access across threads during parallel commit.
-    state_batch: Arc<Mutex<rocksdb::WriteBatch>>,
-
-    /// Write batch for account trie database.
-    /// Arc<Mutex<_>> enables shared access across threads during parallel commit.
-    account_batch: Arc<Mutex<rocksdb::WriteBatch>>,
-
-    /// Write batch for storage trie database.
-    /// Arc<Mutex<_>> enables shared access across threads during parallel commit.
-    storage_batch: Arc<Mutex<rocksdb::WriteBatch>>,
+    /// Allocated only for read-write transactions, and shared with their write cursors.
+    write_batches: Option<WriteBatches>,
 
     /// Phantom data to carry the transaction kind (RO or RW) at compile time.
     /// Enables type-safe distinction between read-only and read-write transactions.
@@ -83,45 +74,152 @@ impl<K: cursor::TransactionKind> std::fmt::Debug for Tx<K> {
     }
 }
 
+#[derive(Default)]
+struct WriteBatches {
+    state: Arc<Mutex<rocksdb::WriteBatch>>,
+    accounts: Arc<Mutex<rocksdb::WriteBatch>>,
+    storages: Arc<Mutex<rocksdb::WriteBatch>>,
+}
+
+/// Owns the DB behind a `RocksDB` snapshot. Cursors retain this owner independently of their
+/// transaction, and field drop order releases the snapshot before its database.
+pub(crate) struct DbSnapshot {
+    snapshot: SnapshotWithThreadMode<'static, DB>,
+    db: Arc<DB>,
+}
+
+impl DbSnapshot {
+    fn new(db: Arc<DB>) -> Self {
+        let snapshot = unsafe {
+            // SAFETY: `db` owns the referenced DB for the entire snapshot lifetime. Field drop
+            // order releases `snapshot` before `db`, and cursors retain this owner in an Arc.
+            std::mem::transmute::<SnapshotWithThreadMode<'_, DB>, SnapshotWithThreadMode<'static, DB>>(
+                db.snapshot(),
+            )
+        };
+        Self { snapshot, db }
+    }
+}
+
+/// Shareable snapshots of the primary store and optional additional stores.
+pub(super) struct Snapshot {
+    state: Arc<DbSnapshot>,
+    tries: Option<(Arc<DbSnapshot>, Arc<DbSnapshot>)>,
+}
+
+impl Snapshot {
+    pub(super) fn new(state_db: Arc<DB>) -> Self {
+        Self { state: Arc::new(DbSnapshot::new(state_db)), tries: None }
+    }
+
+    pub(super) fn all_stores(state_db: Arc<DB>, account_db: Arc<DB>, storage_db: Arc<DB>) -> Self {
+        Self {
+            state: Arc::new(DbSnapshot::new(state_db)),
+            tries: Some((
+                Arc::new(DbSnapshot::new(account_db)),
+                Arc::new(DbSnapshot::new(storage_db)),
+            )),
+        }
+    }
+
+    pub(super) fn belongs_to(&self, state_db: &Arc<DB>) -> bool {
+        Arc::ptr_eq(&self.state.db, state_db)
+    }
+}
+
+impl std::fmt::Debug for Snapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Snapshot").finish_non_exhaustive()
+    }
+}
+
+impl DatabaseSnapshot for Snapshot {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+/// A live database or a fixed read snapshot owning that same database.
+#[derive(Clone)]
+pub(crate) enum DbReadSource {
+    Live(Arc<DB>),
+    Snapshot(Arc<DbSnapshot>),
+}
+
+impl DbReadSource {
+    pub(crate) fn db(&self) -> &Arc<DB> {
+        match self {
+            Self::Live(db) => db,
+            Self::Snapshot(snapshot) => &snapshot.db,
+        }
+    }
+
+    pub(crate) fn get_cf(
+        &self,
+        cf: &rocksdb::ColumnFamily,
+        key: impl AsRef<[u8]>,
+    ) -> Result<Option<Vec<u8>>, rocksdb::Error> {
+        match self {
+            Self::Live(db) => db.get_cf(cf, key),
+            Self::Snapshot(snapshot) => snapshot.snapshot.get_cf(cf, key),
+        }
+    }
+
+    pub(crate) fn raw_iterator_cf(&self, cf: &rocksdb::ColumnFamily) -> rocksdb::DBRawIterator<'_> {
+        match self {
+            Self::Live(db) => db.raw_iterator_cf(cf),
+            Self::Snapshot(snapshot) => snapshot.snapshot.raw_iterator_cf(cf),
+        }
+    }
+}
+
 impl<K: cursor::TransactionKind> Tx<K> {
     pub(crate) fn new(state_db: Arc<DB>, account_db: Arc<DB>, storage_db: Arc<DB>) -> Self {
+        Self::with_sources(
+            DbReadSource::Live(state_db),
+            DbReadSource::Live(account_db),
+            DbReadSource::Live(storage_db),
+        )
+    }
+
+    fn with_sources(state: DbReadSource, accounts: DbReadSource, storages: DbReadSource) -> Self {
         Self {
-            state_db,
-            account_db,
-            storage_db,
-            state_batch: Arc::new(Mutex::new(rocksdb::WriteBatch::default())),
-            account_batch: Arc::new(Mutex::new(rocksdb::WriteBatch::default())),
-            storage_batch: Arc::new(Mutex::new(rocksdb::WriteBatch::default())),
+            state,
+            accounts,
+            storages,
+            write_batches: K::IS_READ_WRITE.then(WriteBatches::default),
             _mode: std::marker::PhantomData,
         }
     }
 
+    fn source_for_table<T: Table>(&self) -> &DbReadSource {
+        self.source_for_name(T::NAME)
+    }
+
     fn db_for_table<T: Table>(&self) -> &Arc<DB> {
-        match T::NAME {
-            tables::AccountsTrieV2::NAME => &self.account_db,
-            tables::StoragesTrieV2::NAME => &self.storage_db,
-            _ => &self.state_db,
-        }
+        self.source_for_table::<T>().db()
     }
 
-    fn batch_for_table<T: Table>(&self) -> &Arc<Mutex<rocksdb::WriteBatch>> {
-        match T::NAME {
-            tables::AccountsTrieV2::NAME => &self.account_batch,
-            tables::StoragesTrieV2::NAME => &self.storage_batch,
-            _ => &self.state_batch,
-        }
+    fn batch_for_table<T: Table>(&self) -> Option<&Arc<Mutex<rocksdb::WriteBatch>>> {
+        let batches = self.write_batches.as_ref()?;
+        Some(match T::NAME {
+            tables::AccountsTrieV2::NAME => &batches.accounts,
+            tables::StoragesTrieV2::NAME => &batches.storages,
+            _ => &batches.state,
+        })
     }
 
-    fn db_for_name(&self, name: &str) -> &Arc<DB> {
+    fn source_for_name(&self, name: &str) -> &DbReadSource {
         match name {
-            tables::AccountsTrieV2::NAME => &self.account_db,
-            tables::StoragesTrieV2::NAME => &self.storage_db,
-            _ => &self.state_db,
+            tables::AccountsTrieV2::NAME => &self.accounts,
+            tables::StoragesTrieV2::NAME => &self.storages,
+            _ => &self.state,
         }
     }
 
+    /// Returns `RocksDB`'s live estimate, independent of the transaction's read snapshot.
     pub fn table_entries(&self, name: &str) -> Result<usize, DatabaseError> {
-        let db = self.db_for_name(name);
+        let db = self.source_for_name(name).db();
         let cf_handle = db.cf_handle(name).ok_or_else(|| {
             DatabaseError::Open(DatabaseErrorInfo {
                 message: format!("Column family '{}' not found", name).into(),
@@ -162,6 +260,36 @@ impl<K: cursor::TransactionKind> Tx<K> {
     }
 }
 
+impl Tx<RO> {
+    pub(crate) fn new_state_snapshot(
+        state_db: Arc<DB>,
+        account_db: Arc<DB>,
+        storage_db: Arc<DB>,
+    ) -> Self {
+        Self::from_snapshot(&Snapshot::new(state_db), account_db, storage_db)
+    }
+
+    pub(super) fn from_snapshot(
+        snapshot: &Snapshot,
+        account_db: Arc<DB>,
+        storage_db: Arc<DB>,
+    ) -> Self {
+        let (accounts, storages) = match &snapshot.tries {
+            Some((accounts, storages)) => {
+                (DbReadSource::Snapshot(accounts.clone()), DbReadSource::Snapshot(storages.clone()))
+            }
+            None => (DbReadSource::Live(account_db), DbReadSource::Live(storage_db)),
+        };
+        Self::with_sources(DbReadSource::Snapshot(snapshot.state.clone()), accounts, storages)
+    }
+}
+
+impl Tx<RW> {
+    fn write_batch_for_table<T: Table>(&self) -> &Mutex<rocksdb::WriteBatch> {
+        self.batch_for_table::<T>().expect("read-write transactions have write batches")
+    }
+}
+
 impl<K: cursor::TransactionKind> DbTx for Tx<K> {
     type Cursor<T: Table> = cursor::Cursor<K, T>;
     type DupCursor<T: DupSort> = cursor::Cursor<K, T>;
@@ -175,13 +303,13 @@ impl<K: cursor::TransactionKind> DbTx for Tx<K> {
         &self,
         key: &<T::Key as Encode>::Encoded,
     ) -> Result<Option<T::Value>, DatabaseError> {
-        let db = self.db_for_table::<T>();
-        let cf_handle = get_cf_handle::<T>(db)?;
+        let source = self.source_for_table::<T>();
+        let cf_handle = get_cf_handle::<T>(source.db())?;
 
         if T::DUPSORT {
             // For DupSort tables, we need to seek to the first entry with this key prefix
             // because RocksDB stores composite keys (primary_key + subkey)
-            let mut iter = db.raw_iterator_cf(cf_handle);
+            let mut iter = source.raw_iterator_cf(cf_handle);
             let encoded_key_ref = key.as_ref();
             iter.seek(encoded_key_ref);
 
@@ -197,7 +325,7 @@ impl<K: cursor::TransactionKind> DbTx for Tx<K> {
             }
             Ok(None)
         } else {
-            match db.get_cf(cf_handle, key) {
+            match source.get_cf(cf_handle, key) {
                 Ok(Some(value)) => {
                     T::Value::decompress(&value).map(Some).map_err(|_| DatabaseError::Decode)
                 }
@@ -207,126 +335,53 @@ impl<K: cursor::TransactionKind> DbTx for Tx<K> {
         }
     }
 
-    /// Commits all pending writes across the three database instances.
-    ///
-    /// # Commit Ordering and Correctness Guarantees
-    ///
-    /// This commit strategy ensures correctness through careful ordering and checkpoint-based
-    /// idempotency, even in the face of partial failures:
-    ///
-    /// 1. **Parallel Trie Commits**: If both `account_batch` and `storage_batch` contain data, they
-    ///    are committed in parallel to maximize throughput. These commits may succeed or fail
-    ///    independently.
-    ///
-    /// 2. **State Commit as Coordinator**: The `state_batch` is ALWAYS committed last. This is
-    ///    critical because stage checkpoints are stored in `state_db`. A checkpoint's presence
-    ///    indicates that the corresponding stage has been fully completed.
-    ///
-    /// # Failure Scenarios and Recovery
-    ///
-    /// Several partial failure scenarios can occur, all of which are handled safely through
-    /// checkpoint-based recovery:
-    ///
-    /// **Scenario 1: Trie commit fails, state commit succeeds**
-    /// - If `account_batch` or `storage_batch` commit fails, the function returns an error
-    /// - The `state_batch` commit never executes, so no checkpoint is written
-    /// - On retry, the entire transaction is re-executed (idempotent trie writes)
-    ///
-    /// **Scenario 2: Account commit succeeds, storage commit fails**
-    /// - When running in parallel, `account_db` write may succeed while `storage_db` write fails
-    /// - The function returns an error before `state_batch` is committed
-    /// - No checkpoint is written; account trie data is orphaned but harmless
-    /// - On retry, account trie writes are idempotent and will overwrite orphaned data
-    ///
-    /// **Scenario 3: Both trie commits succeed, state commit fails**
-    /// - Account and storage trie data is written to disk
-    /// - `State_batch` commit fails, so no checkpoint is recorded
-    /// - On retry, the stage is re-executed because the checkpoint is missing
-    /// - Trie writes are idempotent: re-writing the same trie nodes produces identical results
-    ///
-    /// # Why This Works: Idempotency of Trie Operations
-    ///
-    /// The correctness of this approach relies on a critical property: **account trie and
-    /// storage trie writes are idempotent**. Writing the same trie node multiple times with
-    /// the same data produces the same on-disk state. This means:
-    ///
-    /// - Orphaned trie data (from failed state commits) can be safely overwritten
-    /// - Retrying a stage will produce consistent results even if partial trie data exists
-    /// - The checkpoint in `state_db` acts as the authoritative "commit point" for the entire
-    ///   multi-database transaction
-    ///
-    /// # Performance vs. Atomicity Trade-off
-    ///
-    /// This design prioritizes write throughput (via parallel commits) over strict atomicity.
-    /// The lack of distributed transaction coordination means we can have temporary
-    /// inconsistencies (orphaned trie data), but these are always resolved by the checkpoint
-    /// mechanism and idempotent retry logic.
+    /// Flushes pending state writes, then the trie batches, without consuming the transaction.
+    /// This does not record a completed persistence unit: callers must write the completion
+    /// checkpoint in a separate state commit after both trie batches succeed.
     fn commit_view(&self) -> Result<bool, DatabaseError> {
-        // Use sync writes so every commit() call is durable before returning.
-        // Combined with stage-level idempotency (recovery.rs), this guarantees
-        // that partial block writes are always recoverable even after power loss.
+        let Some(batches) = &self.write_batches else { return Ok(true) };
         let mut sync_opts = WriteOptions::default();
         sync_opts.set_sync(true);
+        let write_batch = |db: &DB, batch: rocksdb::WriteBatch, database: &'static str| {
+            metrics::histogram!("reth_rocksdb_commit_batch_size_bytes", "database" => database)
+                .record(batch.size_in_bytes() as f64);
+            let start = Instant::now();
+            db.write_opt(batch, &sync_opts).map_err(|e| DatabaseError::Commit(to_error_info(e)))?;
+            metrics::counter!("reth_rocksdb_sync_commits_total", "database" => database)
+                .increment(1);
+            metrics::histogram!("reth_rocksdb_sync_commit_duration_seconds", "database" => database)
+                .record(start.elapsed());
+            Ok::<(), DatabaseError>(())
+        };
+        let write_storage = |batch| {
+            set_fail_point!("db::commit::before_storage_trie");
+            write_batch(self.storages.db(), batch, "storage")
+        };
+        let mut state_batch = batches.state.lock();
+        let mut account_batch = batches.accounts.lock();
+        let mut storage_batch = batches.storages.lock();
+        let state_data = (!state_batch.is_empty()).then(|| std::mem::take(&mut *state_batch));
+        let account_data = (!account_batch.is_empty()).then(|| std::mem::take(&mut *account_batch));
+        let storage_data = (!storage_batch.is_empty()).then(|| std::mem::take(&mut *storage_batch));
 
-        // Acquire locks on all batches upfront to prepare for commit
-        let mut state_batch = self.state_batch.lock();
-        let mut account_batch = self.account_batch.lock();
-        let mut storage_batch = self.storage_batch.lock();
-
-        // Phase 1: Commit trie batches (potentially in parallel)
-        if !account_batch.is_empty() && !storage_batch.is_empty() {
-            // Both trie batches have data - commit them in parallel for maximum throughput.
-            // If either fails, we return an error BEFORE committing state_batch, ensuring
-            // no checkpoint is written and the stage will be retried.
-            let account_batch_data = std::mem::take(&mut *account_batch);
-            let storage_batch_data = std::mem::take(&mut *storage_batch);
-            thread::scope(|scope| -> Result<(), DatabaseError> {
-                let account_handle = scope.spawn(|| -> Result<(), DatabaseError> {
-                    self.account_db
-                        .write_opt(account_batch_data, &sync_opts)
-                        .map_err(|e| DatabaseError::Commit(to_error_info(e)))?;
-                    set_fail_point!("db::commit::after_account_trie");
-                    Ok(())
-                });
-                let storage_handle = scope.spawn(|| -> Result<(), DatabaseError> {
-                    self.storage_db
-                        .write_opt(storage_batch_data, &sync_opts)
-                        .map_err(|e| DatabaseError::Commit(to_error_info(e)))?;
-                    set_fail_point!("db::commit::after_storage_trie");
-                    Ok(())
-                });
-                account_handle.join().unwrap()?;
-                storage_handle.join().unwrap()?;
-                Ok(())
-            })?;
-        } else {
-            // Only one trie batch has data - commit sequentially (no parallelism benefit)
-            if !account_batch.is_empty() {
-                let account_batch = std::mem::take(&mut *account_batch);
-                self.account_db
-                    .write_opt(account_batch, &sync_opts)
-                    .map_err(|e| DatabaseError::Commit(to_error_info(e)))?;
-                set_fail_point!("db::commit::after_account_trie");
-            }
-            if !storage_batch.is_empty() {
-                let storage_batch = std::mem::take(&mut *storage_batch);
-                self.storage_db
-                    .write_opt(storage_batch, &sync_opts)
-                    .map_err(|e| DatabaseError::Commit(to_error_info(e)))?;
-                set_fail_point!("db::commit::after_storage_trie");
-            }
+        // A merged trie must never advance beyond the durable Execution checkpoint.
+        if let Some(batch) = state_data {
+            set_fail_point!("db::commit::before_state");
+            write_batch(self.state.db(), batch, "state")?;
         }
 
-        // Phase 2: Commit state batch LAST (acts as the commit coordinator)
-        // The state_db contains stage checkpoints. Only when this commit succeeds is the
-        // checkpoint written, marking the stage as complete. If this commit fails, the
-        // checkpoint is absent, triggering a retry that will idempotently re-execute the stage.
-        if !state_batch.is_empty() {
-            let state_batch = std::mem::take(&mut *state_batch);
-            self.state_db
-                .write_opt(state_batch, &sync_opts)
-                .map_err(|e| DatabaseError::Commit(to_error_info(e)))?;
-            set_fail_point!("db::commit::after_state");
+        match (account_data, storage_data) {
+            (Some(account), Some(storage)) => thread::scope(|scope| {
+                let account_handle =
+                    scope.spawn(|| write_batch(self.accounts.db(), account, "account"));
+                let storage_result = write_storage(storage);
+                // Wait for the worker before propagating either write error.
+                account_handle.join().unwrap()?;
+                storage_result
+            })?,
+            (Some(account), None) => write_batch(self.accounts.db(), account, "account")?,
+            (None, Some(storage)) => write_storage(storage)?,
+            (None, None) => {}
         }
         Ok(true)
     }
@@ -340,11 +395,17 @@ impl<K: cursor::TransactionKind> DbTx for Tx<K> {
     }
 
     fn cursor_read<T: Table>(&self) -> Result<Self::Cursor<T>, DatabaseError> {
-        cursor::Cursor::new(self.db_for_table::<T>().clone(), self.batch_for_table::<T>().clone())
+        cursor::Cursor::new(
+            self.source_for_table::<T>().clone(),
+            self.batch_for_table::<T>().cloned(),
+        )
     }
 
     fn cursor_dup_read<T: DupSort>(&self) -> Result<Self::DupCursor<T>, DatabaseError> {
-        cursor::Cursor::new(self.db_for_table::<T>().clone(), self.batch_for_table::<T>().clone())
+        cursor::Cursor::new(
+            self.source_for_table::<T>().clone(),
+            self.batch_for_table::<T>().cloned(),
+        )
     }
 
     fn entries<T: Table>(&self) -> Result<usize, DatabaseError> {
@@ -364,7 +425,7 @@ impl DbTxMut for Tx<cursor::RW> {
     fn put<T: Table>(&self, key: T::Key, value: T::Value) -> Result<(), DatabaseError> {
         let db = self.db_for_table::<T>();
         let cf_handle = get_cf_handle::<T>(db)?;
-        let mut batch = self.batch_for_table::<T>().lock();
+        let mut batch = self.write_batch_for_table::<T>().lock();
 
         if T::DUPSORT {
             let (composite_key, encoded_value) = Self::dupsort_key_value::<T>(key, value);
@@ -384,7 +445,7 @@ impl DbTxMut for Tx<cursor::RW> {
     ) -> Result<bool, DatabaseError> {
         let db = self.db_for_table::<T>();
         let cf_handle = get_cf_handle::<T>(db)?;
-        let mut batch = self.batch_for_table::<T>().lock();
+        let mut batch = self.write_batch_for_table::<T>().lock();
 
         if T::DUPSORT {
             if let Some(value) = value {
@@ -463,7 +524,7 @@ impl DbTxMut for Tx<cursor::RW> {
             (first_key, last_key)
         };
 
-        let mut batch = self.batch_for_table::<T>().lock();
+        let mut batch = self.write_batch_for_table::<T>().lock();
         // Delete the range [first_key, last_key] - note that delete_range_cf is [start, end)
         // so we need to handle the last key separately
         batch.delete_range_cf(cf_handle, &first_key, &last_key);
@@ -475,11 +536,17 @@ impl DbTxMut for Tx<cursor::RW> {
     }
 
     fn cursor_write<T: Table>(&self) -> Result<Self::CursorMut<T>, DatabaseError> {
-        cursor::Cursor::new(self.db_for_table::<T>().clone(), self.batch_for_table::<T>().clone())
+        cursor::Cursor::new(
+            self.source_for_table::<T>().clone(),
+            self.batch_for_table::<T>().cloned(),
+        )
     }
 
     fn cursor_dup_write<T: DupSort>(&self) -> Result<Self::DupCursorMut<T>, DatabaseError> {
-        cursor::Cursor::new(self.db_for_table::<T>().clone(), self.batch_for_table::<T>().clone())
+        cursor::Cursor::new(
+            self.source_for_table::<T>().clone(),
+            self.batch_for_table::<T>().cloned(),
+        )
     }
 }
 

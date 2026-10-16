@@ -21,7 +21,7 @@ use reth_consensus::{Consensus, FullConsensus};
 use reth_consensus_common::validation::MAX_RLP_BLOCK_SIZE;
 use reth_engine_primitives::PayloadValidator;
 use reth_errors::{BlockExecutionError, ConsensusError, ProviderError};
-use reth_evm::{execute::Executor, ConfigureEvm};
+use reth_evm::{execute::Executor, ConfigureEvm, ConfigureEvmForRead};
 use reth_execution_types::BlockExecutionOutput;
 use reth_metrics::{
     metrics,
@@ -36,7 +36,7 @@ use reth_primitives_traits::{
 use reth_revm::{cached::CachedReads, database::StateProviderDatabase};
 use reth_rpc_api::BlockSubmissionValidationApiServer;
 use reth_rpc_server_types::result::{internal_rpc_err, invalid_params_rpc_err};
-use reth_storage_api::{BlockReaderIdExt, StateProviderFactory};
+use reth_storage_api::{BlockReaderIdExt, ProviderReadView, StateProviderFactory};
 use reth_tasks::Runtime;
 use revm_primitives::{Address, B256, U256};
 use serde::{Deserialize, Serialize};
@@ -114,11 +114,15 @@ where
 
 impl<Provider, E, T> ValidationApi<Provider, E, T>
 where
-    Provider: BlockReaderIdExt<Header = <E::Primitives as NodePrimitives>::BlockHeader>
-        + ChainSpecProvider<ChainSpec: EthereumHardforks>
+    Provider: BlockReaderIdExt<
+            Header = <E::Primitives as NodePrimitives>::BlockHeader,
+            Receipt = <E::Primitives as NodePrimitives>::Receipt,
+        > + ChainSpecProvider<ChainSpec: EthereumHardforks>
         + StateProviderFactory
+        + ProviderReadView
+        + Clone
         + 'static,
-    E: ConfigureEvm + 'static,
+    E: ConfigureEvmForRead + 'static,
     T: PayloadTypes<ExecutionData = ExecutionData>,
 {
     /// Validates the given block and a [`BidTrace`] against it.
@@ -153,15 +157,16 @@ where
             }
         }
 
+        let provider = self.provider.consistent_view()?;
+        let evm_config = self.evm_config.with_read_provider(provider.clone());
         let latest_header =
-            self.provider.latest_header()?.ok_or_else(|| ValidationApiError::MissingLatestBlock)?;
+            provider.latest_header()?.ok_or_else(|| ValidationApiError::MissingLatestBlock)?;
 
         let parent_header = if block.parent_hash() == latest_header.hash() {
             latest_header
         } else {
             // parent is not the latest header so we need to fetch it and ensure it's not too old
-            let parent_header = self
-                .provider
+            let parent_header = provider
                 .sealed_header_by_hash(block.parent_hash())?
                 .ok_or_else(|| ValidationApiError::MissingParentBlock)?;
 
@@ -176,12 +181,12 @@ where
         self.consensus.validate_header_against_parent(block.sealed_header(), &parent_header)?;
         self.validate_gas_limit(registered_gas_limit, &parent_header, block.sealed_header())?;
         let parent_header_hash = parent_header.hash();
-        let state_provider = self.provider.state_by_block_hash(parent_header_hash)?;
+        let state_provider = provider.state_by_block_hash(parent_header_hash)?;
 
         let mut request_cache = self.cached_reads(parent_header_hash).await;
 
         let cached_db = request_cache.as_db_mut(StateProviderDatabase::new(&state_provider));
-        let executor = self.evm_config.batch_executor(cached_db);
+        let executor = evm_config.batch_executor(cached_db);
 
         let mut accessed_blacklisted = None;
         let output = executor.execute_with_state_closure(&block, |state| {
@@ -511,12 +516,15 @@ where
 #[async_trait]
 impl<Provider, E, T> BlockSubmissionValidationApiServer for ValidationApi<Provider, E, T>
 where
-    Provider: BlockReaderIdExt<Header = <E::Primitives as NodePrimitives>::BlockHeader>
-        + ChainSpecProvider<ChainSpec: EthereumHardforks>
+    Provider: BlockReaderIdExt<
+            Header = <E::Primitives as NodePrimitives>::BlockHeader,
+            Receipt = <E::Primitives as NodePrimitives>::Receipt,
+        > + ChainSpecProvider<ChainSpec: EthereumHardforks>
         + StateProviderFactory
+        + ProviderReadView
         + Clone
         + 'static,
-    E: ConfigureEvm + 'static,
+    E: ConfigureEvmForRead + 'static,
     T: PayloadTypes<ExecutionData = ExecutionData>,
 {
     async fn validate_builder_submission_v1(

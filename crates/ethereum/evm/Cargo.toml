@@ -26,6 +26,7 @@ grevm.workspace = true
 gravity-primitives.workspace = true
 gravity-precompiles.workspace = true
 reth-storage-errors.workspace = true
+reth-storage-api.workspace = true
 
 # Alloy
 alloy-primitives.workspace = true
@@ -67,6 +68,7 @@ std = [
     "alloy-rpc-types-engine/std",
     "alloy-sol-types/std",
     "reth-storage-errors/std",
+    "reth-storage-api/std",
     "tracing/std",
 ]
 test-utils = [

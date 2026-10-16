@@ -48,9 +48,9 @@ use reth_provider::{
     AccountReader, BlockHashReader, BlockIdReader, BlockNumReader, BlockReader, BytecodeReader,
     CanonChainTracker, CanonStateNotification, CanonStateNotifications, CanonStateSubscriptions,
     ChainStateBlockReader, ChainStateBlockWriter, ChangeSetReader, DatabaseProviderFactory,
-    HeaderProvider, PruneCheckpointReader, ReceiptProvider, StageCheckpointReader, StateProvider,
-    StateProviderBox, StateProviderFactory, StateReader, StateRootProvider, StorageReader,
-    TransactionVariant, TransactionsProvider,
+    HeaderProvider, ProviderReadView, PruneCheckpointReader, ReceiptProvider,
+    StageCheckpointReader, StateProvider, StateProviderBox, StateProviderFactory, StateReader,
+    StateRootProvider, StorageReader, TransactionVariant, TransactionsProvider,
 };
 use reth_prune_types::{PruneCheckpoint, PruneSegment};
 use reth_rpc_convert::{TryFromBlockResponse, TryFromReceiptResponse, TryFromTransactionResponse};
@@ -732,6 +732,8 @@ where
         Err(ProviderError::UnsupportedProvider)
     }
 }
+
+impl<P, Node: NodeTypes, N> ProviderReadView for RpcBlockchainProvider<P, Node, N> where Self: Clone {}
 
 impl<P, Node, N> StateProviderFactory for RpcBlockchainProvider<P, Node, N>
 where
@@ -1755,6 +1757,11 @@ where
     ) -> Result<Vec<reth_db_api::models::AccountBeforeTx>, ProviderError> {
         Err(ProviderError::UnsupportedProvider)
     }
+}
+
+impl<P, Node: NodeTypes, N> ProviderReadView for RpcBlockchainStateProvider<P, Node, N> where
+    Self: Clone
+{
 }
 
 impl<P, Node, N> StateProviderFactory for RpcBlockchainStateProvider<P, Node, N>

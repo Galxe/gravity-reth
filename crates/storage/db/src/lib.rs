@@ -43,6 +43,8 @@ pub use reth_db_api::*;
 use libc as _;
 #[cfg(feature = "mdbx")]
 use page_size as _;
+#[cfg(feature = "quanta")]
+use quanta as _;
 #[cfg(feature = "mdbx")]
 use reth_libmdbx as _;
 
@@ -80,7 +82,9 @@ pub mod test_utils {
     use crate::DatabaseArguments;
     use parking_lot::RwLock;
     use reth_db_api::{
-        database::Database, database_metrics::DatabaseMetrics, models::ClientVersion,
+        database::{Database, DatabaseSnapshot},
+        database_metrics::DatabaseMetrics,
+        models::ClientVersion,
     };
     use reth_fs_util;
     use std::{
@@ -171,6 +175,27 @@ pub mod test_utils {
         fn tx(&self) -> Result<Self::TX, DatabaseError> {
             self.pre_tx_hook.read()();
             let tx = self.db().tx()?;
+            self.post_tx_hook.read()();
+            Ok(tx)
+        }
+
+        fn snapshot(
+            &self,
+            consistent: bool,
+        ) -> Result<Option<Arc<dyn DatabaseSnapshot>>, DatabaseError> {
+            self.db().snapshot(consistent)
+        }
+
+        fn with_write_lock<T>(&self, f: impl FnOnce() -> T) -> T {
+            self.db().with_write_lock(f)
+        }
+
+        fn tx_with_snapshot(
+            &self,
+            snapshot: Option<Arc<dyn DatabaseSnapshot>>,
+        ) -> Result<Self::TX, DatabaseError> {
+            self.pre_tx_hook.read()();
+            let tx = self.db().tx_with_snapshot(snapshot)?;
             self.post_tx_hook.read()();
             Ok(tx)
         }

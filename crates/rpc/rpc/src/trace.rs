@@ -98,16 +98,20 @@ where
         let overrides =
             EvmOverrides::new(trace_request.state_overrides, trace_request.block_overrides);
         let mut inspector = TracingInspector::new(config);
-        let this = self.clone();
         self.eth_api()
-            .spawn_with_call_at(trace_request.call, at, overrides, move |db, evm_env, tx_env| {
-                let res = this.eth_api().inspect(&mut *db, evm_env, tx_env, &mut inspector)?;
-                let trace_res = inspector
-                    .into_parity_builder()
-                    .into_trace_results_with_state(&res, &trace_request.trace_types, &db)
-                    .map_err(Eth::Error::from_eth_err)?;
-                Ok(trace_res)
-            })
+            .spawn_with_call_at(
+                trace_request.call,
+                at,
+                overrides,
+                move |eth_api, db, evm_env, tx_env| {
+                    let res = eth_api.inspect(&mut *db, evm_env, tx_env, &mut inspector)?;
+                    let trace_res = inspector
+                        .into_parity_builder()
+                        .into_trace_results_with_state(&res, &trace_request.trace_types, &db)
+                        .map_err(Eth::Error::from_eth_err)?;
+                    Ok(trace_res)
+                },
+            )
             .await
     }
 
@@ -118,15 +122,16 @@ where
         trace_types: HashSet<TraceType>,
         block_id: Option<BlockId>,
     ) -> Result<TraceResults, Eth::Error> {
+        let eth_api = self.eth_api().view().await?;
         let tx = recover_raw_transaction::<PoolPooledTx<Eth::Pool>>(&tx)?
             .map(<Eth::Pool as TransactionPool>::Transaction::pooled_into_consensus);
 
-        let (evm_env, at) = self.eth_api().evm_env_at(block_id.unwrap_or_default()).await?;
-        let tx_env = self.eth_api().evm_config().tx_env(tx);
+        let (evm_env, at) = eth_api.evm_env_at(block_id.unwrap_or_default()).await?;
+        let tx_env = eth_api.evm_config().tx_env(tx);
 
         let config = TracingInspectorConfig::from_parity_config(&trace_types);
 
-        self.eth_api()
+        eth_api
             .spawn_trace_at_with_state(evm_env, tx_env, config, at, move |inspector, res, db| {
                 inspector
                     .into_parity_builder()
@@ -145,11 +150,12 @@ where
         calls: Vec<(RpcTxReq<Eth::NetworkTypes>, HashSet<TraceType>)>,
         block_id: Option<BlockId>,
     ) -> Result<Vec<TraceResults>, Eth::Error> {
+        let eth_api = self.eth_api().view().await?;
         let at = block_id.unwrap_or(BlockId::pending());
-        let (evm_env, at) = self.eth_api().evm_env_at(at).await?;
+        let (evm_env, at) = eth_api.evm_env_at(at).await?;
 
         // execute all transactions on top of each other and record the traces
-        self.eth_api()
+        eth_api
             .spawn_with_state_at_block(at, move |eth_api, mut db| {
                 let mut results = Vec::with_capacity(calls.len());
                 let mut calls = calls.into_iter().peekable();

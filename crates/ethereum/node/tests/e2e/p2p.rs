@@ -135,6 +135,7 @@ async fn can_sync() -> eyre::Result<()> {
 }
 
 #[tokio::test]
+#[ignore = "native engine persists Trie V1; Gravity state providers require pipe-executed Trie V2"]
 async fn e2e_test_send_transactions() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 

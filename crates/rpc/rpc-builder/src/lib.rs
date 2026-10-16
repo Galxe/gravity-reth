@@ -33,7 +33,7 @@ use jsonrpsee::{
 use reth_chainspec::{ChainSpecProvider, EthereumHardforks};
 use reth_consensus::FullConsensus;
 use reth_engine_primitives::{ConsensusEngineEvent, ConsensusEngineHandle};
-use reth_evm::ConfigureEvm;
+use reth_evm::ConfigureEvmForRead;
 use reth_network_api::{noop::NoopNetwork, NetworkInfo, Peers};
 use reth_payload_primitives::PayloadTypes;
 use reth_primitives_traits::{NodePrimitives, TxTy};
@@ -57,7 +57,7 @@ use reth_rpc_layer::{AuthLayer, Claims, CompressionLayer, JwtAuthValidator, JwtS
 pub use reth_rpc_server_types::RethRpcModule;
 use reth_storage_api::{
     AccountReader, BlockReader, ChangeSetReader, FullRpcProvider, NodePrimitivesProvider,
-    StateProviderFactory,
+    ProviderReadView, StateProviderFactory,
 };
 use reth_tasks::{pool::BlockingTaskGuard, Runtime};
 use reth_tokio_util::EventSender;
@@ -296,7 +296,7 @@ impl<N, Provider, Pool, Network, EvmConfig, Consensus>
         Provider: Clone,
         Pool: Clone,
         Network: Clone,
-        EvmConfig: ConfigureEvm + Clone,
+        EvmConfig: ConfigureEvmForRead + Clone,
         RpcNodeCoreAdapter<Provider, Pool, Network, EvmConfig>:
             RpcNodeCore<Provider: ChainSpecProvider<ChainSpec = ChainSpec>, Evm = EvmConfig>,
         RpcConverter<Ethereum, EvmConfig, EthReceiptConverter<ChainSpec>>: RpcConvert,
@@ -317,7 +317,7 @@ where
         + ChangeSetReader,
     Pool: TransactionPool + Clone + 'static,
     Network: NetworkInfo + Peers + Clone + 'static,
-    EvmConfig: ConfigureEvm<Primitives = N> + 'static,
+    EvmConfig: ConfigureEvmForRead<Primitives = N> + 'static,
     Consensus: FullConsensus<N> + Clone + 'static,
 {
     /// Configures all [`RpcModule`]s specific to the given [`TransportRpcModuleConfig`] which can
@@ -512,6 +512,7 @@ impl<N, Provider, Pool, Network, EthApi, EvmConfig, Consensus>
 where
     N: NodePrimitives,
     Provider: StateProviderFactory
+        + ProviderReadView
         + CanonStateSubscriptions<Primitives = N>
         + BlockReader<Block = N::Block, Receipt = N::Receipt>
         + Clone
@@ -520,7 +521,7 @@ where
     Pool: Send + Sync + Clone + 'static,
     Network: Clone + 'static,
     EthApi: FullEthApiTypes + 'static,
-    EvmConfig: ConfigureEvm<Primitives = N>,
+    EvmConfig: ConfigureEvmForRead<Primitives = N>,
 {
     /// Creates a new, empty instance.
     #[expect(clippy::too_many_arguments)]
@@ -538,7 +539,7 @@ where
         >,
     ) -> Self
     where
-        EvmConfig: ConfigureEvm<Primitives = N>,
+        EvmConfig: ConfigureEvmForRead<Primitives = N>,
     {
         let blocking_pool_guard = BlockingTaskGuard::new(config.eth.max_tracing_requests);
 
@@ -616,7 +617,7 @@ where
     Network: NetworkInfo + Clone + 'static,
     EthApi: EthApiTypes,
     Provider: BlockReader + ChainSpecProvider<ChainSpec: EthereumHardforks>,
-    EvmConfig: ConfigureEvm,
+    EvmConfig: ConfigureEvmForRead,
 {
     /// Instantiates `AdminApi`
     pub fn admin_api(&self) -> AdminApi<Network, Provider::ChainSpec, Pool>
@@ -673,7 +674,7 @@ where
             RpcHeader<EthApi::NetworkTypes>,
             TxTy<N>,
         > + EthApiTypes,
-    EvmConfig: ConfigureEvm<Primitives = N> + 'static,
+    EvmConfig: ConfigureEvmForRead<Primitives = N> + 'static,
 {
     /// Register Eth Namespace
     ///
@@ -781,7 +782,7 @@ where
         + ChangeSetReader,
     Network: NetworkInfo + Peers + Clone + 'static,
     EthApi: EthApiTypes,
-    EvmConfig: ConfigureEvm<Primitives = N>,
+    EvmConfig: ConfigureEvmForRead<Primitives = N>,
 {
     /// Instantiates `TraceApi`
     ///
@@ -854,7 +855,7 @@ impl<N, Provider, Pool, Network, EthApi, EvmConfig, Consensus>
     RpcRegistryInner<Provider, Pool, Network, EthApi, EvmConfig, Consensus>
 where
     N: NodePrimitives,
-    Provider: FullRpcProvider<Block = N::Block>
+    Provider: FullRpcProvider<Block = N::Block, Header = N::BlockHeader, Receipt = N::Receipt>
         + CanonStateSubscriptions<Primitives = N>
         + ForkChoiceSubscriptions<Header = N::BlockHeader>
         + AccountReader
@@ -862,7 +863,7 @@ where
     Pool: TransactionPool + Clone + 'static,
     Network: NetworkInfo + Peers + Clone + 'static,
     EthApi: FullEthApiServer,
-    EvmConfig: ConfigureEvm<Primitives = N> + 'static,
+    EvmConfig: ConfigureEvmForRead<Primitives = N> + 'static,
     Consensus: FullConsensus<N> + Clone + 'static,
 {
     /// Configures the auth module that includes the

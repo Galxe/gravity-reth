@@ -7,8 +7,8 @@ use crate::{
     traits::{BlockSource, ReceiptProvider},
     BlockHashReader, BlockNumReader, BlockReader, ChainSpecProvider, DatabaseProviderFactory,
     HashedPostStateProvider, HeaderProvider, HeaderSyncGapProvider, ProviderError,
-    PruneCheckpointReader, StageCheckpointReader, StateProviderBox, StaticFileProviderFactory,
-    TransactionVariant, TransactionsProvider,
+    ProviderReadView, PruneCheckpointReader, StageCheckpointReader, StateProviderBox,
+    StaticFileProviderFactory, TransactionVariant, TransactionsProvider,
 };
 use alloy_consensus::transaction::TransactionMeta;
 use alloy_eips::BlockHashOrNumber;
@@ -18,7 +18,7 @@ use parking_lot::RwLock;
 use reth_chainspec::ChainInfo;
 use reth_db::{init_db, DatabaseArguments, DatabaseEnv};
 use reth_db_api::{
-    database::Database,
+    database::{Database, DatabaseSnapshot},
     models::{GravityStorageSettings, StoredBlockBodyIndices},
     tables,
     transaction::DbTx,
@@ -76,6 +76,29 @@ pub struct ProviderFactory<N: NodeTypesWithDB> {
     storage: Arc<N::Storage>,
     /// Cached storage layout settings, loaded from the metadata table at construction.
     storage_settings: Arc<RwLock<GravityStorageSettings>>,
+    read_mode: ReadMode,
+}
+
+/// Execution providers read live data; RPC providers capture a view on demand.
+#[derive(Clone, Debug)]
+enum ReadMode {
+    Live,
+    Rpc,
+    Captured(Arc<ReadView>),
+}
+
+/// The database snapshot and height shared by one state computation.
+#[derive(Debug)]
+pub(crate) struct ReadView {
+    db: Option<Arc<dyn DatabaseSnapshot>>,
+    consistent: bool,
+    pub(crate) bounds: ReadBounds,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ReadBounds {
+    pub(crate) block_number: BlockNumber,
+    pub(crate) next_tx_num: TxNumber,
 }
 
 impl<N: NodeTypes> ProviderFactory<NodeTypesWithDBAdapter<N, Arc<DatabaseEnv>>> {
@@ -115,6 +138,7 @@ impl<N: NodeTypesWithDB> ProviderFactory<N> {
             prune_modes: PruneModes::none(),
             storage: Default::default(),
             storage_settings,
+            read_mode: ReadMode::Live,
         }
     }
 
@@ -160,6 +184,7 @@ impl<N: NodeTypesWithDB<DB = Arc<DatabaseEnv>>> ProviderFactory<N> {
             prune_modes: PruneModes::none(),
             storage: Default::default(),
             storage_settings,
+            read_mode: ReadMode::Live,
         })
     }
 }
@@ -173,14 +198,91 @@ impl<N: ProviderNodeTypes> ProviderFactory<N> {
     /// data.
     #[track_caller]
     pub fn provider(&self) -> ProviderResult<DatabaseProviderRO<N::DB, N>> {
-        Ok(DatabaseProvider::new(
-            self.db.tx()?,
+        if matches!(self.read_mode, ReadMode::Rpc) {
+            return self.capture_view_provider(false).map(|(_, provider)| provider)
+        }
+        let tx = match self.read_view() {
+            Some(view) => self.db.tx_with_snapshot(view.db.clone())?,
+            None => self.db.tx()?,
+        };
+        let mut provider = DatabaseProvider::new(
+            tx,
             self.chain_spec.clone(),
             self.static_file_provider.clone(),
             self.prune_modes.clone(),
             self.storage.clone(),
             self.storage_settings.clone(),
-        ))
+        );
+        provider.read_view = self.read_view().cloned();
+        Ok(provider)
+    }
+
+    pub(crate) const fn uses_state_reads(&self) -> bool {
+        !matches!(self.read_mode, ReadMode::Live)
+    }
+
+    const fn read_view(&self) -> Option<&Arc<ReadView>> {
+        match &self.read_mode {
+            ReadMode::Captured(view) => Some(view),
+            ReadMode::Live | ReadMode::Rpc => None,
+        }
+    }
+
+    pub(crate) fn has_consistent_view(&self) -> bool {
+        self.read_view().is_some_and(|view| view.consistent)
+    }
+
+    pub(crate) fn capture_view(&self, consistent: bool) -> ProviderResult<Self> {
+        if self.read_view().is_some() && (!consistent || self.has_consistent_view()) {
+            return Ok(self.clone())
+        }
+        self.capture_view_provider(consistent).map(|(factory, _)| factory)
+    }
+
+    /// Returns the transaction used to capture bounds so the caller can continue reading it.
+    pub(crate) fn capture_view_provider(
+        &self,
+        consistent: bool,
+    ) -> ProviderResult<(Self, DatabaseProviderRO<N::DB, N>)> {
+        if self.read_view().is_some() && (!consistent || self.has_consistent_view()) {
+            return Ok((self.clone(), self.provider()?))
+        }
+        let snapshot = self.db.snapshot(consistent)?;
+        let mut provider: DatabaseProvider<_, N> = DatabaseProvider::new(
+            self.db.tx_with_snapshot(snapshot.clone())?,
+            self.chain_spec.clone(),
+            self.static_file_provider.clone(),
+            self.prune_modes.clone(),
+            self.storage.clone(),
+            self.storage_settings.clone(),
+        );
+        let block_number =
+            provider.get_stage_checkpoint(StageId::Execution)?.unwrap_or_default().block_number;
+        // Gravity persistence commits state atomically at Execution. A failed trie commit can
+        // leave Merkle behind after releasing the write lock, so cross-store reads must check it.
+        if consistent &&
+            provider
+                .get_stage_checkpoint(StageId::MerkleExecute)?
+                .unwrap_or_default()
+                .block_number !=
+                block_number
+        {
+            return Err(ProviderError::other(std::io::Error::other(
+                "state and Merkle checkpoints do not match",
+            )))
+        }
+        let next_tx_num = provider
+            .block_body_indices(block_number)?
+            .ok_or(ProviderError::BlockBodyIndicesNotFound(block_number))?
+            .next_tx_num();
+        let mut factory = self.clone();
+        factory.read_mode = ReadMode::Captured(Arc::new(ReadView {
+            db: snapshot,
+            consistent,
+            bounds: ReadBounds { block_number, next_tx_num },
+        }));
+        provider.read_view = factory.read_view().cloned();
+        Ok((factory, provider))
     }
 
     /// Returns a provider with a created `DbTxMut` inside, which allows fetching and updating
@@ -234,6 +336,24 @@ impl<N: NodeTypesWithDB> NodePrimitivesProvider for ProviderFactory<N> {
     type Primitives = N::Primitives;
 }
 
+impl<N: ProviderNodeTypes> ProviderReadView for ProviderFactory<N> {
+    fn view(&self) -> ProviderResult<Self> {
+        self.capture_view(false)
+    }
+
+    fn consistent_view(&self) -> ProviderResult<Self> {
+        self.capture_view(true)
+    }
+
+    fn rpc_provider(&self) -> Self {
+        let mut factory = self.clone();
+        if matches!(factory.read_mode, ReadMode::Live) {
+            factory.read_mode = ReadMode::Rpc;
+        }
+        factory
+    }
+}
+
 impl<N: ProviderNodeTypes> DatabaseProviderFactory for ProviderFactory<N> {
     type DB = N::DB;
     type Provider = DatabaseProvider<<N::DB as Database>::TX, N>;
@@ -281,6 +401,9 @@ impl<N: ProviderNodeTypes> HeaderProvider for ProviderFactory<N> {
     }
 
     fn header_by_number(&self, num: BlockNumber) -> ProviderResult<Option<Self::Header>> {
+        if self.uses_state_reads() {
+            return self.provider()?.header_by_number(num)
+        }
         self.static_file_provider.get_with_static_file_or_database(
             StaticFileSegment::Headers,
             num,
@@ -301,6 +424,9 @@ impl<N: ProviderNodeTypes> HeaderProvider for ProviderFactory<N> {
         &self,
         range: impl RangeBounds<BlockNumber>,
     ) -> ProviderResult<Vec<Self::Header>> {
+        if self.uses_state_reads() {
+            return self.provider()?.headers_range(range)
+        }
         self.static_file_provider.get_range_with_static_file_or_database(
             StaticFileSegment::Headers,
             to_range(range),
@@ -314,6 +440,9 @@ impl<N: ProviderNodeTypes> HeaderProvider for ProviderFactory<N> {
         &self,
         number: BlockNumber,
     ) -> ProviderResult<Option<SealedHeader<Self::Header>>> {
+        if self.uses_state_reads() {
+            return self.provider()?.sealed_header(number)
+        }
         self.static_file_provider.get_with_static_file_or_database(
             StaticFileSegment::Headers,
             number,
@@ -334,6 +463,9 @@ impl<N: ProviderNodeTypes> HeaderProvider for ProviderFactory<N> {
         range: impl RangeBounds<BlockNumber>,
         predicate: impl FnMut(&SealedHeader<Self::Header>) -> bool,
     ) -> ProviderResult<Vec<SealedHeader<Self::Header>>> {
+        if self.uses_state_reads() {
+            return self.provider()?.sealed_headers_while(range, predicate)
+        }
         self.static_file_provider.get_range_with_static_file_or_database(
             StaticFileSegment::Headers,
             to_range(range),
@@ -346,6 +478,9 @@ impl<N: ProviderNodeTypes> HeaderProvider for ProviderFactory<N> {
 
 impl<N: ProviderNodeTypes> BlockHashReader for ProviderFactory<N> {
     fn block_hash(&self, number: u64) -> ProviderResult<Option<B256>> {
+        if self.uses_state_reads() {
+            return self.provider()?.block_hash(number)
+        }
         self.static_file_provider.get_with_static_file_or_database(
             StaticFileSegment::Headers,
             number,
@@ -359,6 +494,9 @@ impl<N: ProviderNodeTypes> BlockHashReader for ProviderFactory<N> {
         start: BlockNumber,
         end: BlockNumber,
     ) -> ProviderResult<Vec<B256>> {
+        if self.uses_state_reads() {
+            return self.provider()?.canonical_hashes_range(start, end)
+        }
         self.static_file_provider.get_range_with_static_file_or_database(
             StaticFileSegment::Headers,
             start..end,
@@ -465,6 +603,9 @@ impl<N: ProviderNodeTypes> TransactionsProvider for ProviderFactory<N> {
     }
 
     fn transaction_by_id(&self, id: TxNumber) -> ProviderResult<Option<Self::Transaction>> {
+        if self.uses_state_reads() {
+            return self.provider()?.transaction_by_id(id)
+        }
         self.static_file_provider.get_with_static_file_or_database(
             StaticFileSegment::Transactions,
             id,
@@ -477,6 +618,9 @@ impl<N: ProviderNodeTypes> TransactionsProvider for ProviderFactory<N> {
         &self,
         id: TxNumber,
     ) -> ProviderResult<Option<Self::Transaction>> {
+        if self.uses_state_reads() {
+            return self.provider()?.transaction_by_id_unhashed(id)
+        }
         self.static_file_provider.get_with_static_file_or_database(
             StaticFileSegment::Transactions,
             id,
@@ -536,6 +680,9 @@ impl<N: ProviderNodeTypes> TransactionsProvider for ProviderFactory<N> {
 impl<N: ProviderNodeTypes> ReceiptProvider for ProviderFactory<N> {
     type Receipt = ReceiptTy<N>;
     fn receipt(&self, id: TxNumber) -> ProviderResult<Option<Self::Receipt>> {
+        if self.uses_state_reads() {
+            return self.provider()?.receipt(id)
+        }
         self.static_file_provider.get_with_static_file_or_database(
             StaticFileSegment::Receipts,
             id,
@@ -559,6 +706,9 @@ impl<N: ProviderNodeTypes> ReceiptProvider for ProviderFactory<N> {
         &self,
         range: impl RangeBounds<TxNumber>,
     ) -> ProviderResult<Vec<Self::Receipt>> {
+        if self.uses_state_reads() {
+            return self.provider()?.receipts_by_tx_range(range)
+        }
         self.static_file_provider.get_range_with_static_file_or_database(
             StaticFileSegment::Receipts,
             to_range(range),
@@ -644,6 +794,7 @@ where
             prune_modes,
             storage,
             storage_settings: _,
+            ..
         } = self;
         f.debug_struct("ProviderFactory")
             .field("db", &db)
@@ -664,6 +815,7 @@ impl<N: NodeTypesWithDB> Clone for ProviderFactory<N> {
             prune_modes: self.prune_modes.clone(),
             storage: self.storage.clone(),
             storage_settings: self.storage_settings.clone(),
+            read_mode: self.read_mode.clone(),
         }
     }
 }
@@ -725,6 +877,67 @@ mod tests {
         let provider_rw = factory.provider_rw().unwrap();
         provider_rw.block_hash(0).unwrap();
         provider.block_hash(0).unwrap();
+    }
+
+    #[test]
+    fn state_read_factory_hides_static_file_tail_before_state_commit() -> eyre::Result<()> {
+        use crate::StageCheckpointWriter;
+        use reth_ethereum_primitives::Receipt;
+
+        for initial_tx_count in [0, 1] {
+            let factory = create_test_provider_factory();
+            let mut rng = generators::rng();
+            let first = random_block(
+                &mut rng,
+                0,
+                BlockParams { tx_count: Some(initial_tx_count), ..Default::default() },
+            );
+            let provider = factory.provider_rw()?;
+            provider.insert_block(first.clone().try_recover()?, StorageLocation::StaticFiles)?;
+            provider.update_pipeline_stages(0, false)?;
+            let files = factory.static_file_provider();
+            {
+                let mut writer = files.latest_writer(StaticFileSegment::Receipts)?;
+                writer.increment_block(0)?;
+                for tx in 0..u64::from(initial_tx_count) {
+                    writer.append_receipt(tx, &Receipt::default())?;
+                }
+            }
+            files.commit()?;
+            provider.commit()?;
+            let rpc = Arc::new(Box::new(factory.clone())).rpc_provider();
+            let captured = rpc.view()?;
+            assert!(rpc.consistent_view()?.has_consistent_view());
+            assert!(captured.provider()?.ensure_trie_read_allowed().is_err());
+
+            let next =
+                random_block(&mut rng, 1, BlockParams { tx_count: Some(1), ..Default::default() });
+            let provider = factory.provider_rw()?;
+            provider.insert_block(next.try_recover()?, StorageLocation::StaticFiles)?;
+            let next_tx = u64::from(initial_tx_count);
+            {
+                let mut writer = files.latest_writer(StaticFileSegment::Receipts)?;
+                writer.increment_block(1)?;
+                writer.append_receipt(next_tx, &Receipt::default())?;
+            }
+            // Persistence publishes the file tail before its atomic state batch.
+            files.commit()?;
+            drop(provider);
+
+            assert!(factory.header_by_number(1)?.is_some());
+            assert!(factory.block_hash(1)?.is_some());
+            assert!(factory.transaction_by_id(next_tx)?.is_some());
+            assert!(factory.receipt(next_tx)?.is_some());
+
+            assert!(captured.header_by_number(1)?.is_none());
+            assert_eq!(captured.headers_range(0..=1)?.len(), 1);
+            assert_eq!(captured.block_hash(0)?, Some(first.hash()));
+            assert!(captured.block_hash(1)?.is_none());
+            assert!(captured.transaction_by_id(next_tx)?.is_none());
+            assert!(captured.receipt(next_tx)?.is_none());
+            assert!(factory.rpc_provider().header_by_number(1)?.is_none());
+        }
+        Ok(())
     }
 
     #[test]

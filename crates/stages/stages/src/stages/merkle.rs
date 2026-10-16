@@ -369,6 +369,7 @@ where
         if input.unwind_to == 0 {
             tx.clear::<tables::AccountsTrieV2>()?;
             tx.clear::<tables::StoragesTrieV2>()?;
+            tx.commit_view()?;
 
             entities_checkpoint.processed = 0;
 
@@ -403,6 +404,8 @@ where
 
             // Validation passed, apply unwind changes to the database.
             provider.write_trie_updatesv2(&trie_updates_v2)?;
+            // Finish trie writes before the pipeline persists the unwind checkpoint.
+            tx.commit_view()?;
 
             // Update entities checkpoint to reflect the unwind operation
             // Since we're unwinding, we need to recalculate the total entities at the target block

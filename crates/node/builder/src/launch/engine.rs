@@ -11,7 +11,6 @@ use crate::{
 };
 use alloy_consensus::BlockHeader;
 use futures::{stream::FusedStream, stream_select, FutureExt, StreamExt};
-use gravity_primitives::get_gravity_config;
 use reth_chainspec::{EthChainSpec, EthereumHardforks};
 use reth_db::{database_metrics::DatabaseMetrics, Database};
 use reth_engine_tree::{
@@ -115,12 +114,6 @@ impl EngineNodeLauncher {
                 debug!(target: "reth::cli", chain=%this.chain_id(), genesis=?this.genesis_hash(), "Initializing genesis");
             })
             .with_genesis()?;
-
-        eyre::ensure!(
-            !get_gravity_config().persist_merge_blocks ||
-                !ctx.provider_factory().cached_storage_settings().changesets_in_static_files,
-            "--gravity.persist.merge-blocks is incompatible with Storage V2"
-        );
 
         let ctx = ctx
             .inspect(|this: &LaunchContextWith<Attached<WithConfigs<<T::Types as NodeTypes>::ChainSpec>, _>>| {

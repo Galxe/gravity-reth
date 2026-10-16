@@ -380,8 +380,8 @@ fn test_tree_persist_block_batch() {
     }
 }
 
-#[tokio::test]
-async fn test_tree_persist_blocks() {
+#[test]
+fn test_tree_persist_blocks() {
     let tree_config = TreeConfig::default();
     let chain_spec = MAINNET.clone();
     let mut test_block_builder = TestBlockBuilder::eth().with_chain_spec((*chain_spec).clone());
@@ -391,26 +391,34 @@ async fn test_tree_persist_blocks() {
     let blocks: Vec<_> = test_block_builder
         .get_executed_blocks(1..tree_config.persistence_threshold() + 2)
         .collect();
-    let test_harness = TestHarness::new(chain_spec).with_blocks(blocks.clone());
-    std::thread::Builder::new()
-        .name("Engine Task".to_string())
-        .spawn(|| test_harness.tree.run())
-        .unwrap();
+    let mut test_harness = TestHarness::new(chain_spec).with_blocks(blocks.clone());
+    assert!(test_harness.tree.should_persist());
 
-    // send a message to the tree to enter the main loop.
-    test_harness.to_tree_tx.send(FromEngine::DownloadedBlocks(vec![])).unwrap();
+    let expected_persist_len = blocks.len() - tree_config.memory_block_buffer_target() as usize;
+    let last_persisted_block = blocks[expected_persist_len - 1].recovered_block().num_hash();
+    let (tx, mut rx) = oneshot::channel();
+    // Drive the pipe event handler and persistence steps without taking the global event bus.
+    test_harness.tree.on_pipe_exec_event(PipeExecLayerEvent::WaitForPersistence(
+        WaitForPersistenceEvent { block_number: last_persisted_block.number, tx },
+    ));
+    test_harness.tree.advance_persistence().unwrap();
 
-    let received_action =
-        test_harness.action_rx.recv().expect("Failed to receive save blocks action");
-    if let PersistenceAction::SaveBlocks(saved_blocks, _) = received_action {
-        // only blocks.len() - tree_config.memory_block_buffer_target() will be
-        // persisted
-        let expected_persist_len = blocks.len() - tree_config.memory_block_buffer_target() as usize;
-        assert_eq!(saved_blocks.len(), expected_persist_len);
-        assert_eq!(saved_blocks, blocks[..expected_persist_len]);
-    } else {
+    let received_action = test_harness
+        .action_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("Failed to receive save blocks action");
+    let PersistenceAction::SaveBlocks(saved_blocks, sender) = received_action else {
         panic!("unexpected action received {received_action:?}");
-    }
+    };
+    assert_eq!(saved_blocks.len(), expected_persist_len);
+    assert_eq!(saved_blocks, blocks[..expected_persist_len]);
+    assert_eq!(rx.try_recv(), Err(oneshot::error::TryRecvError::Empty));
+
+    sender
+        .send(PersistenceResult { last_block: Some(last_persisted_block), commit_duration: None })
+        .unwrap();
+    assert!(test_harness.tree.try_poll_persistence().unwrap());
+    assert_eq!(rx.try_recv(), Ok(()));
 }
 
 #[tokio::test]

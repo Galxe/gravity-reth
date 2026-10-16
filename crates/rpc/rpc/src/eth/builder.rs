@@ -1,6 +1,9 @@
 //! `EthApiBuilder` implementation
 
-use crate::{eth::core::EthApiInner, EthApi};
+use crate::{
+    eth::core::{EthApiInner, EthApiReadContext},
+    EthApi,
+};
 use alloy_network::Ethereum;
 use reth_chain_state::CanonStateSubscriptions;
 use reth_chainspec::ChainSpecProvider;
@@ -28,6 +31,7 @@ use std::{sync::Arc, time::Duration};
 #[derive(Debug)]
 pub struct EthApiBuilder<N: RpcNodeCore, Rpc, NextEnv = ()> {
     components: N,
+    provider: Option<N::Provider>,
     rpc_converter: Rpc,
     gas_cap: GasCap,
     max_simulate_blocks: u64,
@@ -82,6 +86,7 @@ impl<N: RpcNodeCore, Rpc, NextEnv> EthApiBuilder<N, Rpc, NextEnv> {
     {
         let Self {
             components,
+            provider,
             rpc_converter,
             gas_cap,
             max_simulate_blocks,
@@ -106,6 +111,7 @@ impl<N: RpcNodeCore, Rpc, NextEnv> EthApiBuilder<N, Rpc, NextEnv> {
         } = self;
         EthApiBuilder {
             components,
+            provider,
             rpc_converter: f(rpc_converter),
             gas_cap,
             max_simulate_blocks,
@@ -141,6 +147,7 @@ where
             RpcConverter::new(EthReceiptConverter::new(components.provider().chain_spec()));
         Self {
             components,
+            provider: None,
             rpc_converter,
             eth_cache: None,
             gas_oracle: None,
@@ -170,6 +177,14 @@ impl<N, Rpc, NextEnv> EthApiBuilder<N, Rpc, NextEnv>
 where
     N: RpcNodeCore,
 {
+    /// Configures the provider used by RPC handlers and their caches.
+    ///
+    /// This leaves the provider in the node components unchanged for execution and payloads.
+    pub fn provider(mut self, provider: N::Provider) -> Self {
+        self.provider = Some(provider);
+        self
+    }
+
     /// Configures the task spawner used to spawn additional tasks.
     pub fn task_spawner(mut self, spawner: Runtime) -> Self {
         self.task_spawner = spawner;
@@ -183,6 +198,7 @@ where
     ) -> EthApiBuilder<N, RpcNew, NextEnv> {
         let Self {
             components,
+            provider,
             rpc_converter: _,
             gas_cap,
             max_simulate_blocks,
@@ -207,6 +223,7 @@ where
         } = self;
         EthApiBuilder {
             components,
+            provider,
             rpc_converter,
             gas_cap,
             max_simulate_blocks,
@@ -238,6 +255,7 @@ where
     ) -> EthApiBuilder<N, Rpc, NextEnvNew> {
         let Self {
             components,
+            provider,
             rpc_converter,
             gas_cap,
             max_simulate_blocks,
@@ -262,6 +280,7 @@ where
         } = self;
         EthApiBuilder {
             components,
+            provider,
             rpc_converter,
             gas_cap,
             max_simulate_blocks,
@@ -510,6 +529,7 @@ where
     {
         let Self {
             components,
+            provider,
             rpc_converter,
             eth_state_cache_config,
             gas_oracle_config,
@@ -533,7 +553,7 @@ where
             force_blob_sidecar_upcasting,
         } = self;
 
-        let provider = components.provider().clone();
+        let provider = provider.unwrap_or_else(|| components.provider().clone());
 
         let eth_cache = eth_cache.unwrap_or_else(|| {
             EthStateCache::spawn_with(
@@ -550,10 +570,17 @@ where
         let new_canonical_blocks = provider.canonical_state_stream();
         let fhc = fee_history_cache.clone();
         let cache = eth_cache.clone();
+        let fee_history_provider = provider.clone();
         task_spawner.spawn_critical_task(
             "cache canonical blocks for fee history task",
             async move {
-                fee_history_cache_new_blocks_task(fhc, new_canonical_blocks, provider, cache).await;
+                fee_history_cache_new_blocks_task(
+                    fhc,
+                    new_canonical_blocks,
+                    fee_history_provider,
+                    cache,
+                )
+                .await;
             },
         );
 
@@ -585,6 +612,7 @@ where
             evm_memory_limit,
             force_blob_sidecar_upcasting,
         )
+        .with_provider(provider)
     }
 
     /// Builds the [`EthApi`] instance.
@@ -600,7 +628,7 @@ where
         Rpc: RpcConvert,
         NextEnv: PendingEnvBuilder<N::Evm>,
     {
-        EthApi { inner: Arc::new(self.build_inner()) }
+        EthApi { inner: Arc::new(self.build_inner()), read_context: EthApiReadContext::LiveRpc }
     }
 
     /// Sets the timeout for `send_raw_transaction_sync` RPC method.

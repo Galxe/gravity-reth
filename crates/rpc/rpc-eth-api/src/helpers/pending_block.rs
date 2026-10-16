@@ -48,6 +48,16 @@ pub trait LoadPendingBlock:
         RpcConvert: RpcConvert<Network = Self::NetworkTypes>,
     > + RpcNodeCore
 {
+    /// Captures the provider and auxiliary EVM reads for one calculation.
+    fn with_view(&self) -> Result<Self, Self::Error> {
+        Ok(self.clone())
+    }
+
+    /// Captures matching state and trie snapshots before reading or replaying state.
+    fn with_consistent_view(&self) -> Result<Self, Self::Error> {
+        self.with_view()
+    }
+
     /// Returns a handle to the pending block.
     ///
     /// Data access in default (L1) trait method implementations.
@@ -181,6 +191,7 @@ pub trait LoadPendingBlock:
 
             let executed_block = match self
                 .spawn_blocking_io(move |this| {
+                    let this = this.with_view()?;
                     // we rebuild the block
                     this.build_block(&parent)
                 })

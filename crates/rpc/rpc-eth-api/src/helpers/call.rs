@@ -21,8 +21,8 @@ use futures::Future;
 use reth_chainspec::{ChainSpecProvider, EthChainSpec, EthereumHardforks};
 use reth_errors::{ProviderError, RethError};
 use reth_evm::{
-    block::BlockExecutor, env::BlockEnvironment, execute::BlockBuilder, ConfigureEvm, Evm,
-    EvmEnvFor, HaltReasonFor, InspectorFor, TransactionEnvMut, TxEnvFor,
+    block::BlockExecutor, env::BlockEnvironment, execute::BlockBuilder, ConfigureEvm,
+    ConfigureEvmForRead, Evm, EvmEnvFor, HaltReasonFor, InspectorFor, TransactionEnvMut, TxEnvFor,
 };
 use reth_node_api::BlockBody;
 use reth_primitives_traits::{Recovered, RecoveredBlock};
@@ -54,6 +54,11 @@ pub type SimulatedBlocksResult<N, E> = Result<Vec<SimulatedBlock<RpcBlock<N>>>, 
 /// Execution related functions for the [`EthApiServer`](crate::EthApiServer) trait in
 /// the `eth_` namespace.
 pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthApiTypes {
+    /// Uses the execution provider for internal configuration reads.
+    fn with_execution_provider(&self) -> Self {
+        self.clone()
+    }
+
     /// Estimate gas needed for execution of the `request` at the [`BlockId`].
     fn estimate_gas_at(
         &self,
@@ -74,7 +79,12 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
         block: Option<BlockId>,
     ) -> impl Future<Output = SimulatedBlocksResult<Self::NetworkTypes, Self::Error>> + Send {
         async move {
-            if payload.block_state_calls.len() > self.max_simulate_blocks() as usize {
+            let this = if self.compute_state_root_for_eth_simulate() {
+                self.consistent_view().await?
+            } else {
+                self.view().await?
+            };
+            if payload.block_state_calls.len() > this.max_simulate_blocks() as usize {
                 return Err(EthApiError::other(EthSimulateError::TooManyBlocks).into())
             }
 
@@ -91,14 +101,19 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                 return Err(EthApiError::InvalidParams(String::from("calls are empty.")).into())
             }
 
-            let _permit = self.acquire_owned_blocking_io().await;
+            let _permit = this.acquire_owned_blocking_io().await;
 
             let base_block =
-                self.recovered_block(block).await?.ok_or(EthApiError::HeaderNotFound(block))?;
+                this.recovered_block(block).await?.ok_or(EthApiError::HeaderNotFound(block))?;
             let parent = base_block.sealed_header().clone();
-            let max_simulate_blocks = self.max_simulate_blocks();
+            let max_simulate_blocks = this.max_simulate_blocks();
 
-            self.spawn_with_state_at_block(block, move |this, db| {
+            let state_block = match block {
+                BlockId::Hash(_) => block,
+                _ if block.is_pending() => block,
+                BlockId::Number(_) => BlockId::hash_canonical(base_block.hash()),
+            };
+            this.spawn_with_state_at_block(state_block, move |this, db| {
                 let state_provider = db.database.0 .0;
                 let mut db = State::builder()
                     .with_database(StateProviderDatabase::new(&state_provider))
@@ -294,12 +309,13 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
         mut state_override: Option<StateOverride>,
     ) -> impl Future<Output = Result<Vec<Vec<EthCallResponse>>, Self::Error>> + Send {
         async move {
+            let this = self.view().await?;
             // Check if the vector of bundles is empty
             if bundles.is_empty() {
                 return Err(EthApiError::InvalidParams(String::from("bundles are empty.")).into());
             }
 
-            let _permit = self.acquire_owned_blocking_io().await;
+            let _permit = this.acquire_owned_blocking_io().await;
 
             let StateContext { transaction_index, block_number } =
                 state_context.unwrap_or_default();
@@ -311,26 +327,29 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
             // if it's not pending, we should always use block_hash over block_number to ensure that
             // different provider calls query data related to the same block.
             if !is_block_target_pending {
-                let Some(block_hash) = self
+                let Some(block_hash) = this
                     .provider()
                     .block_hash_for_id(target_block)
                     .map_err(Self::Error::from_eth_err::<ProviderError>)?
                 else {
                     return Err(EthApiError::HeaderNotFound(target_block).into())
                 };
-                target_block = block_hash.into();
+                target_block = match target_block {
+                    BlockId::Hash(_) => target_block,
+                    BlockId::Number(_) => BlockId::hash_canonical(block_hash),
+                };
             }
 
-            let block = self
+            let block = this
                 .recovered_block(target_block)
                 .await?
                 .ok_or(EthApiError::HeaderNotFound(target_block))?;
-            let evm_env = self.evm_env_for_header(block.sealed_block().sealed_header())?;
+            let evm_env = this.evm_env_for_header(block.sealed_block().sealed_header())?;
 
             // we're essentially replaying the transactions in the block here, hence we need the
             // state that points to the beginning of the block, which is the state at
             // the parent block
-            let mut at = block.parent_hash();
+            let mut at = BlockId::hash_canonical(block.parent_hash());
             let mut replay_block_txs = true;
 
             let num_txs =
@@ -339,11 +358,11 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
             // however only if we're not targeting the pending block, because for pending we can't
             // rely on the block's state being available
             if !is_block_target_pending && num_txs == block.body().transactions().len() {
-                at = block.hash();
+                at = target_block;
                 replay_block_txs = false;
             }
 
-            self.spawn_with_state_at_block(at, move |this, mut db| {
+            this.spawn_with_state_at_block(at, move |this, mut db| {
                 let mut all_results = Vec::with_capacity(bundles.len());
 
                 if replay_block_txs {
@@ -433,13 +452,10 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
         Self: Trace,
     {
         async move {
+            let this = self.view().await?;
             let block_id = block_number.unwrap_or_default();
-            let (evm_env, at) = self.evm_env_at(block_id).await?;
-
-            self.spawn_blocking_io_fut(async move |this| {
-                this.create_access_list_with(evm_env, at, request, state_override).await
-            })
-            .await
+            let (evm_env, at) = this.evm_env_at(block_id).await?;
+            this.create_access_list_with(evm_env, at, request, state_override).await
         }
     }
 
@@ -456,6 +472,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
         Self: Trace,
     {
         self.spawn_blocking_io_fut(async move |this| {
+            let this = this.with_view()?;
             let state = this.state_at_block_id(at).await?;
             let mut db = State::builder().with_database(StateProviderDatabase::new(state)).build();
 
@@ -566,6 +583,7 @@ pub trait Call:
         F: FnOnce(Self, StateProviderBox) -> Result<R, Self::Error> + Send + 'static,
     {
         self.spawn_blocking_io_fut(async move |this| {
+            let this = this.with_view()?;
             let state = this.state_at_block_id(at).await?;
             f(this, state)
         })
@@ -625,10 +643,8 @@ pub trait Call:
         async move {
             let guard = CancelOnDrop::default();
             let cancel = guard.clone();
-            let this = self.clone();
-
             let res = self
-                .spawn_with_call_at(request, at, overrides, move |db, evm_env, tx_env| {
+                .spawn_with_call_at(request, at, overrides, move |this, db, evm_env, tx_env| {
                     if cancel.is_cancelled() {
                         // callsite dropped the guard
                         return Err(EthApiError::InternalEthError.into())
@@ -653,6 +669,7 @@ pub trait Call:
     {
         let at = at.into();
         self.spawn_blocking_io_fut(async move |this| {
+            let this = this.with_view()?;
             let state = this.state_at_block_id(at).await?;
             let db = State::builder()
                 .with_database(StateProviderDatabase::new(StateProviderTraitObjWrapper(state)))
@@ -686,6 +703,7 @@ pub trait Call:
     where
         Self: LoadPendingBlock,
         F: FnOnce(
+                Self,
                 &mut StateCacheDb,
                 EvmEnvFor<Self::Evm>,
                 TxEnvFor<Self::Evm>,
@@ -694,16 +712,16 @@ pub trait Call:
             + 'static,
         R: Send + 'static,
     {
-        async move {
-            let (evm_env, at) = self.evm_env_at(at).await?;
-            self.spawn_with_state_at_block(at, move |this, mut db| {
-                let (evm_env, tx_env) =
-                    this.prepare_call_env(evm_env, request, &mut db, overrides)?;
-
-                f(&mut db, evm_env, tx_env)
-            })
-            .await
-        }
+        self.spawn_blocking_io_fut(async move |this| {
+            let this = this.with_view()?;
+            let (evm_env, at) = this.evm_env_at(at).await?;
+            let state = this.state_at_block_id(at).await?;
+            let mut db = State::builder()
+                .with_database(StateProviderDatabase::new(StateProviderTraitObjWrapper(state)))
+                .build();
+            let (evm_env, tx_env) = this.prepare_call_env(evm_env, request, &mut db, overrides)?;
+            f(this, &mut db, evm_env, tx_env)
+        })
     }
 
     /// Retrieves the transaction if it exists and executes it.
@@ -732,7 +750,8 @@ pub trait Call:
         R: Send + 'static,
     {
         async move {
-            let (transaction, block) = match self.transaction_and_block(hash).await? {
+            let this = self.view().await?;
+            let (transaction, block) = match this.transaction_and_block(hash).await? {
                 None => return Ok(None),
                 Some(res) => res,
             };
@@ -742,7 +761,7 @@ pub trait Call:
             // block the transaction is included in
             let parent_block = block.parent_hash();
 
-            self.spawn_with_state_at_block(parent_block, move |this, mut db| {
+            this.spawn_with_state_at_block(parent_block, move |this, mut db| {
                 let block_txs = block.transactions_recovered();
 
                 this.apply_pre_execution_changes(&block, &mut db)?;
@@ -774,7 +793,7 @@ pub trait Call:
     /// top of the parent state in `db`.
     ///
     /// `block` is a committed block read from the chain, so this uses
-    /// [`ConfigureEvm::chain_block_mode`]: the executor reproduces the chain's block-level steps,
+    /// [`ConfigureEvmForRead::chain_block_mode`]: the executor reproduces the chain's block-level steps,
     /// such as the EIP-2935 / EIP-4788 system calls and one-shot hardfork changes.
     ///
     /// Note: This should only be called when replaying a block from its start. When tracing

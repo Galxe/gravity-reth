@@ -1,9 +1,10 @@
-//! Storage recovery helper for interrupted block writes.
+//! Incremental recovery for interrupted persistence writes.
 //!
-//! This module provides utilities for recovering storage state after interrupted block writes.
-//! When using RocksDB's WriteBatch model, each stage commits independently. If a block write
-//! is interrupted, this helper can recover the incomplete stages by checking the stage
-//! checkpoints and rebuilding the missing data.
+//! The state-first writer advances Execution, hashing and history in one state batch, but keeps
+//! Merkle completion behind until every database batch is durable. If state committed while a
+//! trie write failed, the lagging Merkle checkpoint triggers repair from the changed range.
+//! Legacy per-block writes may leave trie data ahead for replay of the same ordered block.
+//! Separate hashing and history recovery supports the older per-block writer.
 
 use alloy_consensus::BlockHeader;
 use alloy_primitives::BlockNumber;
@@ -24,11 +25,10 @@ use reth_storage_errors::provider::RootMismatch;
 use reth_trie_parallel::nested_hash::NestedStateRoot;
 use tracing::{info, warn};
 
-/// Helper for recovering storage state after interrupted block writes.
+/// Helper for recovering stages that lag the durable Execution checkpoint.
 ///
-/// This helper is designed to work with `RocksDB`'s `WriteBatch` model, where each stage
-/// commits independently. When a block write is interrupted, this helper can recover
-/// the incomplete stages by checking the stage checkpoints and rebuilding the missing data.
+/// Merkle can lag after an interrupted trie commit. Hashing and history advance atomically
+/// with Execution in that protocol; their incremental recovery supports older datadirs.
 #[derive(Debug)]
 pub struct StorageRecoveryHelper<'a, N: ProviderNodeTypes> {
     factory: &'a ProviderFactory<N>,
@@ -40,79 +40,30 @@ impl<'a, N: ProviderNodeTypes> StorageRecoveryHelper<'a, N> {
         Self { factory }
     }
 
-    /// Check checkpoints and recover any unfinished block writes.
+    /// Recover stages whose checkpoints lag the durable Execution checkpoint.
     ///
-    /// # Recovery Logic and Correctness Guarantees
+    /// `recover_block_number` reads Execution and `best_block_number` reads Finish, both from
+    /// `state_db`. A difference can indicate an interrupted legacy write. Equal checkpoints do
+    /// not establish that both trie databases currently represent that same block.
     ///
-    /// This method detects and recovers from interrupted block writes by leveraging the
-    /// checkpoint-based commit ordering described in `Tx::commit`. The recovery process
-    /// ensures data consistency even when trie commits succeed but state commits fail.
+    /// Recovery runs in dependency order: hashing reads changeset keys and their current plain
+    /// values; Merkle reads those keys' current hashed values; history indexes changesets.
+    /// Each branch only rebuilds the affected interval after its own checkpoint.
     ///
-    /// ## Detection: Checkpoint Comparison
+    /// The writer commits static files, then state, then both trie batches in parallel. Its
+    /// state batch includes plain state, hashed state, history and Execution, but leaves Merkle
+    /// at the previous height until a separate completion commit. Incremental Merkle recovery
+    /// repairs the affected block/group range before advancing completion. Recovery commits
+    /// trie batches before saving the Merkle checkpoint.
     ///
-    /// We compare two critical checkpoints:
-    /// - `recover_block_number`: The execution checkpoint from `state_db`, indicating the last
-    ///   block whose state commit completed successfully
-    /// - `best_block_number`: The highest block number that has been fully executed
+    /// An older per-block writer can leave trie data at N+1 while Execution remains N. Gravity
+    /// consensus restarts execution and commitment from Execution + 1 with the same ordered
+    /// block. Reapplying that block's complete absolute account/storage changes is idempotent,
+    /// including deletes and storage wipes, even when only one trie batch previously committed.
     ///
-    /// If these don't match, it means execution progressed beyond the last successful
-    /// state commit, indicating an interrupted block write.
-    ///
-    /// ## Why Interruption Happens: Partial Commit Failures
-    ///
-    /// During parallel execution (`state_handle` + `trie_handle` in persistence.rs), several
-    /// failure scenarios can leave orphaned data:
-    ///
-    /// 1. **State commit succeeds, trie commit fails**: No orphaned data, but trie is incomplete.
-    ///    Stages need to be re-executed.
-    ///
-    /// 2. **Trie commits succeed, state commit fails**: Account and storage trie data is written to
-    ///    disk, but no checkpoint is recorded in `state_db` (since `state_batch` is committed last
-    ///    in `Tx::commit`). This leaves orphaned trie data.
-    ///
-    /// 3. **Partial trie commit**: Account trie succeeds but storage trie fails (or vice versa).
-    ///    State commit never happens, so no checkpoint is written. Leaves partial orphaned trie
-    ///    data.
-    ///
-    /// ## Recovery Strategy: Stage-by-Stage Rebuild
-    ///
-    /// We recover by re-executing stages in dependency order, using each stage's checkpoint
-    /// to determine what needs to be rebuilt:
-    ///
-    /// 1. **`AccountHashing`**: Rebuild hashed account/storage state from plain state.
-    ///    - Reads changed accounts/storages from history indices
-    ///    - Idempotent: re-hashing the same data produces identical hashes
-    ///
-    /// 2. **`MerkleExecute`**: Rebuild account and storage trie nodes.
-    ///    - Reads hashed state from `AccountHashing` stage
-    ///    - **Idempotent**: Writing the same trie node data overwrites orphaned data with identical
-    ///      content, producing a consistent trie structure
-    ///
-    /// 3. **`IndexAccountHistory`**: Rebuild history indices for changed accounts/storages.
-    ///    - Reads account/storage changes from plain state
-    ///    - Idempotent: re-indexing the same changes produces identical indices
-    ///
-    /// ## Why This Works: Checkpoint-Driven Idempotency
-    ///
-    /// Each stage checks its own checkpoint (stored in `state_db`) to determine if it needs
-    /// to re-execute. Since all checkpoints are in `state_db` and `state_batch` is committed
-    /// last (see `Tx::commit`), the checkpoint accurately reflects which stages completed:
-    ///
-    /// - If a stage's checkpoint is behind `recover_block_number`, it means the stage's data commit
-    ///   may have succeeded but the checkpoint write (in `state_batch`) failed.
-    /// - Re-executing the stage is safe because all stage operations are idempotent.
-    /// - Orphaned trie data from failed commits is harmlessly overwritten with identical data
-    ///   during recovery.
-    ///
-    /// ## Correctness Guarantee
-    ///
-    /// After recovery completes, all stages are brought to `recover_block_number`, and
-    /// the pipeline stages are updated to reflect this. The system state is consistent:
-    /// - Plain state reflects execution up to `recover_block_number`
-    /// - Hashed state matches plain state
-    /// - Trie nodes correctly represent hashed state
-    /// - History indices correctly track all state changes
-    /// - All checkpoints are synchronized at `recover_block_number`
+    /// That replay happens in the execution/consensus layer, not in this helper. Temporary trie
+    /// inconsistency until replay completes is accepted by this protocol; neither checkpoint
+    /// normalization below nor successful return certifies a consistent cross-database trie view.
     pub fn check_and_recover(&self) -> ProviderResult<()> {
         let provider_ro = self.factory.database_provider_ro()?;
         let recover_block_number = provider_ro.recover_block_number()?;
@@ -123,23 +74,20 @@ impl<'a, N: ProviderNodeTypes> StorageRecoveryHelper<'a, N> {
             info!(target: "engine::recovery", recover_block = ?recover_block_number, best_block = ?best_block_number, "Detected interrupted block write, starting recovery");
         }
 
-        // Stage 1: Recover AccountHashing
+        // Older writers committed state stages separately. Preserve their dependency order.
         self.recover_hashing(recover_block_number)?;
-
-        // Stage 2: Recover MerkleExecute
         self.recover_merkle(recover_block_number)?;
-
-        // Stage 3: Recover IndexAccountHistory
         self.recover_history_indices(recover_block_number)?;
 
         let provider_rw = self.factory.database_provider_rw()?;
+        // Normalize metadata after recovery; this does not roll back tries ahead of Execution.
         provider_rw.update_pipeline_stages(recover_block_number, false)?;
         provider_rw.commit()?;
         info!(target: "engine::recovery", recover_block_number = ?recover_block_number, "Recovery completed successfully");
         Ok(())
     }
 
-    /// Recover `AccountHashing` stage if needed.
+    /// Rebuild hashed state when a legacy `AccountHashing` checkpoint lags Execution.
     fn recover_hashing(&self, block_number: BlockNumber) -> ProviderResult<()> {
         let provider_rw = self.factory.database_provider_rw()?;
         let ck = provider_rw
@@ -150,12 +98,10 @@ impl<'a, N: ProviderNodeTypes> StorageRecoveryHelper<'a, N> {
 
         if ck.block_number < block_number {
             info!(target: "engine::recovery", checkpoint = ?ck.block_number, block_number = ?block_number, "Recovering hashing state");
-            // rebuild hashing account
             let lists =
                 provider_rw.changed_accounts_with_range(ck.block_number + 1..=block_number)?;
             let accounts = provider_rw.basic_accounts(lists)?;
             provider_rw.insert_account_for_hashing(accounts)?;
-            // rebuild hashing storage
             let lists =
                 provider_rw.changed_storages_with_range(ck.block_number + 1..=block_number)?;
             let storages = provider_rw.plain_state_storages(lists)?;
@@ -175,7 +121,7 @@ impl<'a, N: ProviderNodeTypes> StorageRecoveryHelper<'a, N> {
         Ok(())
     }
 
-    /// Recover `MerkleExecute` stage if needed.
+    /// Rebuild V2 tries when `MerkleExecute` lags durable Execution.
     fn recover_merkle(&self, block_number: BlockNumber) -> ProviderResult<()> {
         let provider_rw = self.factory.database_provider_rw()?;
         let ck = provider_rw
@@ -184,10 +130,8 @@ impl<'a, N: ProviderNodeTypes> StorageRecoveryHelper<'a, N> {
             .map_err(ProviderError::Database)?
             .unwrap_or_default();
 
-        // Merkle can be ahead when its parallel commit wins the race with a failed state commit.
-        // Gravity consensus never replaces an ordered block, so recovery will replay the same
-        // block with absolute state values. Trie upserts and deletes are idempotent; retaining the
-        // ahead trie lets that replay overwrite identical nodes and complete any missing trie DB.
+        // Legacy per-block writes can leave trie data ahead of Execution, with Merkle either
+        // ahead or unchanged. Retain it for replay of the same ordered block.
         if ck.block_number < block_number {
             info!(target: "engine::recovery", checkpoint = ?ck.block_number, block_number = ?block_number, "Recovering merkle state");
             let nested_state_root = NestedStateRoot::new(provider_rw.tx_ref(), None);
@@ -223,6 +167,8 @@ impl<'a, N: ProviderNodeTypes> StorageRecoveryHelper<'a, N> {
             }
 
             provider_rw.write_trie_updatesv2(&trie_updates_v2).map_err(ProviderError::Database)?;
+            // Finish both trie writes before a state-first commit can record completion.
+            provider_rw.tx_ref().commit_view().map_err(ProviderError::Database)?;
 
             provider_rw
                 .tx_ref()
@@ -238,7 +184,7 @@ impl<'a, N: ProviderNodeTypes> StorageRecoveryHelper<'a, N> {
         Ok(())
     }
 
-    /// Recover `IndexAccountHistory` stage if needed.
+    /// Rebuild history indices when a legacy `IndexAccountHistory` checkpoint lags Execution.
     fn recover_history_indices(&self, block_number: BlockNumber) -> ProviderResult<()> {
         let provider_rw = self.factory.database_provider_rw()?;
         let ck = provider_rw

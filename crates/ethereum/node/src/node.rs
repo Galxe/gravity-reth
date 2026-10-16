@@ -34,7 +34,7 @@ use reth_node_builder::{
     BuilderContext, DebugNode, Node, NodeAdapter, PayloadBuilderConfig,
 };
 use reth_payload_primitives::PayloadTypes;
-use reth_provider::{providers::ProviderFactoryBuilder, EthStorage};
+use reth_provider::{providers::ProviderFactoryBuilder, EthStorage, ProviderReadView};
 use reth_rpc::{
     eth::core::{EthApiFor, EthRpcConverterFor},
     TestingApi, ValidationApi,
@@ -323,7 +323,7 @@ where
         ctx: reth_node_api::AddOnsContext<'_, N>,
     ) -> eyre::Result<Self::Handle> {
         let validation_api = ValidationApi::<_, _, <N::Types as NodeTypes>::Payload>::new(
-            ctx.node.provider().clone(),
+            ctx.node.provider().rpc_provider(),
             Arc::new(ctx.node.consensus().clone()),
             ctx.node.evm_config().clone(),
             ctx.config.rpc.flashbots_config(),
@@ -331,8 +331,10 @@ where
             Arc::new(EthereumEngineValidator::new(ctx.config.chain.clone())),
         );
 
-        let eth_config =
-            EthConfigHandler::new(ctx.node.provider().clone(), ctx.node.evm_config().clone());
+        let eth_config = EthConfigHandler::new(
+            ctx.node.provider().rpc_provider(),
+            ctx.node.evm_config().clone(),
+        );
 
         let testing_skip_invalid_transactions = ctx.config.rpc.testing_skip_invalid_transactions;
         let testing_gas_limit_override = ctx.config.rpc.testing_gas_limit;
@@ -544,22 +546,24 @@ where
         let blob_store =
             reth_node_builder::components::create_blob_store_with_cache(ctx, blob_cache_size)?;
 
-        let validator =
-            TransactionValidationTaskExecutor::eth_builder(ctx.provider().clone(), evm_config)
-                // Gravity does not support EIP-4844: blob txs can never be executed (the pipe-exec
-                // layer drops every type-3 tx before grevm), so reject them at the pool validator.
-                // This is origin-independent, so it covers every mempool ingress — RPC
-                // `eth_sendRawTransaction` (Local) and PFN broadcast (External via
-                // `add_external_transaction`) alike.
-                .no_eip4844()
-                .kzg_settings(ctx.kzg_settings()?)
-                .with_max_tx_input_bytes(ctx.config().txpool.max_tx_input_bytes)
-                .with_local_transactions_config(pool_config.local_transactions_config.clone())
-                .set_tx_fee_cap(ctx.config().rpc.rpc_tx_fee_cap)
-                .with_max_tx_gas_limit(ctx.config().txpool.max_tx_gas_limit)
-                .with_minimum_priority_fee(ctx.config().txpool.minimum_priority_fee)
-                .with_additional_tasks(ctx.config().txpool.additional_validation_tasks)
-                .build_with_tasks(ctx.task_executor().clone(), blob_store.clone());
+        let validator = TransactionValidationTaskExecutor::eth_builder(
+            ctx.provider().rpc_provider(),
+            evm_config,
+        )
+        // Gravity does not support EIP-4844: blob txs can never be executed (the pipe-exec
+        // layer drops every type-3 tx before grevm), so reject them at the pool validator.
+        // This is origin-independent, so it covers every mempool ingress — RPC
+        // `eth_sendRawTransaction` (Local) and PFN broadcast (External via
+        // `add_external_transaction`) alike.
+        .no_eip4844()
+        .kzg_settings(ctx.kzg_settings()?)
+        .with_max_tx_input_bytes(ctx.config().txpool.max_tx_input_bytes)
+        .with_local_transactions_config(pool_config.local_transactions_config.clone())
+        .set_tx_fee_cap(ctx.config().rpc.rpc_tx_fee_cap)
+        .with_max_tx_gas_limit(ctx.config().txpool.max_tx_gas_limit)
+        .with_minimum_priority_fee(ctx.config().txpool.minimum_priority_fee)
+        .with_additional_tasks(ctx.config().txpool.additional_validation_tasks)
+        .build_with_tasks(ctx.task_executor().clone(), blob_store.clone());
 
         if validator.validator().eip4844() {
             // initializing the KZG settings can be expensive, this should be done upfront so that

@@ -4,22 +4,18 @@ use crate::{
     EthereumConsensusBuilder, EthereumNetworkBuilder, EthereumNode, EthereumPayloadBuilder,
     EthereumPoolBuilder,
 };
-use alloy_consensus::Header;
-use alloy_primitives::{Address, B256, U256};
 use reth_chainspec::ChainSpec;
 use reth_ethereum_engine_primitives::{EthBuiltPayload, EthPayloadAttributes};
-use reth_ethereum_primitives::{EthPrimitives, Receipt};
-use reth_evm_ethereum::{GravityChainReader, GravityEvmConfig};
+use reth_ethereum_primitives::EthPrimitives;
+use reth_evm_ethereum::GravityEvmConfig;
+pub use reth_evm_ethereum::ProviderChainReader;
 use reth_node_builder::{
     components::{BasicPayloadServiceBuilder, ComponentsBuilder, ExecutorBuilder},
     node::{FullNodeTypes, NodeTypes},
     BuilderContext,
 };
 use reth_payload_primitives::PayloadTypes;
-use reth_provider::{
-    BlockHashReader, HeaderProvider, ProviderResult, ReceiptProvider, StateProviderFactory,
-};
-use std::{fmt::Debug, sync::Arc};
+use std::sync::Arc;
 
 impl EthereumNode {
     /// Returns a [`ComponentsBuilder`] configured for a Gravity node: the Ethereum components
@@ -60,45 +56,5 @@ where
         // the pipe made canonical are readable before they are persisted.
         let reader = ProviderChainReader(ctx.provider().clone());
         Ok(GravityEvmConfig::new(ctx.chain_spec(), Arc::new(reader)))
-    }
-}
-
-/// [`GravityChainReader`] over a node provider.
-#[derive(Debug, Clone)]
-pub struct ProviderChainReader<P>(pub P);
-
-impl<P> GravityChainReader for ProviderChainReader<P>
-where
-    P: HeaderProvider<Header = Header>
-        + BlockHashReader
-        + ReceiptProvider<Receipt = Receipt>
-        + StateProviderFactory
-        + Debug
-        + Send
-        + Sync,
-{
-    fn mix_hash_by_number(&self, number: u64) -> ProviderResult<Option<B256>> {
-        Ok(self.0.header_by_number(number)?.map(|header| header.mix_hash))
-    }
-
-    fn canonical_hash(&self, number: u64) -> ProviderResult<Option<B256>> {
-        self.0.block_hash(number)
-    }
-
-    fn header_timestamp(&self, hash: B256) -> ProviderResult<Option<u64>> {
-        Ok(self.0.header(&hash)?.map(|header| header.timestamp))
-    }
-
-    fn receipts_by_block_hash(&self, hash: B256) -> ProviderResult<Option<Vec<Receipt>>> {
-        self.0.receipts_by_block(hash.into())
-    }
-
-    fn storage_after_block(
-        &self,
-        hash: B256,
-        address: Address,
-        slot: B256,
-    ) -> ProviderResult<Option<U256>> {
-        self.0.state_by_block_hash(hash)?.storage(address, slot)
     }
 }

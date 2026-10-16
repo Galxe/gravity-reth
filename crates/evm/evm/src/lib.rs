@@ -20,7 +20,7 @@ extern crate alloc;
 use crate::execute::{BasicBlockBuilder, Executor};
 #[cfg(feature = "std")]
 use alloc::boxed::Box;
-use alloc::vec::Vec;
+use alloc::{sync::Arc, vec::Vec};
 use alloy_eips::eip4895::Withdrawals;
 use alloy_evm::{
     block::{BlockExecutorFactory, BlockExecutorFor},
@@ -482,20 +482,6 @@ pub trait ConfigureEvm: Clone + Debug + Send + Sync + Unpin {
         BasicBlockExecutor::new(self, db)
     }
 
-    /// Returns a copy of this configuration that executes blocks as committed chain blocks.
-    ///
-    /// Gravity: an endpoint that replays a block it read from the chain by number or hash uses
-    /// this copy, so the block executor reproduces the block-level steps the chain applied to
-    /// it, including one-shot hardfork changes. Every other block (simulated, caller-provided,
-    /// pending, engine payload) gets only Ethereum's block-level steps and uses the configuration
-    /// as is.
-    ///
-    /// Default: returns an unchanged copy, for configurations without such steps.
-    #[auto_impl(keep_default_for(&, Arc))]
-    fn chain_block_mode(&self) -> Self {
-        self.clone()
-    }
-
     /// Executes a single system transaction directly against the given database state and commits
     /// the resulting state changes immediately.
     ///
@@ -517,6 +503,55 @@ pub trait ConfigureEvm: Clone + Debug + Send + Sync + Unpin {
         &self,
         db: DB,
     ) -> Box<dyn ParallelExecutor<Primitives = Self::Primitives, Error = BlockExecutionError> + 'a>;
+}
+
+/// An owned EVM configuration that can bind auxiliary chain reads to a request's provider.
+///
+/// Unlike borrowed configurations, an owned configuration can retain a newly captured provider.
+/// [`Arc`] configurations rebuild their inner configuration while preserving the original.
+pub trait ConfigureEvmForRead: ConfigureEvm {
+    /// Returns a copy that replays blocks with the chain's block-level execution steps.
+    ///
+    /// Gravity uses this for committed blocks, including their one-shot hardfork changes.
+    /// Simulated, caller-provided and pending blocks retain the ordinary execution mode.
+    /// Configurations without chain-specific replay steps retain their existing configuration.
+    fn chain_block_mode(&self) -> Self {
+        self.clone()
+    }
+
+    /// Uses a request's fixed provider for chain reads outside the EVM database.
+    /// Configurations without auxiliary chain reads retain their existing configuration.
+    fn with_read_provider<P>(&self, _provider: P) -> Self
+    where
+        P: reth_storage_api::HeaderProvider<Header = HeaderTy<Self::Primitives>>
+            + reth_storage_api::ReceiptProvider<Receipt = ReceiptTy<Self::Primitives>>
+            + reth_storage_api::BlockHashReader
+            + reth_storage_api::StateProviderFactory
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.clone()
+    }
+}
+
+impl<T: ConfigureEvmForRead> ConfigureEvmForRead for Arc<T> {
+    fn chain_block_mode(&self) -> Self {
+        Self::new(self.as_ref().chain_block_mode())
+    }
+
+    fn with_read_provider<P>(&self, provider: P) -> Self
+    where
+        P: reth_storage_api::HeaderProvider<Header = HeaderTy<Self::Primitives>>
+            + reth_storage_api::ReceiptProvider<Receipt = ReceiptTy<Self::Primitives>>
+            + reth_storage_api::BlockHashReader
+            + reth_storage_api::StateProviderFactory
+            + Send
+            + Sync
+            + 'static,
+    {
+        Self::new(self.as_ref().with_read_provider(provider))
+    }
 }
 
 /// Represents additional attributes required to configure the next block.

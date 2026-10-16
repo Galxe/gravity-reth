@@ -25,7 +25,9 @@ use report::MismatchReport;
 use reth_node_builder::EngineNodeLauncher;
 use reth_node_ethereum::{node::EthereumAddOns, EthereumNode};
 use reth_pipe_exec_layer_ext_v2::{new_pipe_exec_layer_api, ExecutionArgs};
-use reth_provider::{providers::BlockchainProvider, BlockHashReader, HeaderProvider};
+use reth_provider::{
+    providers::BlockchainProvider, BlockHashReader, HeaderProvider, ProviderReadView,
+};
 use rpc::RpcClient;
 use std::{
     collections::BTreeMap,
@@ -149,6 +151,7 @@ async fn run_timeline(builder: Builder, timeline: Timeline) -> eyre::Result<()> 
 
         // The RPC client blocks on HTTP while the node serves it from its own runtime.
         tokio::task::block_in_place(|| {
+            let provider = provider.consistent_view().unwrap();
             let mut block_report = report.for_block(block.number, phase);
             replay::check_block(&provider, &rpc, &block, phase, &mut block_report);
             scenarios.after_commit(&chain, &block, &mut block_report);
@@ -193,6 +196,7 @@ async fn run_timeline(builder: Builder, timeline: Timeline) -> eyre::Result<()> 
     // gating, precompile set, gas exemption, Gamma migration), not the node's latest block;
     // right after commit the two coincide, so only this pass tells them apart.
     tokio::task::block_in_place(|| {
+        let provider = provider.consistent_view().unwrap();
         for (block, phase) in &blocks {
             let mut block_report = report.for_block_after_timeline(block.number, *phase);
             replay::check_block(&provider, &rpc, block, *phase, &mut block_report);
@@ -200,7 +204,10 @@ async fn run_timeline(builder: Builder, timeline: Timeline) -> eyre::Result<()> 
     });
 
     // Step 5: replays spanning many blocks reproduce them too.
-    tokio::task::block_in_place(|| replay::check_blocks(&provider, &rpc, &blocks, &mut report));
+    tokio::task::block_in_place(|| {
+        let provider = provider.consistent_view().unwrap();
+        replay::check_blocks(&provider, &rpc, &blocks, &mut report)
+    });
 
     // Step 6: every replay reproduced the committed blocks.
     report.assert_empty();

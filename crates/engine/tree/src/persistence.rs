@@ -5,17 +5,18 @@ use crossbeam_channel::Sender as CrossbeamSender;
 use gravity_primitives::get_gravity_config;
 use reth_chain_state::{ExecutedBlock, ExecutedBlockWithTrieUpdates};
 use reth_db::{
-    set_fail_point, tables,
+    tables,
     transaction::{DbTx, DbTxMut},
+    Database,
 };
 use reth_errors::ProviderError;
 use reth_ethereum_primitives::EthPrimitives;
 use reth_primitives_traits::NodePrimitives;
 use reth_provider::{
     providers::ProviderNodeTypes, writer::UnifiedStorageWriter, BlockHashReader, BlockWriter,
-    ChainStateBlockWriter, DatabaseProviderFactory, HistoryWriter, ProviderFactory,
+    ChainStateBlockWriter, DatabaseProvider, DatabaseProviderFactory, ProviderFactory,
     StageCheckpointWriter, StateWriter, StaticFileProviderFactory, StaticFileWriter,
-    StorageLocation, StorageSettingsCache, TrieWriter, TrieWriterV2, PERSIST_BLOCK_CACHE,
+    StorageLocation, TrieWriter, TrieWriterV2, PERSIST_BLOCK_CACHE,
 };
 use reth_prune::{PrunerError, PrunerWithFactory};
 use reth_stages_api::{MetricEvent, MetricEventsSender, StageCheckpoint, StageId};
@@ -26,7 +27,6 @@ use std::{
         mpsc::{Receiver, SendError, Sender},
         Arc,
     },
-    thread,
     thread::JoinHandle,
     time::{Duration, Instant},
 };
@@ -111,7 +111,6 @@ where
     /// This is the main loop, that will listen to database events and perform the requested
     /// database actions
     pub fn run(mut self) -> Result<(), PersistenceError> {
-        // If the receiver errors then senders have disconnected, so the loop should then end.
         while let Ok(action) = self.incoming.recv() {
             match action {
                 PersistenceAction::RemoveBlocksAbove(new_tip_num, sender) => {
@@ -153,8 +152,8 @@ where
     ) -> Result<Option<BlockNumHash>, PersistenceError> {
         debug!(target: "engine::persistence", ?new_tip_num, "Removing blocks");
         let start_time = Instant::now();
-        let provider_rw = self.provider.database_provider_rw()?;
         let sf_provider = self.provider.static_file_provider();
+        let provider_rw = self.provider.database_provider_rw()?;
 
         let new_tip_hash = provider_rw.block_hash(new_tip_num)?;
         UnifiedStorageWriter::from(&provider_rw, &sf_provider).remove_blocks_above(new_tip_num)?;
@@ -189,15 +188,6 @@ where
         Ok(ck)
     }
 
-    fn update_checkpoint<TX: DbTxMut>(
-        tx: &TX,
-        stage_id: StageId,
-        checkpoint: StageCheckpoint,
-    ) -> Result<(), ProviderError> {
-        tx.put::<tables::StageCheckpoints>(stage_id.to_string(), checkpoint)
-            .map_err(ProviderError::Database)
-    }
-
     #[instrument(level = "debug", target = "engine::persistence", skip_all, fields(block_count = blocks.len()))]
     fn on_save_blocks(
         &mut self,
@@ -207,38 +197,33 @@ where
         let last_block = blocks.last().map(|b| b.recovered_block.num_hash());
         let block_count = blocks.len();
 
-        let pending_finalized = self.pending_finalized_block.take();
-        let pending_safe = self.pending_safe_block.take();
-
         debug!(target: "engine::persistence", ?block_count, first=?first_block, last=?last_block, "Saving range of blocks");
 
         let start_time = Instant::now();
 
         if let Some(last) = last_block {
-            // gravity write path: staged per-block commits or merged-group commits
-            // (both write trie_updatesv2 internally).
             if get_gravity_config().persist_merge_blocks {
                 self.save_merged_blocks(blocks)?;
             } else {
                 self.save_blocks_per_block(blocks)?;
             }
 
-            // Pipeline progress and any deferred finalized/safe markers share one commit.
-            let provider_rw = self.provider.database_provider_rw()?;
-            provider_rw.update_pipeline_stages(last.number, false)?;
-            if let Some(finalized) = pending_finalized {
-                provider_rw.save_finalized_block_number(finalized.min(last.number))?;
-                if finalized > last.number {
-                    self.pending_finalized_block = Some(finalized);
+            // Safe/finalized are independent metadata; block completion checkpoints are already
+            // durable. An empty save must retain pending markers for the next non-empty save.
+            if self.pending_finalized_block.is_some() || self.pending_safe_block.is_some() {
+                let provider_rw = self.provider.database_provider_rw()?;
+                if let Some(finalized) = self.pending_finalized_block {
+                    provider_rw.save_finalized_block_number(finalized.min(last.number))?;
                 }
-            }
-            if let Some(safe) = pending_safe {
-                provider_rw.save_safe_block_number(safe.min(last.number))?;
-                if safe > last.number {
-                    self.pending_safe_block = Some(safe);
+                if let Some(safe) = self.pending_safe_block {
+                    provider_rw.save_safe_block_number(safe.min(last.number))?;
                 }
+                provider_rw.commit()?;
+                self.pending_finalized_block =
+                    self.pending_finalized_block.filter(|number| *number > last.number);
+                self.pending_safe_block =
+                    self.pending_safe_block.filter(|number| *number > last.number);
             }
-            provider_rw.commit()?;
             debug!(target: "engine::persistence", first=?first_block, last=?last_block, "Saved range of blocks");
         }
 
@@ -265,9 +250,7 @@ where
         Ok(())
     }
 
-    /// Persist `blocks` one at a time, committing each block per stage (state / hashed / history /
-    /// trie) before moving on. This is the durable default: a crash never loses more than the
-    /// single block in flight.
+    /// Persist each block's main data atomically per database, then record trie completion.
     fn save_blocks_per_block(
         &self,
         blocks: Vec<ExecutedBlockWithTrieUpdates<N::Primitives>>,
@@ -278,154 +261,65 @@ where
             triev2,
         } in blocks
         {
+            let start = Instant::now();
             let block_number = recovered_block.number();
             let block_hash = recovered_block.hash();
-            let inner_provider = &self.provider;
-            info!(target: "persistence::save_block", block_number = block_number, "Write block updates into DB");
+            info!(target: "persistence::save_block", block_number, "Write block updates into DB");
+            let provider_rw = self.provider.database_provider_rw()?;
 
-            // Parallel execution of state and trie updates is safe because the database is
-            // split into three separate RocksDB instances: state_db (for state and history),
-            // account_db (for account trie), and storage_db (for storage trie). This allows
-            // concurrent writes and commits across different DB instances without conflicts.
-            // The `write_trie_updatesv2` implementation also parallelizes writes to account_db
-            // and storage_db internally. For fault tolerance, stage checkpoints ensure
-            // idempotency - each stage's checkpoint is verified before writing, guaranteeing
-            // exactly-once execution even if the process crashes mid-block.
-            thread::scope(|scope| -> Result<(), PersistenceError> {
-                let state_handle = scope.spawn(|| -> Result<(), PersistenceError> {
-                    let start = Instant::now();
-                    let provider_rw = inner_provider.database_provider_rw()?;
-                    let ck = Self::get_checkpoint(
-                        provider_rw.tx_ref(),
-                        StageId::Execution,
-                        Some(block_number),
-                    )?;
-                    let body_indices = provider_rw.insert_block(
-                        Arc::unwrap_or_clone(recovered_block),
-                        StorageLocation::Both,
-                    )?;
-                    set_fail_point!("persistence::after_write_state");
-                    // Write state and changesets to the database.
-                    // Must be written after blocks because of the receipt lookup.
-                    provider_rw.write_state_with_indices(
-                        &execution_output,
-                        OriginalValuesKnown::No,
-                        StorageLocation::StaticFiles,
-                        Some(vec![body_indices]),
-                    )?;
-                    Self::update_checkpoint(
-                        provider_rw.tx_ref(),
-                        StageId::Execution,
-                        StageCheckpoint { block_number, ..ck },
-                    )?;
-                    provider_rw.static_file_provider().commit()?;
-                    provider_rw.commit()?;
-                    set_fail_point!("persistence::after_state_commit");
-                    metrics::histogram!("save_blocks_time", &[("process", "write_state")])
-                        .record(start.elapsed());
+            for stage in [StageId::Execution, StageId::AccountHashing, StageId::IndexAccountHistory]
+            {
+                Self::get_checkpoint(provider_rw.tx_ref(), stage, Some(block_number))?;
+            }
 
-                    let start = Instant::now();
-                    let provider_rw = inner_provider.database_provider_rw()?;
-                    let ck = Self::get_checkpoint(
-                        provider_rw.tx_ref(),
-                        StageId::AccountHashing,
-                        Some(block_number),
-                    )?;
-                    // insert hashes and intermediate merkle nodes
-                    provider_rw
-                        .write_hashed_state(&Arc::unwrap_or_clone(hashed_state).into_sorted())?;
-                    set_fail_point!("persistence::after_hashed_state");
-                    Self::update_checkpoint(
-                        provider_rw.tx_ref(),
-                        StageId::AccountHashing,
-                        StageCheckpoint { block_number, ..ck },
-                    )?;
-                    provider_rw.commit()?;
-                    set_fail_point!("persistence::after_hashed_state_commit");
-                    metrics::histogram!("save_blocks_time", &[("process", "write_hashed_state")])
-                        .record(start.elapsed());
+            let body_indices = provider_rw
+                .insert_block(Arc::unwrap_or_clone(recovered_block), StorageLocation::Both)?;
+            // History consumes the keys actually written to changesets, including slots discovered
+            // by a storage wipe. A RocksDB cursor cannot read this transaction's pending writes.
+            provider_rw.write_state_with_indices_and_history(
+                &execution_output,
+                OriginalValuesKnown::No,
+                StorageLocation::StaticFiles,
+                Some(vec![body_indices]),
+            )?;
+            provider_rw.write_hashed_state(&Arc::unwrap_or_clone(hashed_state).into_sorted())?;
+            provider_rw.write_trie_updates(
+                trie.as_ref().ok_or(ProviderError::MissingTrieUpdates(block_hash))?,
+            )?;
+            provider_rw.write_trie_updatesv2(triev2.as_ref()).map_err(ProviderError::Database)?;
 
-                    let start = Instant::now();
-                    let provider_rw = inner_provider.database_provider_rw()?;
-                    let ck = Self::get_checkpoint(
-                        provider_rw.tx_ref(),
-                        StageId::IndexAccountHistory,
-                        Some(block_number),
-                    )?;
-                    provider_rw.update_history_indices(block_number..=block_number)?;
-                    set_fail_point!("persistence::after_history_indices");
-                    Self::update_checkpoint(
-                        provider_rw.tx_ref(),
-                        StageId::IndexAccountHistory,
-                        StageCheckpoint { block_number, ..ck },
-                    )?;
-                    provider_rw.commit()?;
-                    set_fail_point!("persistence::after_history_commit");
-                    metrics::histogram!(
-                        "save_blocks_time",
-                        &[("process", "update_history_indices")]
-                    )
-                    .record(start.elapsed());
-                    Ok(())
-                });
-                let trie_handle = scope.spawn(|| -> Result<(), PersistenceError> {
-                    let start = Instant::now();
-                    let provider_rw = inner_provider.database_provider_rw()?;
-                    let ck =
-                        Self::get_checkpoint(provider_rw.tx_ref(), StageId::MerkleExecute, None)?;
-                    if ck.block_number + 1 != block_number {
-                        info!(target: "persistence::trie_update",
-                            checkpoint = ck.block_number,
-                            block_number = block_number,
-                            "Detected interrupted trie update, but trie has idempotency");
-                    }
-                    provider_rw.write_trie_updates(
-                        trie.as_ref().ok_or(ProviderError::MissingTrieUpdates(block_hash))?,
-                    )?;
-                    provider_rw
-                        .write_trie_updatesv2(triev2.as_ref())
-                        .map_err(ProviderError::Database)?;
-                    set_fail_point!("persistence::after_trie_update");
-                    Self::update_checkpoint(
-                        provider_rw.tx_ref(),
-                        StageId::MerkleExecute,
-                        StageCheckpoint { block_number, ..ck },
-                    )?;
-                    provider_rw.commit()?;
-                    set_fail_point!("persistence::after_trie_commit");
-                    metrics::histogram!("save_blocks_time", &[("process", "write_trie_updatesv2")])
-                        .record(start.elapsed());
-                    Ok(())
-                });
-                state_handle.join().unwrap()?;
-                trie_handle.join().unwrap()
-            })?;
-            PERSIST_BLOCK_CACHE.persist_tip(block_number);
+            self.commit_persistence_unit(provider_rw, block_number)?;
+            metrics::histogram!("save_blocks_time", &[("process", "atomic_block")])
+                .record(start.elapsed());
         }
         Ok(())
     }
 
     /// Persist `blocks` as a sequence of merged groups. Groups are bounded by
-    /// [`MERGE_GROUP_MAX_GAS`] and [`MERGE_GROUP_MAX_STATE`] so the in-flight write batch and the
-    /// crash-replay window stay bounded.
+    /// [`MERGE_GROUP_MAX_GAS`] and [`MERGE_GROUP_MAX_STATE`] to bound the in-flight write batch.
+    /// A block that wipes storage starts a new group, so its changeset scan sees committed slots.
     fn save_merged_blocks(
         &self,
         blocks: Vec<ExecutedBlockWithTrieUpdates<N::Primitives>>,
     ) -> Result<(), PersistenceError> {
-        if self.provider.cached_storage_settings().changesets_in_static_files {
-            return Err(PersistenceError::MergeBlocksWithStorageV2)
-        }
-
         let mut group: Vec<ExecutedBlockWithTrieUpdates<N::Primitives>> = Vec::new();
         let mut group_gas = 0u64;
         let mut group_state = 0usize;
         for block in blocks {
             let gas = block.recovered_block().header().gas_used();
             let state = block.hashed_state().accounts.len();
-            // Close the current (non-empty) group before it would cross a bound; a single block
-            // that alone exceeds a bound becomes its own group.
+            // Wipe reverts include untouched slots read from plain storage. Commit earlier blocks
+            // as a complete group before this scan, rather than flushing partial block data.
+            let wipes_storage = block
+                .execution_outcome()
+                .bundle
+                .reverts
+                .iter()
+                .flatten()
+                .any(|(_, revert)| revert.wipe_storage);
             if !group.is_empty() &&
-                (group_gas.saturating_add(gas) > MERGE_GROUP_MAX_GAS ||
+                (wipes_storage ||
+                    group_gas.saturating_add(gas) > MERGE_GROUP_MAX_GAS ||
                     group_state.saturating_add(state) > MERGE_GROUP_MAX_STATE)
             {
                 self.commit_block_group(std::mem::take(&mut group))?;
@@ -441,9 +335,9 @@ where
 
     /// Write one contiguous group of executed blocks with amortized commits.
     ///
-    /// State and changesets are flushed once before history indexing because `RocksDB` batches do
-    /// not provide read-your-writes. History and stage checkpoints are committed together
-    /// afterwards, so recovery can replay a group interrupted between the two commits.
+    /// History inputs are collected while writing the group's changesets, and each history key is
+    /// appended once. No block's state becomes visible before its other `state_db` data is
+    /// complete.
     fn commit_block_group(
         &self,
         group: Vec<ExecutedBlockWithTrieUpdates<N::Primitives>>,
@@ -474,33 +368,28 @@ where
         }
 
         let provider_rw = self.provider.database_provider_rw()?;
+        for stage in [StageId::Execution, StageId::AccountHashing, StageId::IndexAccountHistory] {
+            Self::get_checkpoint(provider_rw.tx_ref(), stage, Some(group_first))?;
+        }
 
         // Headers / bodies / senders / tx lookups for the whole group (transaction numbers threaded
         // across the batch in memory by `insert_blocks`).
         let body_indices = provider_rw.insert_blocks(recovered_blocks, StorageLocation::Both)?;
 
-        // Receipts, state changesets and hashed state, per block.
-        for (block_index, ((execution_output, hashed_state), body_index)) in
-            execution_outputs.into_iter().zip(hashed_states).zip(body_indices).enumerate()
-        {
-            // A primary storage wipe builds its changeset by scanning plain storage. Flush prior
-            // blocks so that scan observes slots created earlier in this merged group.
-            if block_index != 0 &&
-                execution_output
-                    .bundle
-                    .reverts
-                    .iter()
-                    .flatten()
-                    .any(|(_, revert)| revert.wipe_storage)
-            {
-                provider_rw.commit_view()?;
-            }
-            provider_rw.write_state_with_indices(
-                &execution_output,
-                OriginalValuesKnown::No,
-                StorageLocation::StaticFiles,
-                Some(vec![body_index]),
-            )?;
+        // Combine execution results so repeated history keys are appended once for the full
+        // range. Only the first block can wipe storage, whose old slots are already committed.
+        let mut execution_outputs = execution_outputs.into_iter().map(Arc::unwrap_or_clone);
+        let mut execution_output = execution_outputs.next().expect("group is non-empty");
+        for next in execution_outputs {
+            execution_output.extend(next);
+        }
+        provider_rw.write_state_with_indices_and_history(
+            &execution_output,
+            OriginalValuesKnown::No,
+            StorageLocation::StaticFiles,
+            Some(body_indices),
+        )?;
+        for hashed_state in hashed_states {
             provider_rw.write_hashed_state(&Arc::unwrap_or_clone(hashed_state).into_sorted())?;
         }
 
@@ -512,53 +401,45 @@ where
             provider_rw.write_trie_updatesv2(triev2.as_ref()).map_err(ProviderError::Database)?;
         }
 
-        // History indexing reads the changesets back through RocksDB cursors, which cannot see
-        // pending WriteBatch entries. Storage V2 is rejected before this path because its
-        // changesets live in static files and `commit_view` cannot make them visible.
-        provider_rw.commit_view()?;
-
-        // History indices for the whole range, once.
-        provider_rw.update_history_indices(group_first..=group_last)?;
-
-        // Advance every written stage's checkpoint to the group tip, then make the final commit.
-        // `MerkleExecute` passes `None` (trie writes are idempotent and may resume mid-range); the
-        // rest assert checkpoint continuity from `group_first`.
-        let tx = provider_rw.tx_ref();
-        Self::advance_checkpoint(tx, StageId::Execution, Some(group_first), group_last)?;
-        Self::advance_checkpoint(tx, StageId::AccountHashing, Some(group_first), group_last)?;
-        Self::advance_checkpoint(tx, StageId::IndexAccountHistory, Some(group_first), group_last)?;
-        Self::advance_checkpoint(tx, StageId::MerkleExecute, None, group_last)?;
-
-        provider_rw.static_file_provider().commit()?;
-        provider_rw.commit()?;
-        PERSIST_BLOCK_CACHE.persist_tip(group_last);
+        self.commit_persistence_unit(provider_rw, group_last)?;
 
         metrics::histogram!("save_blocks_time", &[("process", "merge_block")])
             .record(start.elapsed() / block_count);
         Ok(())
     }
 
-    /// Read `stage_id`'s checkpoint (asserting continuity when `check_next` is set) and re-write it
-    /// at block `to`. Lets [`commit_block_group`](Self::commit_block_group) advance every stage to
-    /// the group tip within the final group commit.
-    fn advance_checkpoint<TX: DbTx + DbTxMut>(
-        tx: &TX,
-        stage_id: StageId,
-        check_next: Option<u64>,
-        to: u64,
-    ) -> Result<(), ProviderError> {
-        let ck = Self::get_checkpoint(tx, stage_id, check_next)?;
-        Self::update_checkpoint(tx, stage_id, StageCheckpoint { block_number: to, ..ck })
+    /// Commit state before the tries, then record Merkle completion after both trie writes.
+    fn commit_persistence_unit<TX: DbTx + DbTxMut + 'static>(
+        &self,
+        provider_rw: DatabaseProvider<TX, N>,
+        block_number: u64,
+    ) -> Result<(), PersistenceError> {
+        for stage in [
+            StageId::Execution,
+            StageId::AccountHashing,
+            StageId::IndexAccountHistory,
+            StageId::Finish,
+        ] {
+            let checkpoint = Self::get_checkpoint(provider_rw.tx_ref(), stage, None)?;
+            provider_rw
+                .save_stage_checkpoint(stage, StageCheckpoint { block_number, ..checkpoint })?;
+        }
+        provider_rw.static_file_provider().commit()?;
+        // The old Merkle checkpoint makes recovery repair the entire block/group if either
+        // trie write fails after state has committed.
+        self.provider.db_ref().with_write_lock(|| {
+            provider_rw.tx_ref().commit_view().map_err(ProviderError::Database)?;
+            provider_rw.update_pipeline_stages(block_number, false)?;
+            provider_rw.commit()
+        })?;
+        PERSIST_BLOCK_CACHE.persist_tip(block_number);
+        Ok(())
     }
 }
 
 /// One of the errors that can happen when using the persistence service.
 #[derive(Debug, Error)]
 pub enum PersistenceError {
-    /// Merged persistence cannot read uncommitted Storage V2 changesets.
-    #[error("--gravity.persist.merge-blocks is incompatible with Storage V2")]
-    MergeBlocksWithStorageV2,
-
     /// A pruner error
     #[error(transparent)]
     PrunerError(#[from] PrunerError),
@@ -726,17 +607,26 @@ impl Drop for ServiceGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::{Address, B256, U256};
-    use reth_chain_state::test_utils::TestBlockBuilder;
-    use reth_db::models::GravityStorageSettings;
-    use reth_execution_types::{BundleStateInit, ExecutionOutcome, RevertsInit};
-    use reth_exex_types::FinishedExExHeight;
-    use reth_primitives_traits::Account;
-    use reth_provider::{test_utils::create_test_provider_factory, StorageChangeSetReader};
-    use reth_prune::Pruner;
-    use revm::database::states::{
-        reverts::Reverts, AccountRevert, AccountStatus, BundleAccount, BundleState,
+    use alloy_consensus::Header;
+    use alloy_primitives::{keccak256, Address, B256, U256};
+    use reth_chain_state::{test_utils::TestBlockBuilder, ExecutedTrieUpdates};
+    #[cfg(feature = "failpoints")]
+    use reth_db::cursor::DbCursorRO;
+    use reth_db::models::{
+        storage_sharded_key::StorageShardedKey, GravityStorageSettings, ShardedKey,
     };
+    use reth_ethereum_primitives::Block;
+    use reth_execution_types::ExecutionOutcome;
+    use reth_exex_types::FinishedExExHeight;
+    use reth_primitives_traits::{Account, RecoveredBlock, StorageEntry};
+    use reth_provider::{
+        test_utils::{create_test_provider_factory, MockNodeTypesWithDB},
+        ChangesetRangeReader, StorageChangeSetReader, StorageSettingsCache,
+    };
+    use reth_prune::Pruner;
+    use reth_trie::{HashedPostState, KeccakKeyHasher};
+    use reth_trie_parallel::nested_hash::NestedStateRoot;
+    use revm::database::states::{reverts::Reverts, AccountStatus, BundleState};
     use tokio::sync::mpsc::unbounded_channel;
 
     fn default_persistence_handle() -> PersistenceHandle<EthPrimitives> {
@@ -766,127 +656,358 @@ mod tests {
         assert!(result.last_block.is_none());
     }
 
-    #[test]
-    fn rejects_merged_persistence_with_storage_v2() {
-        let provider = create_test_provider_factory();
-        provider.set_storage_settings_cache(GravityStorageSettings {
-            changesets_in_static_files: true,
-        });
-        let (_finished_exex_height_tx, finished_exex_height_rx) =
-            tokio::sync::watch::channel(FinishedExExHeight::NoExExs);
-        let pruner =
-            Pruner::new_with_factory(provider.clone(), vec![], 5, 0, None, finished_exex_height_rx);
-        let (sync_metrics_tx, _sync_metrics_rx) = unbounded_channel();
-        let service = PersistenceService::new(
+    fn persistence_service(
+        provider: ProviderFactory<MockNodeTypesWithDB>,
+    ) -> PersistenceService<MockNodeTypesWithDB> {
+        let (_tx, rx) = tokio::sync::watch::channel(FinishedExExHeight::NoExExs);
+        let pruner = Pruner::new_with_factory(provider.clone(), vec![], 5, 0, None, rx);
+        PersistenceService::new(
             provider,
             std::sync::mpsc::channel().1,
             pruner,
-            sync_metrics_tx,
-        );
-
-        assert!(matches!(
-            service.save_merged_blocks(Vec::new()),
-            Err(PersistenceError::MergeBlocksWithStorageV2)
-        ));
+            unbounded_channel().0,
+        )
     }
 
-    #[test]
-    fn merged_persistence_builds_history_from_committed_changesets() {
-        let provider = create_test_provider_factory();
-        let (_finished_exex_height_tx, finished_exex_height_rx) =
-            tokio::sync::watch::channel(FinishedExExHeight::NoExExs);
-        let pruner =
-            Pruner::new_with_factory(provider.clone(), vec![], 5, 0, None, finished_exex_height_rx);
-        let (sync_metrics_tx, _sync_metrics_rx) = unbounded_channel();
-        let service = PersistenceService::new(
-            provider.clone(),
-            std::sync::mpsc::channel().1,
-            pruner,
-            sync_metrics_tx,
-        );
-
-        let block_number = 0;
-        let address = Address::random();
-        let state: BundleStateInit =
-            std::iter::once((address, (None, Some(Account::default()), Default::default())))
-                .collect();
-        let account_reverts = std::iter::once((address, (Some(None), vec![]))).collect();
-        let reverts: RevertsInit = std::iter::once((block_number, account_reverts)).collect();
-        let mut test_block_builder = TestBlockBuilder::eth();
-        let mut block =
-            test_block_builder.get_executed_block_with_number(block_number, B256::random());
-        block.block.execution_output = Arc::new(ExecutionOutcome::new_init(
-            state,
-            reverts,
-            [],
-            vec![vec![]],
-            block_number,
-            vec![Default::default()],
-        ));
-
-        service.save_merged_blocks(vec![block]).unwrap();
-
+    fn state_block(
+        provider: &ProviderFactory<MockNodeTypesWithDB>,
+        outcome: ExecutionOutcome,
+    ) -> ExecutedBlockWithTrieUpdates {
+        let hashed = HashedPostState::from_bundle_state::<KeccakKeyHasher>(outcome.bundle.state());
         let provider_ro = provider.database_provider_ro().unwrap();
-        assert_eq!(provider_ro.tx_ref().entries::<tables::AccountsHistory>().unwrap(), 1);
+        let (state_root, trie) =
+            NestedStateRoot::new(provider_ro.tx_ref(), None).calculate(&hashed).unwrap();
+        let block = Block {
+            header: Header { number: outcome.first_block(), state_root, ..Default::default() },
+            body: Default::default(),
+        };
+        ExecutedBlockWithTrieUpdates::new(
+            Arc::new(RecoveredBlock::new_unhashed(block, vec![])),
+            Arc::new(outcome),
+            Arc::new(hashed),
+            ExecutedTrieUpdates::empty(),
+            Arc::new(trie),
+        )
     }
 
-    #[test]
-    fn merged_persistence_storage_wipe_sees_prior_block_state() {
-        let provider = create_test_provider_factory();
-        let (_finished_exex_height_tx, finished_exex_height_rx) =
-            tokio::sync::watch::channel(FinishedExExHeight::NoExExs);
-        let pruner =
-            Pruner::new_with_factory(provider.clone(), vec![], 5, 0, None, finished_exex_height_rx);
-        let (sync_metrics_tx, _sync_metrics_rx) = unbounded_channel();
-        let service = PersistenceService::new(
-            provider.clone(),
-            std::sync::mpsc::channel().1,
-            pruner,
-            sync_metrics_tx,
-        );
-
-        let address = Address::random();
-        let slot = B256::with_last_byte(1);
-        let value = U256::from(42);
-        let storage = std::iter::once((slot, (U256::ZERO, value))).collect();
-        let state: BundleStateInit =
-            std::iter::once((address, (None, Some(Account::default()), storage))).collect();
-        let account_reverts = std::iter::once((address, (Some(None), vec![]))).collect();
-        let reverts: RevertsInit = std::iter::once((0, account_reverts)).collect();
-        let mut test_block_builder = TestBlockBuilder::eth();
-        let mut blocks = test_block_builder.get_executed_blocks(0..2).collect::<Vec<_>>();
-        blocks[0].block.execution_output = Arc::new(ExecutionOutcome::new_init(
-            state,
-            reverts,
+    fn account_update(
+        number: u64,
+        address: Address,
+        previous: Option<Account>,
+        value: u64,
+    ) -> ExecutionOutcome {
+        let old_value = if previous.is_some() { U256::from(value - 1) } else { U256::ZERO };
+        let account = Account { nonce: number, balance: U256::from(value), ..Default::default() };
+        let bundle = BundleState::new(
+            [(
+                address,
+                previous.map(Into::into),
+                Some(account.into()),
+                std::iter::once((U256::from(1), (old_value, U256::from(value)))).collect(),
+            )],
+            [[(address, Some(previous.map(Into::into)), [(U256::from(1), old_value)])]],
             [],
+        );
+        ExecutionOutcome::new(bundle, vec![vec![]], number, vec![Default::default()])
+    }
+
+    fn empty_outcome() -> ExecutionOutcome {
+        ExecutionOutcome::new(
+            BundleState { reverts: Reverts::new(vec![vec![]]), ..Default::default() },
             vec![vec![]],
             0,
             vec![Default::default()],
-        ));
+        )
+    }
 
-        let mut wipe_bundle = BundleState::default();
-        wipe_bundle.state.insert(
-            address,
-            BundleAccount::new(
-                Some(Default::default()),
-                None,
-                Default::default(),
-                AccountStatus::Destroyed,
-            ),
+    #[cfg(feature = "failpoints")]
+    fn assert_state_boundary<TX: DbTx>(
+        tx: &TX,
+        address: Address,
+        height: u64,
+        state_committed: bool,
+        completion_committed: bool,
+    ) -> eyre::Result<()> {
+        let storage_key = StorageShardedKey::last(address, B256::with_last_byte(1));
+        let records = [
+            tx.get::<tables::PlainAccountState>(address)?.is_some(),
+            tx.get::<tables::HashedAccounts>(keccak256(address))?.is_some(),
+            tx.get::<tables::PlainStorageState>(address)?.is_some(),
+            tx.get::<tables::HashedStorages>(keccak256(address))?.is_some(),
+            tx.get::<tables::AccountsHistory>(ShardedKey::last(address))?.is_some(),
+            tx.get::<tables::StoragesHistory>(storage_key)?.is_some(),
+            tx.get::<tables::BlockBodyIndices>(height)?.is_some(),
+        ];
+        assert_eq!(records, [state_committed; 7]);
+        for (stage, committed) in [
+            (StageId::Execution, state_committed),
+            (StageId::AccountHashing, state_committed),
+            (StageId::IndexAccountHistory, state_committed),
+            (StageId::Finish, state_committed),
+            (StageId::MerkleExecute, completion_committed),
+        ] {
+            let checkpoint = tx.get::<tables::StageCheckpoints>(stage.to_string())?.unwrap();
+            assert_eq!(checkpoint.block_number, if committed { height } else { 0 }, "{stage:?}");
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "failpoints")]
+    fn reopen_provider(
+        provider: ProviderFactory<MockNodeTypesWithDB>,
+        changesets_in_static_files: bool,
+    ) -> ProviderFactory<MockNodeTypesWithDB> {
+        use reth_chainspec::MAINNET;
+        use reth_db::{test_utils::TempDatabase, ClientVersion, DatabaseArguments};
+        use reth_provider::providers::StaticFileProvider;
+
+        let db_path = provider.db_ref().path().to_path_buf();
+        let static_path = provider.static_file_provider().path().to_path_buf();
+        // Keep the datadir but close all three RocksDB instances before reopening it.
+        drop(Arc::try_unwrap(provider.into_db()).unwrap().into_inner_db());
+        let db =
+            reth_db::open_db(&db_path, DatabaseArguments::new(ClientVersion::default())).unwrap();
+        let provider = ProviderFactory::<MockNodeTypesWithDB>::new(
+            Arc::new(TempDatabase::new(db, db_path)),
+            MAINNET.clone(),
+            StaticFileProvider::read_write(static_path).unwrap(),
         );
-        wipe_bundle.reverts = Reverts::new(vec![vec![(
-            address,
-            AccountRevert { wipe_storage: true, ..Default::default() },
-        )]]);
-        blocks[1].block.execution_output =
-            Arc::new(ExecutionOutcome::new(wipe_bundle, vec![vec![]], 1, vec![Default::default()]));
+        provider.set_storage_settings_cache(GravityStorageSettings { changesets_in_static_files });
+        provider
+    }
 
-        service.save_merged_blocks(blocks).unwrap();
+    #[cfg(feature = "failpoints")]
+    fn assert_persisted_trie<TX: DbTx>(
+        tx: &TX,
+        address: Address,
+        block: &ExecutedBlockWithTrieUpdates,
+    ) {
+        use reth_trie::{nested_trie::Trie, Nibbles};
+        use reth_trie_db::nested_hash::StorageTrieReader;
 
-        let changeset = provider.provider().unwrap().storage_changeset(1).unwrap();
-        assert_eq!(changeset.len(), 1);
-        assert_eq!(changeset[0].1.key, slot);
-        assert_eq!(changeset[0].1.value, value);
+        let hashed_address = keccak256(address);
+        let reader = StorageTrieReader::new(
+            tx.cursor_dup_read::<tables::StoragesTrieV2>().unwrap(),
+            hashed_address,
+            None,
+        );
+        assert_eq!(
+            Trie::new(reader, false).unwrap().hash(),
+            block.triev2.storage_tries[&hashed_address].storage_nodes[&Nibbles::new()].hash()
+        );
+        assert_eq!(
+            NestedStateRoot::new(tx, None).calculate(&Default::default()).unwrap().0,
+            block.recovered_block().state_root()
+        );
+    }
+
+    fn exercise_state_history(changesets_in_static_files: bool, merged: bool) -> eyre::Result<()> {
+        PERSIST_BLOCK_CACHE.reset();
+        let provider = create_test_provider_factory();
+        provider.set_storage_settings_cache(GravityStorageSettings { changesets_in_static_files });
+        let service = persistence_service(provider.clone());
+        let persist = |blocks| {
+            if merged {
+                service.save_merged_blocks(blocks)
+            } else {
+                service.save_blocks_per_block(blocks)
+            }
+            .unwrap();
+        };
+        persist(vec![state_block(&provider, empty_outcome())]);
+        let address = Address::with_last_byte(1);
+        let first_account = Account { nonce: 1, balance: U256::from(7), ..Default::default() };
+        let blocks = vec![
+            state_block(&provider, account_update(1, address, None, 7)),
+            state_block(&provider, account_update(2, address, Some(first_account), 8)),
+        ];
+        let root = blocks[1].recovered_block().state_root();
+        persist(blocks);
+
+        let provider_ro = provider.database_provider_ro()?;
+        let tx = provider_ro.tx_ref();
+        let slot = B256::with_last_byte(1);
+        let account = Account { nonce: 2, balance: U256::from(8), ..Default::default() };
+        assert_eq!(tx.get::<tables::PlainAccountState>(address)?, Some(account));
+        assert_eq!(NestedStateRoot::new(tx, None).calculate(&Default::default())?.0, root);
+        drop(provider_ro);
+
+        let mut bundle = BundleState::builder(3..=3)
+            .state_original_account_info(address, account.into())
+            .revert_account_info(3, address, Some(Some(account.into())))
+            .build();
+        bundle.state.get_mut(&address).unwrap().status = AccountStatus::Destroyed;
+        bundle.reverts[0][0].1.wipe_storage = true;
+        let wipe = ExecutionOutcome::new(bundle, vec![vec![]], 3, vec![Default::default()]);
+        let wipe = state_block(&provider, wipe);
+        let root = wipe.recovered_block().state_root();
+        persist(vec![wipe]);
+        let provider_ro = provider.database_provider_ro()?;
+        let tx = provider_ro.tx_ref();
+        assert_eq!(tx.get::<tables::PlainAccountState>(address)?, None);
+        assert_eq!(tx.get::<tables::HashedAccounts>(keccak256(address))?, None);
+        assert_eq!(tx.get::<tables::PlainStorageState>(address)?, None);
+        assert_eq!(tx.get::<tables::HashedStorages>(keccak256(address))?, None);
+        assert_eq!(
+            provider_ro.storage_changeset(3)?[0].1,
+            StorageEntry { key: slot, value: U256::from(8) }
+        );
+        assert_eq!(provider_ro.account_changesets_range(3..=3)?[0].1.info, Some(account));
+        let histories = [
+            tx.get::<tables::AccountsHistory>(ShardedKey::last(address))?.unwrap(),
+            tx.get::<tables::StoragesHistory>(StorageShardedKey::last(address, slot))?.unwrap(),
+        ];
+        for history in histories {
+            assert_eq!(history.iter().collect::<Vec<_>>(), vec![1, 2, 3]);
+        }
+        assert_eq!(NestedStateRoot::new(tx, None).calculate(&Default::default())?.0, root);
+        if changesets_in_static_files {
+            use reth_provider::{
+                providers::BlockchainProvider, ProviderReadView, StateProviderFactory,
+                StaticFileSegment,
+            };
+            let view =
+                BlockchainProvider::new(provider.clone())?.rpc_provider().consistent_view()?;
+            let state = view.history_by_block_number(1)?;
+            assert!(state.proof(Default::default(), address, &[slot]).is_ok());
+            let files = provider.static_file_provider();
+            for segment in
+                [StaticFileSegment::AccountChangeSets, StaticFileSegment::StorageChangeSets]
+            {
+                files.delete_jar(segment, 2)?;
+            }
+            assert!(state.basic_account(&address).is_err());
+            assert!(state.storage(address, slot).is_err());
+            assert!(state.state_root(Default::default()).is_err());
+            assert!(state.storage_root(address, Default::default()).is_err());
+            assert!(state.proof(Default::default(), address, &[slot]).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn per_block_persistence_keeps_state_history_and_wipes_complete() {
+        for static_changesets in [false, true] {
+            exercise_state_history(static_changesets, false).unwrap();
+        }
+    }
+
+    #[test]
+    fn empty_save_keeps_deferred_finality() {
+        let mut service = persistence_service(create_test_provider_factory());
+        service.pending_finalized_block = Some(10);
+        service.pending_safe_block = Some(11);
+        assert!(service.on_save_blocks(Vec::new()).unwrap().last_block.is_none());
+        assert_eq!(service.pending_finalized_block, Some(10));
+        assert_eq!(service.pending_safe_block, Some(11));
+    }
+
+    #[cfg(feature = "failpoints")]
+    #[test]
+    fn interrupted_commits_reopen_and_recover() -> eyre::Result<()> {
+        use crate::recovery::StorageRecoveryHelper;
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+
+        let _scenario = fail::FailScenario::setup();
+        for static_changesets in [false, true] {
+            for (merged, failpoint, state_committed) in [
+                (false, "db::commit::before_state", false),
+                (false, "db::commit::before_storage_trie", true),
+                (true, "db::commit::before_storage_trie", true),
+            ] {
+                PERSIST_BLOCK_CACHE.reset();
+                let reference = create_test_provider_factory();
+                let reference_service = persistence_service(reference.clone());
+                reference_service
+                    .save_blocks_per_block(vec![state_block(&reference, empty_outcome())])?;
+                let height = if merged { 2 } else { 1 };
+                let address = Address::with_last_byte(height as u8);
+                let first_address = Address::with_last_byte(1);
+                let blocks: Vec<_> = (1..=height)
+                    .map(|number| {
+                        let block = state_block(
+                            &reference,
+                            account_update(number, Address::with_last_byte(number as u8), None, 7),
+                        );
+                        reference_service.save_blocks_per_block(vec![block.clone()]).unwrap();
+                        block
+                    })
+                    .collect();
+                let last = blocks.last().unwrap().clone();
+                drop(reference_service);
+                drop(reference);
+
+                PERSIST_BLOCK_CACHE.reset();
+                let provider = create_test_provider_factory();
+                provider.set_storage_settings_cache(GravityStorageSettings {
+                    changesets_in_static_files: static_changesets,
+                });
+                let service = persistence_service(provider.clone());
+                service.save_blocks_per_block(vec![state_block(&provider, empty_outcome())])?;
+                fail::cfg(failpoint, "panic").unwrap();
+                assert!(catch_unwind(AssertUnwindSafe(|| {
+                    if merged {
+                        service.save_merged_blocks(blocks)
+                    } else {
+                        service.save_blocks_per_block(blocks)
+                    }
+                    .unwrap();
+                }))
+                .is_err());
+                drop(service);
+
+                let mut provider = reopen_provider(provider, static_changesets);
+                let provider_ro = provider.database_provider_ro()?;
+                let tx = provider_ro.tx_ref();
+                assert_state_boundary(tx, first_address, height, state_committed, false)?;
+                assert_eq!(
+                    tx.get::<tables::AccountsTrieV2>(Default::default())?.is_some(),
+                    state_committed
+                );
+                assert!(tx
+                    .cursor_dup_read::<tables::StoragesTrieV2>()?
+                    .seek_exact(keccak256(address))?
+                    .is_none());
+                provider.static_file_provider().check_consistency(&provider_ro, false)?;
+                drop(provider_ro);
+                if merged {
+                    // A second interruption must leave the Merkle checkpoint behind state.
+                    assert!(catch_unwind(AssertUnwindSafe(|| {
+                        StorageRecoveryHelper::new(&provider).check_and_recover().unwrap();
+                    }))
+                    .is_err());
+                    provider = reopen_provider(provider, static_changesets);
+                    let db = provider.database_provider_ro()?;
+                    assert_state_boundary(db.tx_ref(), first_address, height, true, false)?;
+                }
+                fail::remove(failpoint);
+                StorageRecoveryHelper::new(&provider).check_and_recover()?;
+                if !state_committed {
+                    let replay = state_block(&provider, account_update(1, address, None, 7));
+                    assert_eq!(
+                        replay.recovered_block().state_root(),
+                        last.recovered_block().state_root()
+                    );
+                    persistence_service(provider.clone()).save_blocks_per_block(vec![replay])?;
+                }
+                let provider_ro = provider.database_provider_ro()?;
+                assert_state_boundary(provider_ro.tx_ref(), first_address, height, true, true)?;
+                assert_eq!(
+                    provider_ro.account_changesets_range(1..=height)?.len(),
+                    height as usize
+                );
+                assert_eq!(provider_ro.storage_changeset(height)?.len(), 1);
+                assert_persisted_trie(provider_ro.tx_ref(), address, &last);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn merged_persistence_keeps_state_history_and_wipes_complete() {
+        for static_changesets in [false, true] {
+            exercise_state_history(static_changesets, true).unwrap();
+        }
     }
 
     #[test]

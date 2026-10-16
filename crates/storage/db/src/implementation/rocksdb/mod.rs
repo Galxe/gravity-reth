@@ -2,8 +2,10 @@
 
 use crate::{DatabaseError, TableSet};
 use metrics::Label;
+use parking_lot::RwLock;
 use reth_db_api::{
-    database_metrics::DatabaseMetrics, models::ClientVersion, table::Table, tables, Tables,
+    database::DatabaseSnapshot, database_metrics::DatabaseMetrics, models::ClientVersion,
+    table::Table, tables, Tables,
 };
 use reth_storage_errors::db::{DatabaseErrorInfo, LogLevel};
 use reth_tracing::tracing::info;
@@ -254,6 +256,8 @@ pub struct DatabaseEnv {
     pub(crate) account_db: Arc<DB>,
     /// `RocksDB` database for storage trie tables.
     pub(crate) storage_db: Arc<DB>,
+    /// Coordinates full-store snapshot capture with logical commits.
+    commit_lock: RwLock<()>,
     /// Database environment kind (read-only or read-write).
     kind: DatabaseEnvKind,
 }
@@ -282,7 +286,7 @@ impl DatabaseEnv {
         let account_db = dbs.get(&account_path).cloned().expect("account DB handle missing");
         let storage_db = dbs.get(&storage_path).cloned().expect("storage DB handle missing");
 
-        Ok(Self { state_db, account_db, storage_db, kind })
+        Ok(Self { state_db, account_db, storage_db, commit_lock: RwLock::new(()), kind })
     }
 
     /// Resolve shard paths based on configuration.
@@ -694,6 +698,48 @@ impl reth_db_api::database::Database for DatabaseEnv {
         Ok(tx::Tx::new(self.state_db.clone(), self.account_db.clone(), self.storage_db.clone()))
     }
 
+    fn snapshot(
+        &self,
+        consistent: bool,
+    ) -> Result<Option<Arc<dyn DatabaseSnapshot>>, DatabaseError> {
+        let snapshot = if consistent {
+            let _guard = self.commit_lock.read();
+            tx::Snapshot::all_stores(
+                self.state_db.clone(),
+                self.account_db.clone(),
+                self.storage_db.clone(),
+            )
+        } else {
+            tx::Snapshot::new(self.state_db.clone())
+        };
+        Ok(Some(Arc::new(snapshot)))
+    }
+
+    fn with_write_lock<T>(&self, f: impl FnOnce() -> T) -> T {
+        let _guard = self.commit_lock.write();
+        f()
+    }
+
+    fn tx_with_snapshot(
+        &self,
+        snapshot: Option<Arc<dyn DatabaseSnapshot>>,
+    ) -> Result<Self::TX, DatabaseError> {
+        let Some(snapshot) = snapshot else {
+            return Ok(tx::Tx::new_state_snapshot(
+                self.state_db.clone(),
+                self.account_db.clone(),
+                self.storage_db.clone(),
+            ))
+        };
+        let Some(snapshot) = snapshot.as_any().downcast_ref::<tx::Snapshot>() else {
+            return Err(DatabaseError::Other("snapshot belongs to another database".into()));
+        };
+        if !snapshot.belongs_to(&self.state_db) {
+            return Err(DatabaseError::Other("snapshot belongs to another database".into()));
+        }
+        Ok(tx::Tx::from_snapshot(snapshot, self.account_db.clone(), self.storage_db.clone()))
+    }
+
     fn tx_mut(&self) -> Result<Self::TXMut, crate::DatabaseError> {
         Ok(tx::Tx::new(self.state_db.clone(), self.account_db.clone(), self.storage_db.clone()))
     }
@@ -722,8 +768,121 @@ fn get_cf_handle<T: Table>(db: &DB) -> Result<&rocksdb::ColumnFamily, DatabaseEr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_primitives::{Address, B256, U256};
+    use reth_db_api::{
+        cursor::{DbCursorRO, DbDupCursorRO},
+        database::Database,
+        table::Encode,
+        tables::{RawKey, RawTable, RawValue},
+        transaction::{DbTx, DbTxMut},
+    };
+    use reth_primitives_traits::StorageEntry;
 
-    /// Returns the newest `OPTIONS-*` file RocksDB wrote for the instance at `db_dir`.
+    #[test]
+    fn state_snapshot_survives_updates_compaction_and_database_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = DatabaseEnv::open(dir.path(), DatabaseEnvKind::RW, DatabaseArguments::default())
+            .unwrap();
+        let old = B256::with_last_byte(1);
+        let new = B256::with_last_byte(2);
+        let address = Address::ZERO;
+        let entry = StorageEntry::new(old, U256::from(10));
+        let writer = env.tx_mut().unwrap();
+        for number in [1, 2] {
+            writer.put::<tables::CanonicalHeaders>(number, old).unwrap();
+        }
+        writer.put::<tables::PlainStorageState>(address, entry).unwrap();
+        writer.commit().unwrap();
+        let cf = env.state_db.cf_handle(tables::CanonicalHeaders::NAME).unwrap();
+        env.state_db.flush_cf(cf).unwrap();
+        let view = env.snapshot(false).unwrap();
+        let snapshot = env.tx_with_snapshot(view.clone()).unwrap();
+        let mut cursor = snapshot.cursor_read::<tables::CanonicalHeaders>().unwrap();
+        let writer = env.tx_mut().unwrap();
+        writer.put::<tables::CanonicalHeaders>(1, new).unwrap();
+        writer.delete::<tables::CanonicalHeaders>(2, None).unwrap();
+        writer.delete::<tables::PlainStorageState>(address, None).unwrap();
+        writer.commit().unwrap();
+        env.state_db.flush_cf(cf).unwrap();
+        env.state_db.compact_range_cf::<&[u8], &[u8]>(cf, None, None);
+
+        let shared = env.tx_with_snapshot(view).unwrap();
+        assert_eq!(shared.get::<tables::CanonicalHeaders>(1).unwrap(), Some(old));
+        assert_eq!(snapshot.get::<tables::CanonicalHeaders>(2).unwrap(), Some(old));
+        assert_eq!(snapshot.get::<tables::PlainStorageState>(address).unwrap(), Some(entry));
+        assert_eq!(
+            snapshot.get_by_encoded_key::<tables::CanonicalHeaders>(&1u64.encode()).unwrap(),
+            Some(old)
+        );
+        assert_eq!(env.tx().unwrap().get::<tables::CanonicalHeaders>(1).unwrap(), Some(new));
+        let fresh = env.tx_with_snapshot(None).unwrap();
+        assert_eq!(fresh.get::<tables::CanonicalHeaders>(2).unwrap(), None);
+        assert_eq!(fresh.get::<tables::PlainStorageState>(address).unwrap(), None);
+        let mut dup = snapshot.cursor_dup_read::<tables::PlainStorageState>().unwrap();
+        drop(shared);
+        drop(fresh);
+        drop(snapshot);
+        drop(env);
+        assert_eq!(cursor.first().unwrap(), Some((1, old)));
+        assert_eq!(cursor.next().unwrap(), Some((2, old)));
+        assert_eq!(cursor.next().unwrap(), None);
+        assert_eq!(dup.get_by_key_subkey(address, old).unwrap(), Some(entry));
+    }
+
+    #[test]
+    fn trie_snapshot_releases_lock_and_pins_all_shards() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = DatabaseEnv::open(dir.path(), DatabaseEnvKind::RW, DatabaseArguments::default())
+            .unwrap();
+        let write = |value| {
+            env.with_write_lock(|| {
+                let writer = env.tx_mut().unwrap();
+                writer.put::<tables::CanonicalHeaders>(1, B256::with_last_byte(value)).unwrap();
+                writer
+                    .put::<RawTable<tables::AccountsTrieV2>>(
+                        RawKey::from_vec(vec![1]),
+                        RawValue::from_vec(vec![value]),
+                    )
+                    .unwrap();
+                writer
+                    .put::<RawTable<tables::StoragesTrieV2>>(
+                        RawKey::from_vec(vec![1]),
+                        RawValue::from_vec(vec![value]),
+                    )
+                    .unwrap();
+                writer.commit().unwrap();
+                // Ordinary snapshots must not acquire the trie commit lock.
+                assert_eq!(
+                    env.tx_with_snapshot(env.snapshot(false).unwrap())
+                        .unwrap()
+                        .get::<tables::CanonicalHeaders>(1)
+                        .unwrap(),
+                    Some(B256::with_last_byte(value))
+                );
+            });
+        };
+        write(2);
+        let view = env.snapshot(true).unwrap();
+        write(3);
+        let snapshot = env.tx_with_snapshot(view).unwrap();
+        assert_eq!(
+            snapshot.get::<tables::CanonicalHeaders>(1).unwrap(),
+            Some(B256::with_last_byte(2))
+        );
+        assert_eq!(
+            snapshot
+                .get::<RawTable<tables::AccountsTrieV2>>(RawKey::from_vec(vec![1]))
+                .unwrap()
+                .unwrap()
+                .raw_value(),
+            &[2]
+        );
+        let mut storage = snapshot.cursor_read::<RawTable<tables::StoragesTrieV2>>().unwrap();
+        drop(snapshot);
+        assert_eq!(storage.first().unwrap().unwrap().1.raw_value(), &[2]);
+    }
+
+    /// Returns the newest `OPTIONS-*` file `RocksDB` wrote for the instance at `db_dir`.
     /// It records the options each column family was actually opened with.
     fn options_file_content(db_dir: &Path) -> String {
         let newest = std::fs::read_dir(db_dir)

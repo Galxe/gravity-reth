@@ -25,6 +25,14 @@ pub trait DBProvider: Sized {
     /// Consumes the provider and returns the underlying transaction.
     fn into_tx(self) -> Self::Tx;
 
+    /// Checks whether this read context allows trie reads.
+    ///
+    /// Providers with only a state snapshot must reject trie reads: live trie data cannot
+    /// safely be combined with that snapshot.
+    fn ensure_trie_read_allowed(&self) -> ProviderResult<()> {
+        Ok(())
+    }
+
     /// Disables long-lived read transaction safety guarantees for leaks prevention and
     /// observability improvements.
     ///

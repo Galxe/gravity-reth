@@ -59,7 +59,7 @@ use {
 };
 
 pub use alloy_evm::EthEvm;
-pub use gravity::{GravityChainReader, GravityEvmConfig};
+pub use gravity::{GravityChainReader, GravityEvmConfig, ProviderChainReader};
 
 mod config;
 use alloy_evm::eth::spec::EthExecutorSpec;
@@ -197,6 +197,8 @@ where
         ))
     }
 }
+
+impl<ChainSpec> reth_evm::ConfigureEvmForRead for EthEvmConfig<ChainSpec> where Self: ConfigureEvm {}
 
 impl<ChainSpec> ConfigureEvm for EthEvmConfig<ChainSpec>
 where

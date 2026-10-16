@@ -690,7 +690,7 @@ mod changeset_tests {
         }
         assert_eq!(sf.get_highest_static_file_block(StaticFileSegment::AccountChangeSets), Some(1));
         assert_eq!(sf.account_block_changeset(1)?.len(), 2);
-        assert!(sf.account_block_changeset(3)?.is_empty());
+        assert!(sf.account_block_changeset(3).is_err());
         assert_eq!(sf.account_changesets_range(0..=3)?.len(), 2);
 
         Ok(())
@@ -731,6 +731,8 @@ mod changeset_tests {
         // Horizon at block 10: jars [0..=4] and [5..=9] end below it and are reclaimed, while the
         // straddling jar [10..=12] still holds live blocks (>= 10) and must be kept whole.
         sf.delete_segment_below_block(StaticFileSegment::AccountChangeSets, 10)?;
+        assert!(sf.account_block_changeset(1).is_err());
+        assert!(sf.account_changesets_range(1..=12).is_err());
 
         assert_eq!(sf.get_lowest_static_file_block(StaticFileSegment::AccountChangeSets), Some(12));
         assert_eq!(

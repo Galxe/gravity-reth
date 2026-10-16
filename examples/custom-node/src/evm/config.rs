@@ -47,6 +47,8 @@ impl CustomEvmConfig {
     }
 }
 
+impl reth_ethereum::evm::primitives::ConfigureEvmForRead for CustomEvmConfig {}
+
 impl ConfigureEvm for CustomEvmConfig {
     type Primitives = CustomNodePrimitives;
     type Error = <OpEvmConfig as ConfigureEvm>::Error;

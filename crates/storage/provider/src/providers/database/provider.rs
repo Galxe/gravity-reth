@@ -76,7 +76,10 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::Debug,
     ops::{Bound, Deref, DerefMut, Range, RangeBounds, RangeInclusive},
-    sync::{mpsc, Arc},
+    sync::{
+        atomic::{AtomicBool, Ordering as AtomicOrdering},
+        mpsc, Arc,
+    },
     thread,
 };
 use tracing::{debug, trace};
@@ -116,7 +119,7 @@ impl<DB: Database, N: NodeTypes> AsRef<DatabaseProvider<<DB as Database>::TXMut,
 }
 
 impl<DB: Database, N: NodeTypes + 'static> DatabaseProviderRW<DB, N> {
-    /// Commit database transaction and static file if it exists.
+    /// Commits pending database writes and consumes the provider.
     pub fn commit(self) -> ProviderResult<bool> {
         self.0.commit()
     }
@@ -151,9 +154,16 @@ pub struct DatabaseProvider<TX, N: NodeTypes> {
     storage: Arc<N::Storage>,
     /// Cached storage layout settings, shared with the provider factory.
     storage_settings: Arc<RwLock<GravityStorageSettings>>,
+    pub(crate) read_view: Option<Arc<super::ReadView>>,
+    /// A provider writes at most one combined outcome with history indices.
+    history_write_started: AtomicBool,
 }
 
 impl<TX, N: NodeTypes> DatabaseProvider<TX, N> {
+    pub(crate) fn read_bounds(&self) -> Option<super::ReadBounds> {
+        self.read_view.as_ref().map(|view| view.bounds)
+    }
+
     /// Returns reference to prune modes.
     pub const fn prune_modes_ref(&self) -> &PruneModes {
         &self.prune_modes
@@ -174,6 +184,11 @@ impl<TX: DbTx + 'static, N: NodeTypes> DatabaseProvider<TX, N> {
     ) -> ProviderResult<Box<dyn StateProvider + 'a>> {
         let mut block_number =
             self.block_number(block_hash)?.ok_or(ProviderError::BlockHashNotFound(block_hash))?;
+        if !self.block_visible(block_number) ||
+            (self.read_view.is_some() && self.block_hash(block_number)? != Some(block_hash))
+        {
+            return Err(ProviderError::BlockHashNotFound(block_hash))
+        }
         // Always return historical provider in rocksdb
         // if block_number == self.best_block_number().unwrap_or_default() &&
         //     block_number == self.last_block_number().unwrap_or_default()
@@ -257,7 +272,16 @@ impl<TX: DbTxMut, N: NodeTypes> DatabaseProvider<TX, N> {
         storage: Arc<N::Storage>,
         storage_settings: Arc<RwLock<GravityStorageSettings>>,
     ) -> Self {
-        Self { tx, chain_spec, static_file_provider, prune_modes, storage, storage_settings }
+        Self {
+            tx,
+            chain_spec,
+            static_file_provider,
+            prune_modes,
+            storage,
+            storage_settings,
+            read_view: None,
+            history_write_started: AtomicBool::new(false),
+        }
     }
 }
 
@@ -268,12 +292,47 @@ impl<TX, N: NodeTypes> AsRef<Self> for DatabaseProvider<TX, N> {
 }
 
 impl<TX: DbTx, N: NodeTypes> DatabaseProvider<TX, N> {
+    fn block_visible(&self, number: BlockNumber) -> bool {
+        self.read_bounds().is_none_or(|bounds| number <= bounds.block_number)
+    }
+
+    fn tx_visible(&self, number: TxNumber) -> bool {
+        self.read_bounds().is_none_or(|bounds| number < bounds.next_tx_num)
+    }
+
+    fn read_block_range(&self, range: impl RangeBounds<BlockNumber>) -> Range<BlockNumber> {
+        Self::bounded_range(
+            range,
+            self.read_bounds().map(|bounds| bounds.block_number.saturating_add(1)),
+        )
+    }
+
+    fn tx_range(&self, range: impl RangeBounds<TxNumber>) -> Range<TxNumber> {
+        Self::bounded_range(range, self.read_bounds().map(|bounds| bounds.next_tx_num))
+    }
+
+    fn bounded_range(range: impl RangeBounds<u64>, limit: Option<u64>) -> Range<u64> {
+        let mut range = to_range(range);
+        if let Some(limit) = limit {
+            range.end = range.end.min(limit);
+            range.start = range.start.min(range.end);
+        }
+        range
+    }
+
     /// Collects account changesets in `range`, routed by the persisted storage layout.
     fn account_changesets_by_block_range(
         &self,
         range: impl RangeBounds<BlockNumber>,
     ) -> ProviderResult<Vec<(BlockNumber, AccountBeforeTx)>> {
         if self.cached_storage_settings().changesets_in_static_files {
+            if self.read_bounds().is_some() {
+                // A snapshot requires the whole range, even if pruning removed its files.
+                return self
+                    .static_file_provider
+                    .walk_account_changeset_range(self.read_block_range(range))
+                    .collect()
+            }
             self.static_file_provider.account_changesets_range(range)
         } else {
             self.tx
@@ -309,7 +368,11 @@ impl<TX: DbTx, N: NodeTypes> DatabaseProvider<TX, N> {
                 // the end to the segment tip anyway.
                 Bound::Unbounded => u64::MAX,
             };
-            self.static_file_provider.storage_changesets_range(start..=end)
+            let range = self.read_block_range(start..=end);
+            if self.read_bounds().is_some() {
+                return self.static_file_provider.walk_storage_changeset_range(range).collect()
+            }
+            self.static_file_provider.storage_changesets_range(range)
         } else {
             self.tx
                 .cursor_read::<tables::StorageChangeSets>()?
@@ -325,6 +388,12 @@ impl<TX: DbTx, N: NodeTypes> DatabaseProvider<TX, N> {
         range: RangeInclusive<BlockNumber>,
     ) -> ProviderResult<Vec<(BlockNumberAddress, StorageEntry)>> {
         if self.cached_storage_settings().changesets_in_static_files {
+            if self.read_bounds().is_some() {
+                return self
+                    .static_file_provider
+                    .walk_storage_changeset_range(self.read_block_range(range))
+                    .collect()
+            }
             self.static_file_provider.storage_changesets_range(range)
         } else {
             self.tx
@@ -435,6 +504,9 @@ impl<TX: DbTx + 'static, N: NodeTypes> TryIntoHistoricalStateProvider for Databa
         self,
         mut block_number: BlockNumber,
     ) -> ProviderResult<StateProviderBox> {
+        if !self.block_visible(block_number) {
+            return Err(ProviderError::StateForNumberNotFound(block_number))
+        }
         // if the block number is the same as the currently best block number on disk we can use the
         // latest state provider here
         // Always return historical provider in rocksdb
@@ -584,7 +656,16 @@ impl<TX: DbTx + 'static, N: NodeTypesForProvider> DatabaseProvider<TX, N> {
         storage: Arc<N::Storage>,
         storage_settings: Arc<RwLock<GravityStorageSettings>>,
     ) -> Self {
-        Self { tx, chain_spec, static_file_provider, prune_modes, storage, storage_settings }
+        Self {
+            tx,
+            chain_spec,
+            static_file_provider,
+            prune_modes,
+            storage,
+            storage_settings,
+            read_view: None,
+            history_write_started: AtomicBool::new(false),
+        }
     }
 
     /// Consume `DbTx` or `DbTxMut`.
@@ -617,6 +698,8 @@ impl<TX: DbTx + 'static, N: NodeTypesForProvider> DatabaseProvider<TX, N> {
     where
         C: DbCursorRO<tables::Transactions<TxTy<N>>>,
     {
+        let range = self.tx_range(range);
+
         self.static_file_provider.get_range_with_static_file_or_database(
             StaticFileSegment::Transactions,
             to_range(range),
@@ -873,7 +956,8 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> DatabaseProvider<TX, N> {
         Ok(self.tx.commit()?)
     }
 
-    /// Commit data to let other readers read.
+    /// Commits pending database writes while retaining the provider for another batch.
+    /// Existing read snapshots keep their captured versions.
     pub fn commit_view(&self) -> ProviderResult<bool> {
         Ok(self.tx.commit_view()?)
     }
@@ -1001,6 +1085,10 @@ impl<TX: DbTx, N: NodeTypes> StorageChangeSetReader for DatabaseProvider<TX, N> 
         &self,
         block_number: BlockNumber,
     ) -> ProviderResult<Vec<(BlockNumberAddress, StorageEntry)>> {
+        if !self.block_visible(block_number) {
+            return Ok(Vec::new())
+        }
+
         if self.cached_storage_settings().changesets_in_static_files {
             return self.static_file_provider.storage_changeset(block_number);
         }
@@ -1035,6 +1123,10 @@ impl<TX: DbTx, N: NodeTypes> ChangeSetReader for DatabaseProvider<TX, N> {
         &self,
         block_number: BlockNumber,
     ) -> ProviderResult<Vec<AccountBeforeTx>> {
+        if !self.block_visible(block_number) {
+            return Ok(Vec::new())
+        }
+
         if self.cached_storage_settings().changesets_in_static_files {
             return self.static_file_provider.account_block_changeset(block_number);
         }
@@ -1107,6 +1199,10 @@ impl<TX: DbTx + 'static, N: NodeTypesForProvider> HeaderProvider for DatabasePro
     }
 
     fn header_by_number(&self, num: BlockNumber) -> ProviderResult<Option<Self::Header>> {
+        if !self.block_visible(num) {
+            return Ok(None)
+        }
+
         self.static_file_provider.get_with_static_file_or_database(
             StaticFileSegment::Headers,
             num,
@@ -1124,6 +1220,10 @@ impl<TX: DbTx + 'static, N: NodeTypesForProvider> HeaderProvider for DatabasePro
     }
 
     fn header_td_by_number(&self, number: BlockNumber) -> ProviderResult<Option<U256>> {
+        if !self.block_visible(number) {
+            return Ok(None)
+        }
+
         if self.chain_spec.is_paris_active_at_block(number) &&
             let Some(td) = self.chain_spec.final_paris_total_difficulty()
         {
@@ -1146,7 +1246,7 @@ impl<TX: DbTx + 'static, N: NodeTypesForProvider> HeaderProvider for DatabasePro
     ) -> ProviderResult<Vec<Self::Header>> {
         self.static_file_provider.get_range_with_static_file_or_database(
             StaticFileSegment::Headers,
-            to_range(range),
+            self.read_block_range(range),
             |static_file, range, _| static_file.headers_range(range),
             |range, _| self.cursor_read_collect::<tables::Headers<Self::Header>>(range),
             |_| true,
@@ -1157,6 +1257,10 @@ impl<TX: DbTx + 'static, N: NodeTypesForProvider> HeaderProvider for DatabasePro
         &self,
         number: BlockNumber,
     ) -> ProviderResult<Option<SealedHeader<Self::Header>>> {
+        if !self.block_visible(number) {
+            return Ok(None)
+        }
+
         self.static_file_provider.get_with_static_file_or_database(
             StaticFileSegment::Headers,
             number,
@@ -1181,7 +1285,7 @@ impl<TX: DbTx + 'static, N: NodeTypesForProvider> HeaderProvider for DatabasePro
     ) -> ProviderResult<Vec<SealedHeader<Self::Header>>> {
         self.static_file_provider.get_range_with_static_file_or_database(
             StaticFileSegment::Headers,
-            to_range(range),
+            self.read_block_range(range),
             |static_file, range, predicate| static_file.sealed_headers_while(range, predicate),
             |range, mut predicate| {
                 let mut headers = vec![];
@@ -1207,6 +1311,10 @@ impl<TX: DbTx + 'static, N: NodeTypesForProvider> HeaderProvider for DatabasePro
 
 impl<TX: DbTx + 'static, N: NodeTypes> BlockHashReader for DatabaseProvider<TX, N> {
     fn block_hash(&self, number: u64) -> ProviderResult<Option<B256>> {
+        if !self.block_visible(number) {
+            return Ok(None)
+        }
+
         self.static_file_provider.get_with_static_file_or_database(
             StaticFileSegment::Headers,
             number,
@@ -1222,7 +1330,7 @@ impl<TX: DbTx + 'static, N: NodeTypes> BlockHashReader for DatabaseProvider<TX, 
     ) -> ProviderResult<Vec<B256>> {
         self.static_file_provider.get_range_with_static_file_or_database(
             StaticFileSegment::Headers,
-            start..end,
+            self.read_block_range(start..end),
             |static_file, range, _| static_file.canonical_hashes_range(range.start, range.end),
             |range, _| self.cursor_read_collect::<tables::CanonicalHeaders>(range),
             |_| true,
@@ -1238,6 +1346,9 @@ impl<TX: DbTx + 'static, N: NodeTypes> BlockNumReader for DatabaseProvider<TX, N
     }
 
     fn best_block_number(&self) -> ProviderResult<BlockNumber> {
+        if let Some(bounds) = self.read_bounds() {
+            return Ok(bounds.block_number)
+        }
         // The best block number is tracked via the finished stage which gets updated in the same tx
         // when new blocks committed
         Ok(self
@@ -1247,6 +1358,9 @@ impl<TX: DbTx + 'static, N: NodeTypes> BlockNumReader for DatabaseProvider<TX, N
     }
 
     fn last_block_number(&self) -> ProviderResult<BlockNumber> {
+        if let Some(bounds) = self.read_bounds() {
+            return Ok(bounds.block_number)
+        }
         Ok(self
             .tx
             .cursor_read::<tables::CanonicalHeaders>()?
@@ -1266,7 +1380,7 @@ impl<TX: DbTx + 'static, N: NodeTypes> BlockNumReader for DatabaseProvider<TX, N
     }
 
     fn block_number(&self, hash: B256) -> ProviderResult<Option<BlockNumber>> {
-        Ok(self.tx.get::<tables::HeaderNumbers>(hash)?)
+        Ok(self.tx.get::<tables::HeaderNumbers>(hash)?.filter(|number| self.block_visible(*number)))
     }
 }
 
@@ -1424,7 +1538,7 @@ impl<TX: DbTx + 'static, N: NodeTypesForProvider> TransactionsProviderExt
     ) -> ProviderResult<Vec<(TxHash, TxNumber)>> {
         self.static_file_provider.get_range_with_static_file_or_database(
             StaticFileSegment::Transactions,
-            tx_range,
+            self.tx_range(tx_range),
             |static_file, range, _| static_file.transaction_hashes_by_range(range),
             |tx_range, _| {
                 let mut tx_cursor = self.tx.cursor_read::<tables::Transactions<TxTy<N>>>()?;
@@ -1490,10 +1604,17 @@ impl<TX: DbTx + 'static, N: NodeTypesForProvider> TransactionsProvider for Datab
     type Transaction = TxTy<N>;
 
     fn transaction_id(&self, tx_hash: TxHash) -> ProviderResult<Option<TxNumber>> {
-        Ok(self.tx.get::<tables::TransactionHashNumbers>(tx_hash)?)
+        Ok(self
+            .tx
+            .get::<tables::TransactionHashNumbers>(tx_hash)?
+            .filter(|number| self.tx_visible(*number)))
     }
 
     fn transaction_by_id(&self, id: TxNumber) -> ProviderResult<Option<Self::Transaction>> {
+        if !self.tx_visible(id) {
+            return Ok(None)
+        }
+
         self.static_file_provider.get_with_static_file_or_database(
             StaticFileSegment::Transactions,
             id,
@@ -1506,6 +1627,10 @@ impl<TX: DbTx + 'static, N: NodeTypesForProvider> TransactionsProvider for Datab
         &self,
         id: TxNumber,
     ) -> ProviderResult<Option<Self::Transaction>> {
+        if !self.tx_visible(id) {
+            return Ok(None)
+        }
+
         self.static_file_provider.get_with_static_file_or_database(
             StaticFileSegment::Transactions,
             id,
@@ -1559,8 +1684,11 @@ impl<TX: DbTx + 'static, N: NodeTypesForProvider> TransactionsProvider for Datab
     }
 
     fn transaction_block(&self, id: TxNumber) -> ProviderResult<Option<BlockNumber>> {
+        if !self.tx_visible(id) {
+            return Ok(None)
+        }
         let mut cursor = self.tx.cursor_read::<tables::TransactionBlocks>()?;
-        Ok(cursor.seek(id)?.map(|(_, bn)| bn))
+        Ok(cursor.seek(id)?.map(|(_, bn)| bn).filter(|number| self.block_visible(*number)))
     }
 
     fn transactions_by_block(
@@ -1619,10 +1747,13 @@ impl<TX: DbTx + 'static, N: NodeTypesForProvider> TransactionsProvider for Datab
         &self,
         range: impl RangeBounds<TxNumber>,
     ) -> ProviderResult<Vec<Address>> {
-        self.cursor_read_collect::<tables::TransactionSenders>(range)
+        self.cursor_read_collect::<tables::TransactionSenders>(self.tx_range(range))
     }
 
     fn transaction_sender(&self, id: TxNumber) -> ProviderResult<Option<Address>> {
+        if !self.tx_visible(id) {
+            return Ok(None)
+        }
         Ok(self.tx.get::<tables::TransactionSenders>(id)?)
     }
 }
@@ -1631,6 +1762,10 @@ impl<TX: DbTx + 'static, N: NodeTypesForProvider> ReceiptProvider for DatabasePr
     type Receipt = ReceiptTy<N>;
 
     fn receipt(&self, id: TxNumber) -> ProviderResult<Option<Self::Receipt>> {
+        if !self.tx_visible(id) {
+            return Ok(None)
+        }
+
         self.static_file_provider.get_with_static_file_or_database(
             StaticFileSegment::Receipts,
             id,
@@ -1670,7 +1805,7 @@ impl<TX: DbTx + 'static, N: NodeTypesForProvider> ReceiptProvider for DatabasePr
     ) -> ProviderResult<Vec<Self::Receipt>> {
         self.static_file_provider.get_range_with_static_file_or_database(
             StaticFileSegment::Receipts,
-            to_range(range),
+            self.tx_range(range),
             |static_file, range, _| static_file.receipts_by_tx_range(range),
             |range, _| self.cursor_read_collect::<tables::Receipts<Self::Receipt>>(range),
             |_| true,
@@ -1737,6 +1872,9 @@ impl<TX: DbTx + 'static, N: NodeTypesForProvider> BlockBodyIndicesProvider
     for DatabaseProvider<TX, N>
 {
     fn block_body_indices(&self, num: u64) -> ProviderResult<Option<StoredBlockBodyIndices>> {
+        if !self.block_visible(num) {
+            return Ok(None)
+        }
         Ok(self.tx.get::<tables::BlockBodyIndices>(num)?)
     }
 
@@ -1744,7 +1882,7 @@ impl<TX: DbTx + 'static, N: NodeTypesForProvider> BlockBodyIndicesProvider
         &self,
         range: RangeInclusive<BlockNumber>,
     ) -> ProviderResult<Vec<StoredBlockBodyIndices>> {
-        self.cursor_read_collect::<tables::BlockBodyIndices>(range)
+        self.cursor_read_collect::<tables::BlockBodyIndices>(self.read_block_range(range))
     }
 }
 
@@ -1898,6 +2036,7 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> DatabaseProvider<TX,
         &self,
         reverts: PlainStateReverts,
         first_block: BlockNumber,
+        mut history: Option<&mut StateHistoryIndices>,
     ) -> ProviderResult<()> {
         tracing::trace!("Writing storage changes to static files");
         let mut storages_cursor = self.tx_ref().cursor_dup_write::<tables::PlainStorageState>()?;
@@ -1931,6 +2070,9 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> DatabaseProvider<TX,
 
                 for (key, value) in StorageRevertsIter::new(storage, wiped_storage) {
                     changeset.push(StorageBeforeTx { address, key, value });
+                    if let Some(history) = history.as_deref_mut() {
+                        history.storages.entry((address, key)).or_default().push(block_number);
+                    }
                 }
             }
             storage_writer.append_storage_changeset(changeset, block_number)?;
@@ -1944,26 +2086,68 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> DatabaseProvider<TX,
             let block_number = first_block + block_index as BlockNumber;
             let changeset = account_block_reverts
                 .into_iter()
-                .map(|(address, info)| AccountBeforeTx { address, info: info.map(Into::into) })
+                .map(|(address, info)| {
+                    if let Some(history) = history.as_deref_mut() {
+                        history.accounts.entry(address).or_default().push(block_number);
+                    }
+                    AccountBeforeTx { address, info: info.map(Into::into) }
+                })
                 .collect();
             account_writer.append_account_changeset(changeset, block_number)?;
         }
 
         Ok(())
     }
-}
 
-impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
-    for DatabaseProvider<TX, N>
-{
-    type Receipt = ReceiptTy<N>;
-
-    fn write_state_with_indices(
+    /// Writes state, receipts and history indices using the actual changeset entries.
+    ///
+    /// Changesets are not read back from the transaction: `RocksDB` cursors cannot see pending
+    /// writes. Each history key is appended once, including old slots added by storage wipes.
+    /// Call once per provider with the combined outcome for the whole range; separate calls for
+    /// shared keys would read the same committed history tail and overwrite pending appends.
+    /// Create a new provider for the next block/group, including after a failed write.
+    /// A primary storage wipe must be in the first block of the range so its old slots can be
+    /// read from committed plain state.
+    pub fn write_state_with_indices_and_history(
         &self,
-        execution_outcome: &ExecutionOutcome<Self::Receipt>,
+        execution_outcome: &ExecutionOutcome<ReceiptTy<N>>,
         is_value_known: OriginalValuesKnown,
         write_receipts_to: StorageLocation,
         body_indices: Option<Vec<StoredBlockBodyIndices>>,
+    ) -> ProviderResult<()> {
+        if let Some(block_index) =
+            execution_outcome.bundle.reverts.iter().enumerate().skip(1).find_map(
+                |(index, reverts)| {
+                    reverts.iter().any(|(_, revert)| revert.wipe_storage).then_some(index)
+                },
+            )
+        {
+            return Err(ProviderError::StorageWipeNotFirstBlock(
+                execution_outcome.first_block() + block_index as u64,
+            ))
+        }
+        if self.history_write_started.swap(true, AtomicOrdering::Relaxed) {
+            return Err(ProviderError::StateHistoryWriteAlreadyStarted)
+        }
+        let mut history = StateHistoryIndices::default();
+        self.write_state_with_indices_inner(
+            execution_outcome,
+            is_value_known,
+            write_receipts_to,
+            body_indices,
+            Some(&mut history),
+        )?;
+        self.insert_account_history_index(history.accounts)?;
+        self.insert_storage_history_index(history.storages)
+    }
+
+    fn write_state_with_indices_inner(
+        &self,
+        execution_outcome: &ExecutionOutcome<ReceiptTy<N>>,
+        is_value_known: OriginalValuesKnown,
+        write_receipts_to: StorageLocation,
+        body_indices: Option<Vec<StoredBlockBodyIndices>>,
+        history: Option<&mut StateHistoryIndices>,
     ) -> ProviderResult<()> {
         let first_block = execution_outcome.first_block();
         let block_count = execution_outcome.len() as u64;
@@ -1975,7 +2159,7 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
         let (plain_state, reverts) =
             execution_outcome.bundle.to_plain_state_and_reverts(is_value_known);
 
-        self.write_state_reverts(reverts, first_block)?;
+        self.write_state_reverts_inner(reverts, first_block, history)?;
         self.write_state_changes(plain_state)?;
 
         // Fetch the first transaction number for each block in the range
@@ -2003,7 +2187,7 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
         // We are writing to database if requested or if there's any kind of receipt pruning
         // configured
         let mut receipts_cursor = (write_receipts_to.database() || has_receipts_pruning)
-            .then(|| self.tx.cursor_write::<tables::Receipts<Self::Receipt>>())
+            .then(|| self.tx.cursor_write::<tables::Receipts<ReceiptTy<N>>>())
             .transpose()?;
 
         // Prepare receipts static writer if we are going to write receipts to static files
@@ -2017,11 +2201,6 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
         let has_contract_log_filter = !self.prune_modes.receipts_log_filter.is_empty();
         let contract_log_pruner = self.prune_modes.receipts_log_filter.group_by_block(tip, None)?;
 
-        // All receipts from the last 128 blocks are required for blockchain tree, even with
-        // [`PruneSegment::ContractLogs`].
-        let prunable_receipts =
-            PruneMode::Distance(MINIMUM_DISTANCE).should_prune(first_block, tip);
-
         // Prepare set of addresses which logs should not be pruned.
         let mut allowed_addresses: HashSet<Address, _> = HashSet::new();
         for (_, addresses) in contract_log_pruner.range(..first_block) {
@@ -2032,6 +2211,9 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
             execution_outcome.receipts.iter().zip(block_indices).enumerate()
         {
             let block_number = first_block + idx as u64;
+            // A batch can span the retention boundary; recent blocks must keep all receipts.
+            let prunable_receipts =
+                PruneMode::Distance(MINIMUM_DISTANCE).should_prune(block_number, tip);
 
             // Increment block number for receipts static file writer
             if let Some(writer) = receipts_static_writer.as_mut() {
@@ -2076,13 +2258,14 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
         Ok(())
     }
 
-    fn write_state_reverts(
+    fn write_state_reverts_inner(
         &self,
         reverts: PlainStateReverts,
         first_block: BlockNumber,
+        mut history: Option<&mut StateHistoryIndices>,
     ) -> ProviderResult<()> {
         if self.cached_storage_settings().changesets_in_static_files {
-            return self.write_state_reverts_to_static_files(reverts, first_block);
+            return self.write_state_reverts_to_static_files(reverts, first_block, history);
         }
 
         // Write storage changes
@@ -2123,6 +2306,9 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
                 tracing::trace!(?address, ?storage, "Writing storage reverts");
                 for (key, value) in StorageRevertsIter::new(storage, wiped_storage) {
                     storage_changeset_cursor.append_dup(storage_id, StorageEntry { key, value })?;
+                    if let Some(history) = history.as_deref_mut() {
+                        history.storages.entry((address, key)).or_default().push(block_number);
+                    }
                 }
             }
         }
@@ -2138,6 +2324,9 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
             account_block_reverts.par_sort_by_key(|a| a.0);
 
             for (address, info) in account_block_reverts {
+                if let Some(history) = history.as_deref_mut() {
+                    history.accounts.entry(address).or_default().push(block_number);
+                }
                 account_changeset_cursor.append_dup(
                     block_number,
                     AccountBeforeTx { address, info: info.map(Into::into) },
@@ -2146,6 +2335,36 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
         }
 
         Ok(())
+    }
+}
+
+impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
+    for DatabaseProvider<TX, N>
+{
+    type Receipt = ReceiptTy<N>;
+
+    fn write_state_with_indices(
+        &self,
+        execution_outcome: &ExecutionOutcome<Self::Receipt>,
+        is_value_known: OriginalValuesKnown,
+        write_receipts_to: StorageLocation,
+        body_indices: Option<Vec<StoredBlockBodyIndices>>,
+    ) -> ProviderResult<()> {
+        self.write_state_with_indices_inner(
+            execution_outcome,
+            is_value_known,
+            write_receipts_to,
+            body_indices,
+            None,
+        )
+    }
+
+    fn write_state_reverts(
+        &self,
+        reverts: PlainStateReverts,
+        first_block: BlockNumber,
+    ) -> ProviderResult<()> {
+        self.write_state_reverts_inner(reverts, first_block, None)
     }
 
     fn write_state_changes(&self, changes: StateChangeset) -> ProviderResult<()> {
@@ -3427,6 +3646,15 @@ impl<TX: DbTxMut, N: NodeTypes> ChainStateBlockWriter for DatabaseProvider<TX, N
 impl<TX: DbTx + 'static, N: NodeTypes + 'static> DBProvider for DatabaseProvider<TX, N> {
     type Tx = TX;
 
+    fn ensure_trie_read_allowed(&self) -> ProviderResult<()> {
+        if self.read_view.as_ref().is_some_and(|view| !view.consistent) {
+            return Err(ProviderError::other(std::io::Error::other(
+                "trie reads require a consistent view",
+            )))
+        }
+        Ok(())
+    }
+
     fn tx_ref(&self) -> &Self::Tx {
         &self.tx
     }
@@ -3444,6 +3672,13 @@ impl<TX: DbTx + 'static, N: NodeTypes + 'static> DBProvider for DatabaseProvider
     }
 }
 
+/// Changeset keys grouped before appending to history, so pending shards are never read back.
+#[derive(Debug, Default)]
+struct StateHistoryIndices {
+    accounts: BTreeMap<Address, Vec<BlockNumber>>,
+    storages: BTreeMap<(Address, B256), Vec<BlockNumber>>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3452,6 +3687,155 @@ mod tests {
         BlockWriter, DatabaseProviderFactory,
     };
     use reth_testing_utils::generators::{self, random_block, BlockParams};
+
+    #[test]
+    fn batched_receipts_keep_recent_blocks_with_log_filter() {
+        use reth_ethereum_primitives::Receipt;
+        use reth_prune_types::ReceiptsLogPruneConfig;
+        use revm_database::{states::reverts::Reverts, BundleState};
+
+        let factory = create_test_provider_factory().with_prune_modes(PruneModes {
+            receipts_log_filter: ReceiptsLogPruneConfig(BTreeMap::from([(
+                Address::with_last_byte(1),
+                PruneMode::Before(1),
+            )])),
+            ..Default::default()
+        });
+        let provider = factory.database_provider_rw().unwrap();
+        let tip = MINIMUM_DISTANCE + 7;
+        let outcome = ExecutionOutcome::new(
+            BundleState { reverts: Reverts::new(vec![vec![]; tip as usize]), ..Default::default() },
+            vec![vec![Receipt::default()]; tip as usize],
+            1,
+            Vec::new(),
+        );
+        let indices = (0..tip)
+            .map(|first_tx_num| StoredBlockBodyIndices { first_tx_num, tx_count: 1 })
+            .collect();
+        provider
+            .write_state_with_indices_and_history(
+                &outcome,
+                OriginalValuesKnown::No,
+                StorageLocation::Database,
+                Some(indices),
+            )
+            .unwrap();
+        provider.commit_view().unwrap();
+
+        assert!(provider.tx_ref().get::<tables::Receipts<Receipt>>(0).unwrap().is_none());
+        for block in tip - MINIMUM_DISTANCE..=tip {
+            assert!(provider
+                .tx_ref()
+                .get::<tables::Receipts<Receipt>>(block - 1)
+                .unwrap()
+                .is_some());
+        }
+    }
+
+    #[test]
+    fn merged_history_groups_repeated_keys_and_includes_wiped_slots() -> eyre::Result<()> {
+        use revm_database::{states::AccountStatus, BundleState};
+        use revm_state::AccountInfo;
+
+        for changesets_in_static_files in [false, true] {
+            let factory = create_test_provider_factory();
+            factory
+                .set_storage_settings_cache(GravityStorageSettings { changesets_in_static_files });
+            let address = Address::with_last_byte(1);
+            let slot = B256::with_last_byte(1);
+            let untouched = B256::with_last_byte(2);
+            let first = sharded_key::NUM_OF_INDICES_IN_SHARD as u64 - 1;
+            let last = first + 2;
+            let provider = factory.database_provider_rw()?;
+            provider.tx_ref().put::<tables::PlainAccountState>(address, Account::default())?;
+            provider
+                .tx_ref()
+                .cursor_dup_write::<tables::PlainStorageState>()?
+                .upsert(address, &StorageEntry { key: untouched, value: U256::from(22) })?;
+            provider.insert_account_history_index([(address, 0..first)])?;
+            provider.insert_storage_history_index([((address, slot), 0..first)])?;
+            provider.commit_view()?;
+            let files = factory.static_file_provider();
+            if changesets_in_static_files {
+                for segment in
+                    [StaticFileSegment::AccountChangeSets, StaticFileSegment::StorageChangeSets]
+                {
+                    let mut writer = files.latest_writer(segment)?;
+                    for block in 0..first {
+                        writer.increment_block(block)?;
+                    }
+                    writer.commit()?;
+                }
+            }
+
+            let mut builder = BundleState::builder(first..=last)
+                .state_original_account_info(address, AccountInfo::default());
+            for block in first..=last {
+                builder = builder
+                    .revert_account_info(block, address, Some(Some(AccountInfo::default())))
+                    .revert_storage(block, address, vec![(U256::from(1), U256::from(block))]);
+            }
+            let mut bundle = builder.build();
+            bundle.state.get_mut(&address).unwrap().status = AccountStatus::Destroyed;
+            bundle.reverts[0][0].1.wipe_storage = true;
+            let mut outcome = ExecutionOutcome::new(bundle, vec![vec![]; 3], first, Vec::new());
+            let write = |outcome: &ExecutionOutcome<_>| {
+                provider.write_state_with_indices_and_history(
+                    outcome,
+                    OriginalValuesKnown::Yes,
+                    StorageLocation::Database,
+                    Some(vec![StoredBlockBodyIndices::default(); 3]),
+                )
+            };
+            outcome.bundle.reverts[1][0].1.wipe_storage = true;
+            assert!(matches!(
+                write(&outcome),
+                Err(ProviderError::StorageWipeNotFirstBlock(block)) if block == first + 1
+            ));
+            outcome.bundle.reverts[1][0].1.wipe_storage = false;
+            write(&outcome)?;
+            assert!(matches!(write(&outcome), Err(ProviderError::StateHistoryWriteAlreadyStarted)));
+            files.commit()?;
+            provider.commit_view()?;
+
+            let provider = factory.database_provider_ro()?;
+            let accounts = provider
+                .tx_ref()
+                .cursor_read::<tables::AccountsHistory>()?
+                .walk(None)?
+                .collect::<Result<Vec<_>, _>>()?;
+            let storages = provider
+                .tx_ref()
+                .cursor_read::<tables::StoragesHistory>()?
+                .walk(None)?
+                .collect::<Result<Vec<_>, _>>()?;
+            assert_eq!(accounts.len(), 2);
+            assert_eq!(
+                accounts.iter().flat_map(|(_, list)| list.iter()).collect::<Vec<_>>(),
+                (0..=last).collect::<Vec<_>>()
+            );
+            assert_eq!(
+                storages
+                    .iter()
+                    .filter(|(key, _)| key.sharded_key.key == slot)
+                    .flat_map(|(_, list)| list.iter())
+                    .collect::<Vec<_>>(),
+                (0..=last).collect::<Vec<_>>()
+            );
+            assert_eq!(
+                provider
+                    .tx_ref()
+                    .get::<tables::StoragesHistory>(StorageShardedKey::last(address, untouched))?
+                    .unwrap()
+                    .iter()
+                    .collect::<Vec<_>>(),
+                vec![first]
+            );
+            assert_eq!(provider.storage_changeset(first)?.len(), 2);
+            assert_eq!(provider.basic_account(&address)?, None);
+        }
+        Ok(())
+    }
 
     #[test]
     fn trie_removals_override_pending_batch_updates() {

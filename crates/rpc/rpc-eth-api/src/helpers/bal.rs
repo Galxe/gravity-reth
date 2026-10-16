@@ -4,7 +4,7 @@ use alloy_eip7928::BlockAccessList;
 use alloy_primitives::Bytes;
 use alloy_rpc_types_eth::BlockId;
 use reth_errors::RethError;
-use reth_evm::{block::BlockExecutor, ConfigureEvm, Evm};
+use reth_evm::{block::BlockExecutor, ConfigureEvm, ConfigureEvmForRead, Evm};
 use reth_revm::{database::StateProviderDatabase, State};
 use reth_rpc_eth_types::{
     cache::db::StateProviderTraitObjWrapper, error::FromEthApiError, EthApiError,
@@ -24,18 +24,19 @@ pub trait GetBlockAccessList: Trace + Call + LoadBlock + RpcNodeCoreExt {
         block_id: BlockId,
     ) -> impl Future<Output = Result<Option<BlockAccessList>, Self::Error>> + Send {
         async move {
-            let block = self
+            let this = self.view().await?;
+            let block = this
                 .recovered_block(block_id)
                 .await?
                 .ok_or_else(|| EthApiError::HeaderNotFound(block_id))?;
 
             if let Some(cached_bal) =
-                self.cache().get_bal(block.hash()).await.map_err(Self::Error::from_eth_err)?
+                this.cache().get_bal(block.hash()).await.map_err(Self::Error::from_eth_err)?
             {
                 return Ok(Some(cached_bal.as_bal().clone().into_alloy_bal()))
             }
 
-            self.spawn_blocking_io(move |eth_api| {
+            this.spawn_blocking_io(move |eth_api| {
                 let state = eth_api
                     .provider()
                     .state_by_block_id(block.parent_hash().into())
@@ -80,18 +81,19 @@ pub trait GetBlockAccessList: Trace + Call + LoadBlock + RpcNodeCoreExt {
         block_id: BlockId,
     ) -> impl Future<Output = Result<Option<Bytes>, Self::Error>> + Send {
         async move {
-            let block = self
+            let this = self.view().await?;
+            let block = this
                 .recovered_block(block_id)
                 .await?
                 .ok_or_else(|| EthApiError::HeaderNotFound(block_id))?;
 
             if let Some(cached_bal) =
-                self.cache().get_bal(block.hash()).await.map_err(Self::Error::from_eth_err)?
+                this.cache().get_bal(block.hash()).await.map_err(Self::Error::from_eth_err)?
             {
                 return Ok(Some(cached_bal.as_raw().clone()))
             }
 
-            Ok(self.get_block_access_list(block_id).await?.map(|bal| alloy_rlp::encode(bal).into()))
+            Ok(this.get_block_access_list(block_id).await?.map(|bal| alloy_rlp::encode(bal).into()))
         }
     }
 }

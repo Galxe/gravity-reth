@@ -215,19 +215,20 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> + Call {
         R: Send + 'static,
     {
         async move {
-            let (transaction, block) = match self.transaction_and_block(hash).await? {
+            let this = self.view().await?;
+            let (transaction, block) = match this.transaction_and_block(hash).await? {
                 None => return Ok(None),
                 Some(res) => res,
             };
             let (tx, tx_info) = transaction.split();
 
-            let evm_env = self.evm_env_for_header(block.sealed_block().sealed_header())?;
+            let evm_env = this.evm_env_for_header(block.sealed_block().sealed_header())?;
 
             // we need to get the state of the parent block because we're essentially replaying the
             // block the transaction is included in
             let parent_block = block.parent_hash();
 
-            self.spawn_with_state_at_block(parent_block, move |this, mut db| {
+            this.spawn_with_state_at_block(parent_block, move |this, mut db| {
                 let block_txs = block.transactions_recovered();
 
                 this.apply_pre_execution_changes(&block, &mut db)?;
@@ -316,11 +317,12 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> + Call {
         R: Send + 'static,
     {
         async move {
+            let this = self.view().await?;
             let block =
-                if block.is_some() { block } else { self.recovered_block(block_id).await? };
+                if block.is_some() { block } else { this.recovered_block(block_id).await? };
 
             let Some(block) = block else { return Ok(None) };
-            let evm_env = self.evm_env_for_header(block.sealed_block().sealed_header())?;
+            let evm_env = this.evm_env_for_header(block.sealed_block().sealed_header())?;
 
             if block.body().transactions().is_empty() {
                 // nothing to trace
@@ -330,7 +332,7 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> + Call {
             // replay all transactions of the block
             // we need to get the state of the parent block because we're replaying this block
             // on top of its parent block's state
-            self.spawn_with_state_at_block(block.parent_hash(), move |this, mut db| {
+            this.spawn_with_state_at_block(block.parent_hash(), move |this, mut db| {
                 let block_hash = block.hash();
 
                 let block_number = evm_env.block_env.number().saturating_to();
