@@ -2,13 +2,13 @@
 
 use reth_chain_state::CanonStateSubscriptions;
 use reth_chainspec::{ChainSpecProvider, EthChainSpec, EthereumHardforks, Hardforks};
-use reth_evm::ConfigureEvm;
+use reth_evm::ConfigureEvmForRead;
 use reth_network_api::NetworkInfo;
 use reth_node_api::{FullNodeComponents, NodePrimitives, PrimitivesTy};
 use reth_primitives_traits::{BlockTy, HeaderTy, ReceiptTy, TxTy};
 use reth_rpc_eth_types::EthStateCache;
 use reth_storage_api::{
-    BlockReader, BlockReaderIdExt, PruneCheckpointReader, StageCheckpointReader,
+    BlockReader, BlockReaderIdExt, ProviderReadView, PruneCheckpointReader, StageCheckpointReader,
     StateProviderFactory,
 };
 use reth_transaction_pool::{PoolTransaction, TransactionPool};
@@ -36,6 +36,7 @@ pub trait RpcNodeCore: Clone + Send + Sync + Unpin + 'static {
                            + Hardforks
                            + EthereumHardforks,
         > + StateProviderFactory
+        + ProviderReadView
         + CanonStateSubscriptions<Primitives = Self::Primitives>
         + StageCheckpointReader
         + PruneCheckpointReader
@@ -47,7 +48,7 @@ pub trait RpcNodeCore: Clone + Send + Sync + Unpin + 'static {
     /// The transaction pool of the node.
     type Pool: TransactionPool<Transaction: PoolTransaction<Consensus = TxTy<Self::Primitives>>>;
     /// The node's EVM configuration, defining settings for the Ethereum Virtual Machine.
-    type Evm: ConfigureEvm<Primitives = Self::Primitives> + Send + Sync + 'static;
+    type Evm: ConfigureEvmForRead<Primitives = Self::Primitives> + Send + Sync + 'static;
     /// Network API.
     type Network: NetworkInfo + Clone;
 
@@ -130,6 +131,7 @@ where
                            + Hardforks
                            + EthereumHardforks,
         > + StateProviderFactory
+        + ProviderReadView
         + CanonStateSubscriptions<Primitives = Evm::Primitives>
         + StageCheckpointReader
         + PruneCheckpointReader
@@ -138,7 +140,7 @@ where
         + Unpin
         + Clone
         + 'static,
-    Evm: ConfigureEvm + Clone + 'static,
+    Evm: ConfigureEvmForRead + Clone + 'static,
     Pool: TransactionPool<Transaction: PoolTransaction<Consensus = TxTy<Evm::Primitives>>>
         + Unpin
         + 'static,

@@ -26,6 +26,8 @@ pub trait DbTx: Debug + Send + Sync {
     fn commit(self) -> Result<bool, DatabaseError>;
     /// Commits pending writes without consuming the transaction, allowing another batch of writes.
     /// Existing read snapshots keep their captured versions.
+    /// For sharded databases, this flushes the state batch before the trie batches; it does not
+    /// publish a completion checkpoint. The caller records completion after the flush succeeds.
     fn commit_view(&self) -> Result<bool, DatabaseError> {
         unimplemented!("Not support")
     }

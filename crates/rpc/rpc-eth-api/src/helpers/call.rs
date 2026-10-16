@@ -21,8 +21,8 @@ use futures::Future;
 use reth_chainspec::{ChainSpecProvider, EthChainSpec, EthereumHardforks};
 use reth_errors::{ProviderError, RethError};
 use reth_evm::{
-    block::BlockExecutor, env::BlockEnvironment, execute::BlockBuilder, ConfigureEvm, Evm,
-    EvmEnvFor, HaltReasonFor, InspectorFor, TransactionEnvMut, TxEnvFor,
+    block::BlockExecutor, env::BlockEnvironment, execute::BlockBuilder, ConfigureEvm,
+    ConfigureEvmForRead, Evm, EvmEnvFor, HaltReasonFor, InspectorFor, TransactionEnvMut, TxEnvFor,
 };
 use reth_node_api::BlockBody;
 use reth_primitives_traits::{Recovered, RecoveredBlock};
@@ -451,12 +451,12 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
     where
         Self: Trace,
     {
-        self.spawn_blocking_io_fut(async move |this| {
-            let this = this.with_view()?;
+        async move {
+            let this = self.view().await?;
             let block_id = block_number.unwrap_or_default();
             let (evm_env, at) = this.evm_env_at(block_id).await?;
             this.create_access_list_with(evm_env, at, request, state_override).await
-        })
+        }
     }
 
     /// Creates [`AccessListResult`] for the [`RpcTxReq`] at the given
@@ -793,7 +793,7 @@ pub trait Call:
     /// top of the parent state in `db`.
     ///
     /// `block` is a committed block read from the chain, so this uses
-    /// [`ConfigureEvm::chain_block_mode`]: the executor reproduces the chain's block-level steps,
+    /// [`ConfigureEvmForRead::chain_block_mode`]: the executor reproduces the chain's block-level steps,
     /// such as the EIP-2935 / EIP-4788 system calls and one-shot hardfork changes.
     ///
     /// Note: This should only be called when replaying a block from its start. When tracing

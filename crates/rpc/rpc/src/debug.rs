@@ -110,7 +110,7 @@ where
     ///
     /// `chain_block` says whether `block` is a committed block read from the chain, replayed with
     /// the chain's block-level steps, or any other block, executed with only Ethereum's
-    /// block-level steps (see [`ConfigureEvm::chain_block_mode`]).
+    /// block-level steps (see [`reth_evm::ConfigureEvmForRead::chain_block_mode`]).
     async fn trace_block(
         &self,
         eth_api: Eth,

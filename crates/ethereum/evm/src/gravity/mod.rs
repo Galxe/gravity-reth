@@ -6,7 +6,7 @@
 //!
 //! - [`GravityEvm`] applies the per-transaction rules, so every path that creates an EVM gets them;
 //! - [`GravityBlockExecutor`] applies the block-level steps. Endpoints that replay a committed
-//!   block declare it with [`ConfigureEvm::chain_block_mode`].
+//!   block declare it with [`ConfigureEvmForRead::chain_block_mode`].
 //!
 //! The pipe does not use this configuration: it executes committed blocks with grevm through its
 //! own [`EthEvmConfig`], which stays plain Ethereum.
@@ -39,7 +39,7 @@ use reth_ethereum_primitives::{Block, EthPrimitives};
 use reth_evm::{
     execute::{BlockAssembler, BlockAssemblerInput, BlockExecutionError},
     parallel_execute::ParallelExecutor,
-    ConfigureEvm, EvmEnv, NextBlockEnvAttributes, ParallelDatabase,
+    ConfigureEvm, ConfigureEvmForRead, EvmEnv, NextBlockEnvAttributes, ParallelDatabase,
 };
 use reth_primitives_traits::{SealedBlock, SealedHeader};
 use revm::{
@@ -67,7 +67,7 @@ pub struct GravityEvmConfig {
     inner: EthEvmConfig,
     executor_factory: GravityBlockExecutorFactory,
     block_assembler: GravityBlockAssembler,
-    /// See [`ConfigureEvm::chain_block_mode`].
+    /// See [`ConfigureEvmForRead::chain_block_mode`].
     chain_block_mode: bool,
 }
 
@@ -88,7 +88,11 @@ impl GravityEvmConfig {
     }
 }
 
-impl ConfigureEvm for GravityEvmConfig {
+impl ConfigureEvmForRead for GravityEvmConfig {
+    fn chain_block_mode(&self) -> Self {
+        Self { chain_block_mode: true, ..self.clone() }
+    }
+
     fn with_read_provider<P>(&self, provider: P) -> Self
     where
         P: reth_storage_api::HeaderProvider<Header = Header>
@@ -106,7 +110,9 @@ impl ConfigureEvm for GravityEvmConfig {
         );
         config
     }
+}
 
+impl ConfigureEvm for GravityEvmConfig {
     type Primitives = EthPrimitives;
     type Error = Infallible;
     type NextBlockEnvCtx = NextBlockEnvAttributes;
@@ -152,10 +158,6 @@ impl ConfigureEvm for GravityEvmConfig {
             inner: self.inner.context_for_next_block(parent, attributes)?,
             chain_block: None,
         })
-    }
-
-    fn chain_block_mode(&self) -> Self {
-        Self { chain_block_mode: true, ..self.clone() }
     }
 
     fn transact_system_txn<DB: Database>(

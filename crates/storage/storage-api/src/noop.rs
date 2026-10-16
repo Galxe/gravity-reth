@@ -3,10 +3,10 @@
 use crate::{
     AccountReader, BlockBodyIndicesProvider, BlockHashReader, BlockIdReader, BlockNumReader,
     BlockReader, BlockReaderIdExt, BlockSource, BytecodeReader, ChangeSetReader,
-    HashedPostStateProvider, HeaderProvider, NodePrimitivesProvider, PruneCheckpointReader,
-    ReceiptProvider, ReceiptProviderIdExt, StageCheckpointReader, StateProofProvider,
-    StateProvider, StateProviderBox, StateProviderFactory, StateReader, StateRootProvider,
-    StorageRootProvider, TransactionVariant, TransactionsProvider,
+    HashedPostStateProvider, HeaderProvider, NodePrimitivesProvider, ProviderReadView,
+    PruneCheckpointReader, ReceiptProvider, ReceiptProviderIdExt, StageCheckpointReader,
+    StateProofProvider, StateProvider, StateProviderBox, StateProviderFactory, StateReader,
+    StateRootProvider, StorageRootProvider, TransactionVariant, TransactionsProvider,
 };
 
 #[cfg(feature = "db-api")]
@@ -504,6 +504,8 @@ impl<C: Send + Sync, N: NodePrimitives> BytecodeReader for NoopProvider<C, N> {
         Ok(None)
     }
 }
+
+impl<C, N> ProviderReadView for NoopProvider<C, N> {}
 
 impl<C: Send + Sync + 'static, N: NodePrimitives> StateProviderFactory for NoopProvider<C, N> {
     fn latest(&self) -> ProviderResult<StateProviderBox> {

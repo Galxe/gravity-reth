@@ -59,8 +59,9 @@ pub struct Cursor<K: TransactionKind, T: Table> {
     iterator: rocksdb::DBRawIterator<'static>,
     /// Owns the database and any fixed snapshot until after the iterator has been dropped.
     source: DbReadSource,
+    /// Shared write batch; absent for read-only transactions.
+    batch: Option<Arc<Mutex<rocksdb::WriteBatch>>>,
     /// Cache buffer that receives compressed values.
-    batch: Arc<Mutex<rocksdb::WriteBatch>>,
     buf: Vec<u8>,
     _phantom: PhantomData<(K, T)>,
 }
@@ -81,7 +82,7 @@ impl<K: TransactionKind, T: Table> Cursor<K, T> {
 
     pub(crate) fn new(
         source: DbReadSource,
-        batch: Arc<Mutex<rocksdb::WriteBatch>>,
+        batch: Option<Arc<Mutex<rocksdb::WriteBatch>>>,
     ) -> Result<Self, DatabaseError> {
         let cf_handle = get_cf_handle::<T>(source.db())?;
 
@@ -267,6 +268,12 @@ impl<K: TransactionKind, T: Table> DbCursorRO<T> for Cursor<K, T> {
     }
 }
 
+impl<T: Table> Cursor<RW, T> {
+    fn write_batch(&self) -> &Mutex<rocksdb::WriteBatch> {
+        self.batch.as_deref().expect("read-write cursors have a write batch")
+    }
+}
+
 impl<T: Table> DbCursorRW<T> for Cursor<RW, T> {
     /// Insert or update a key-value pair in the database.
     ///
@@ -285,7 +292,7 @@ impl<T: Table> DbCursorRW<T> for Cursor<RW, T> {
         let encoded_key = key.encode();
         let value_ref = compress_to_buf_or_ref!(self, value);
         let compressed_value = value_ref.unwrap_or(&self.buf);
-        let mut batch = self.batch.lock();
+        let mut batch = self.write_batch().lock();
         if T::DUPSORT {
             let subkey = &compressed_value[..value.subkey_compress_length().unwrap()];
             let composite_key = Self::encode_dupsort_key(encoded_key.as_ref(), subkey);
@@ -310,7 +317,7 @@ impl<T: Table> DbCursorRW<T> for Cursor<RW, T> {
             let Some(key) = self.iterator.key()
         {
             let cf_handle = get_cf_handle::<T>(self.source.db())?;
-            let mut batch = self.batch.lock();
+            let mut batch = self.write_batch().lock();
             batch.delete_cf(cf_handle, key);
         }
         Ok(())
@@ -335,7 +342,7 @@ impl<T: Table> DbCursorRW<T> for Cursor<RW, T> {
                 }
             }
 
-            let mut batch = self.batch.lock();
+            let mut batch = self.write_batch().lock();
             if carry {
                 let iter = self.source.db().iterator_cf(
                     cf_handle,
@@ -360,7 +367,7 @@ impl<T: Table> DbCursorRW<T> for Cursor<RW, T> {
                 batch.delete_range_cf(cf_handle, main_key, next_key);
             }
         } else {
-            let mut batch = self.batch.lock();
+            let mut batch = self.write_batch().lock();
             batch.delete_cf(cf_handle, key.encode().as_ref());
         }
         Ok(())
@@ -566,7 +573,7 @@ impl<T: DupSort> DbDupCursorRW<T> for Cursor<RW, T> {
         let subkey = &compressed_value[..value.subkey_compress_length().unwrap()];
         let composite_key = Self::encode_dupsort_key(encoded_key.as_ref(), subkey);
 
-        let mut batch = self.batch.lock();
+        let mut batch = self.write_batch().lock();
         batch.put_cf(cf_handle, &composite_key, compressed_value);
         Ok(())
     }
@@ -581,7 +588,7 @@ impl<T: DupSort> DbDupCursorRW<T> for Cursor<RW, T> {
         let composite_key = Self::encode_dupsort_key(encoded_key.as_ref(), encoded_subkey.as_ref());
 
         let cf_handle = get_cf_handle::<T>(self.source.db())?;
-        let mut batch = self.batch.lock();
+        let mut batch = self.write_batch().lock();
         batch.delete_cf(cf_handle, &composite_key);
         Ok(())
     }

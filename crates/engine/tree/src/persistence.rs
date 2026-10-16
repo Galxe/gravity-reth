@@ -288,7 +288,7 @@ where
             )?;
             provider_rw.write_trie_updatesv2(triev2.as_ref()).map_err(ProviderError::Database)?;
 
-            self.commit_block(provider_rw, block_number)?;
+            self.commit_persistence_unit(provider_rw, block_number)?;
             metrics::histogram!("save_blocks_time", &[("process", "atomic_block")])
                 .record(start.elapsed());
         }
@@ -401,7 +401,7 @@ where
             provider_rw.write_trie_updatesv2(triev2.as_ref()).map_err(ProviderError::Database)?;
         }
 
-        self.commit_block(provider_rw, group_last)?;
+        self.commit_persistence_unit(provider_rw, group_last)?;
 
         metrics::histogram!("save_blocks_time", &[("process", "merge_block")])
             .record(start.elapsed() / block_count);
@@ -409,7 +409,7 @@ where
     }
 
     /// Commit state before the tries, then record Merkle completion after both trie writes.
-    fn commit_block<TX: DbTx + DbTxMut + 'static>(
+    fn commit_persistence_unit<TX: DbTx + DbTxMut + 'static>(
         &self,
         provider_rw: DatabaseProvider<TX, N>,
         block_number: u64,
@@ -626,10 +626,35 @@ mod tests {
     use reth_prune::Pruner;
     use reth_trie::{HashedPostState, KeccakKeyHasher};
     use reth_trie_parallel::nested_hash::NestedStateRoot;
-    use revm::database::states::{
-        reverts::Reverts, AccountRevert, AccountStatus, BundleAccount, BundleState,
-    };
+    use revm::database::states::{reverts::Reverts, AccountStatus, BundleState};
     use tokio::sync::mpsc::unbounded_channel;
+
+    fn default_persistence_handle() -> PersistenceHandle<EthPrimitives> {
+        let provider = create_test_provider_factory();
+
+        let (_finished_exex_height_tx, finished_exex_height_rx) =
+            tokio::sync::watch::channel(FinishedExExHeight::NoExExs);
+
+        let pruner =
+            Pruner::new_with_factory(provider.clone(), vec![], 5, 0, None, finished_exex_height_rx);
+
+        let (sync_metrics_tx, _sync_metrics_rx) = unbounded_channel();
+        PersistenceHandle::<EthPrimitives>::spawn_service(provider, pruner, sync_metrics_tx)
+    }
+
+    #[test]
+    fn test_save_blocks_empty() {
+        reth_tracing::init_test_tracing();
+        let handle = default_persistence_handle();
+
+        let blocks = vec![];
+        let (tx, rx) = crossbeam_channel::bounded(1);
+
+        handle.save_blocks(blocks, tx).unwrap();
+
+        let result = rx.recv().unwrap();
+        assert!(result.last_block.is_none());
+    }
 
     fn persistence_service(
         provider: ProviderFactory<MockNodeTypesWithDB>,
@@ -671,24 +696,19 @@ mod tests {
         previous: Option<Account>,
         value: u64,
     ) -> ExecutionOutcome {
-        let slot = B256::with_last_byte(1);
         let old_value = if previous.is_some() { U256::from(value - 1) } else { U256::ZERO };
         let account = Account { nonce: number, balance: U256::from(value), ..Default::default() };
-        let storage = std::iter::once((slot, (old_value, U256::from(value)))).collect();
-        let state = std::iter::once((address, (previous, Some(account), storage))).collect();
-        let account_reverts = std::iter::once((
-            address,
-            (Some(previous), vec![StorageEntry { key: slot, value: old_value }]),
-        ))
-        .collect();
-        ExecutionOutcome::new_init(
-            state,
-            std::iter::once((number, account_reverts)).collect(),
+        let bundle = BundleState::new(
+            [(
+                address,
+                previous.map(Into::into),
+                Some(account.into()),
+                std::iter::once((U256::from(1), (old_value, U256::from(value)))).collect(),
+            )],
+            [[(address, Some(previous.map(Into::into)), [(U256::from(1), old_value)])]],
             [],
-            vec![vec![]],
-            number,
-            vec![Default::default()],
-        )
+        );
+        ExecutionOutcome::new(bundle, vec![vec![]], number, vec![Default::default()])
     }
 
     fn empty_outcome() -> ExecutionOutcome {
@@ -707,20 +727,16 @@ mod tests {
         height: u64,
         state_committed: bool,
         completion_committed: bool,
-    ) {
+    ) -> eyre::Result<()> {
+        let storage_key = StorageShardedKey::last(address, B256::with_last_byte(1));
         let records = [
-            tx.get::<tables::PlainAccountState>(address).unwrap().is_some(),
-            tx.get::<tables::HashedAccounts>(keccak256(address)).unwrap().is_some(),
-            tx.get::<tables::PlainStorageState>(address).unwrap().is_some(),
-            tx.get::<tables::HashedStorages>(keccak256(address)).unwrap().is_some(),
-            tx.get::<tables::AccountsHistory>(ShardedKey::last(address)).unwrap().is_some(),
-            tx.get::<tables::StoragesHistory>(StorageShardedKey::last(
-                address,
-                B256::with_last_byte(1),
-            ))
-            .unwrap()
-            .is_some(),
-            tx.get::<tables::BlockBodyIndices>(height).unwrap().is_some(),
+            tx.get::<tables::PlainAccountState>(address)?.is_some(),
+            tx.get::<tables::HashedAccounts>(keccak256(address))?.is_some(),
+            tx.get::<tables::PlainStorageState>(address)?.is_some(),
+            tx.get::<tables::HashedStorages>(keccak256(address))?.is_some(),
+            tx.get::<tables::AccountsHistory>(ShardedKey::last(address))?.is_some(),
+            tx.get::<tables::StoragesHistory>(storage_key)?.is_some(),
+            tx.get::<tables::BlockBodyIndices>(height)?.is_some(),
         ];
         assert_eq!(records, [state_committed; 7]);
         for (stage, committed) in [
@@ -730,15 +746,10 @@ mod tests {
             (StageId::Finish, state_committed),
             (StageId::MerkleExecute, completion_committed),
         ] {
-            assert_eq!(
-                tx.get::<tables::StageCheckpoints>(stage.to_string())
-                    .unwrap()
-                    .unwrap()
-                    .block_number,
-                if committed { height } else { 0 },
-                "{stage:?}"
-            );
+            let checkpoint = tx.get::<tables::StageCheckpoints>(stage.to_string())?.unwrap();
+            assert_eq!(checkpoint.block_number, if committed { height } else { 0 }, "{stage:?}");
         }
+        Ok(())
     }
 
     #[cfg(feature = "failpoints")]
@@ -790,7 +801,7 @@ mod tests {
         );
     }
 
-    fn exercise_state_history(changesets_in_static_files: bool, merged: bool) {
+    fn exercise_state_history(changesets_in_static_files: bool, merged: bool) -> eyre::Result<()> {
         PERSIST_BLOCK_CACHE.reset();
         let provider = create_test_provider_factory();
         provider.set_storage_settings_cache(GravityStorageSettings { changesets_in_static_files });
@@ -813,75 +824,57 @@ mod tests {
         let root = blocks[1].recovered_block().state_root();
         persist(blocks);
 
-        let provider_ro = provider.database_provider_ro().unwrap();
+        let provider_ro = provider.database_provider_ro()?;
         let tx = provider_ro.tx_ref();
         let slot = B256::with_last_byte(1);
         let account = Account { nonce: 2, balance: U256::from(8), ..Default::default() };
-        assert_eq!(tx.get::<tables::PlainAccountState>(address).unwrap(), Some(account));
-        assert_eq!(NestedStateRoot::new(tx, None).calculate(&Default::default()).unwrap().0, root);
+        assert_eq!(tx.get::<tables::PlainAccountState>(address)?, Some(account));
+        assert_eq!(NestedStateRoot::new(tx, None).calculate(&Default::default())?.0, root);
         drop(provider_ro);
 
-        let mut bundle = BundleState::default();
-        bundle.state.insert(
-            address,
-            BundleAccount::new(
-                Some(account.into()),
-                None,
-                Default::default(),
-                AccountStatus::Destroyed,
-            ),
-        );
-        bundle.reverts = Reverts::new(vec![vec![(
-            address,
-            AccountRevert {
-                account: revm::database::states::reverts::AccountInfoRevert::RevertTo(
-                    account.into(),
-                ),
-                wipe_storage: true,
-                ..Default::default()
-            },
-        )]]);
+        let mut bundle = BundleState::builder(3..=3)
+            .state_original_account_info(address, account.into())
+            .revert_account_info(3, address, Some(Some(account.into())))
+            .build();
+        bundle.state.get_mut(&address).unwrap().status = AccountStatus::Destroyed;
+        bundle.reverts[0][0].1.wipe_storage = true;
         let wipe = ExecutionOutcome::new(bundle, vec![vec![]], 3, vec![Default::default()]);
         let wipe = state_block(&provider, wipe);
         let root = wipe.recovered_block().state_root();
         persist(vec![wipe]);
-        let provider_ro = provider.database_provider_ro().unwrap();
+        let provider_ro = provider.database_provider_ro()?;
         let tx = provider_ro.tx_ref();
-        assert_eq!(tx.get::<tables::PlainAccountState>(address).unwrap(), None);
-        assert_eq!(tx.get::<tables::HashedAccounts>(keccak256(address)).unwrap(), None);
-        assert_eq!(tx.get::<tables::PlainStorageState>(address).unwrap(), None);
-        assert_eq!(tx.get::<tables::HashedStorages>(keccak256(address)).unwrap(), None);
+        assert_eq!(tx.get::<tables::PlainAccountState>(address)?, None);
+        assert_eq!(tx.get::<tables::HashedAccounts>(keccak256(address))?, None);
+        assert_eq!(tx.get::<tables::PlainStorageState>(address)?, None);
+        assert_eq!(tx.get::<tables::HashedStorages>(keccak256(address))?, None);
         assert_eq!(
-            provider_ro.storage_changeset(3).unwrap()[0].1,
+            provider_ro.storage_changeset(3)?[0].1,
             StorageEntry { key: slot, value: U256::from(8) }
         );
-        assert_eq!(provider_ro.account_changesets_range(3..=3).unwrap()[0].1.info, Some(account));
+        assert_eq!(provider_ro.account_changesets_range(3..=3)?[0].1.info, Some(account));
         let histories = [
-            tx.get::<tables::AccountsHistory>(ShardedKey::last(address)).unwrap().unwrap(),
-            tx.get::<tables::StoragesHistory>(StorageShardedKey::last(address, slot))
-                .unwrap()
-                .unwrap(),
+            tx.get::<tables::AccountsHistory>(ShardedKey::last(address))?.unwrap(),
+            tx.get::<tables::StoragesHistory>(StorageShardedKey::last(address, slot))?.unwrap(),
         ];
         for history in histories {
             assert_eq!(history.iter().collect::<Vec<_>>(), vec![1, 2, 3]);
         }
-        assert_eq!(NestedStateRoot::new(tx, None).calculate(&Default::default()).unwrap().0, root);
+        assert_eq!(NestedStateRoot::new(tx, None).calculate(&Default::default())?.0, root);
         if changesets_in_static_files {
             use reth_provider::{
-                providers::BlockchainProvider, StateProviderFactory, StaticFileSegment,
+                providers::BlockchainProvider, ProviderReadView, StateProviderFactory,
+                StaticFileSegment,
             };
-            let view = BlockchainProvider::new(provider.clone())
-                .unwrap()
-                .rpc_provider()
-                .consistent_view()
-                .unwrap();
-            let state = view.history_by_block_number(1).unwrap();
+            let view =
+                BlockchainProvider::new(provider.clone())?.rpc_provider().consistent_view()?;
+            let state = view.history_by_block_number(1)?;
             assert!(state.proof(Default::default(), address, &[slot]).is_ok());
             let files = provider.static_file_provider();
             for segment in
                 [StaticFileSegment::AccountChangeSets, StaticFileSegment::StorageChangeSets]
             {
-                files.delete_jar(segment, 2).unwrap();
+                files.delete_jar(segment, 2)?;
             }
             assert!(state.basic_account(&address).is_err());
             assert!(state.storage(address, slot).is_err());
@@ -889,12 +882,13 @@ mod tests {
             assert!(state.storage_root(address, Default::default()).is_err());
             assert!(state.proof(Default::default(), address, &[slot]).is_err());
         }
+        Ok(())
     }
 
     #[test]
     fn per_block_persistence_keeps_state_history_and_wipes_complete() {
         for static_changesets in [false, true] {
-            exercise_state_history(static_changesets, false);
+            exercise_state_history(static_changesets, false).unwrap();
         }
     }
 
@@ -910,7 +904,7 @@ mod tests {
 
     #[cfg(feature = "failpoints")]
     #[test]
-    fn interrupted_commits_reopen_and_recover() {
+    fn interrupted_commits_reopen_and_recover() -> eyre::Result<()> {
         use crate::recovery::StorageRecoveryHelper;
         use std::panic::{catch_unwind, AssertUnwindSafe};
 
@@ -925,8 +919,7 @@ mod tests {
                 let reference = create_test_provider_factory();
                 let reference_service = persistence_service(reference.clone());
                 reference_service
-                    .save_blocks_per_block(vec![state_block(&reference, empty_outcome())])
-                    .unwrap();
+                    .save_blocks_per_block(vec![state_block(&reference, empty_outcome())])?;
                 let height = if merged { 2 } else { 1 };
                 let address = Address::with_last_byte(height as u8);
                 let first_address = Address::with_last_byte(1);
@@ -950,9 +943,7 @@ mod tests {
                     changesets_in_static_files: static_changesets,
                 });
                 let service = persistence_service(provider.clone());
-                service
-                    .save_blocks_per_block(vec![state_block(&provider, empty_outcome())])
-                    .unwrap();
+                service.save_blocks_per_block(vec![state_block(&provider, empty_outcome())])?;
                 fail::cfg(failpoint, "panic").unwrap();
                 assert!(catch_unwind(AssertUnwindSafe(|| {
                     if merged {
@@ -966,20 +957,18 @@ mod tests {
                 drop(service);
 
                 let mut provider = reopen_provider(provider, static_changesets);
-                let provider_ro = provider.database_provider_ro().unwrap();
+                let provider_ro = provider.database_provider_ro()?;
                 let tx = provider_ro.tx_ref();
-                assert_state_boundary(tx, first_address, height, state_committed, false);
+                assert_state_boundary(tx, first_address, height, state_committed, false)?;
                 assert_eq!(
-                    tx.get::<tables::AccountsTrieV2>(Default::default()).unwrap().is_some(),
+                    tx.get::<tables::AccountsTrieV2>(Default::default())?.is_some(),
                     state_committed
                 );
                 assert!(tx
-                    .cursor_dup_read::<tables::StoragesTrieV2>()
-                    .unwrap()
-                    .seek_exact(keccak256(address))
-                    .unwrap()
+                    .cursor_dup_read::<tables::StoragesTrieV2>()?
+                    .seek_exact(keccak256(address))?
                     .is_none());
-                provider.static_file_provider().check_consistency(&provider_ro, false).unwrap();
+                provider.static_file_provider().check_consistency(&provider_ro, false)?;
                 drop(provider_ro);
                 if merged {
                     // A second interruption must leave the Merkle checkpoint behind state.
@@ -988,69 +977,36 @@ mod tests {
                     }))
                     .is_err());
                     provider = reopen_provider(provider, static_changesets);
-                    assert_state_boundary(
-                        provider.database_provider_ro().unwrap().tx_ref(),
-                        first_address,
-                        height,
-                        true,
-                        false,
-                    );
+                    let db = provider.database_provider_ro()?;
+                    assert_state_boundary(db.tx_ref(), first_address, height, true, false)?;
                 }
                 fail::remove(failpoint);
-                StorageRecoveryHelper::new(&provider).check_and_recover().unwrap();
+                StorageRecoveryHelper::new(&provider).check_and_recover()?;
                 if !state_committed {
                     let replay = state_block(&provider, account_update(1, address, None, 7));
                     assert_eq!(
                         replay.recovered_block().state_root(),
                         last.recovered_block().state_root()
                     );
-                    persistence_service(provider.clone())
-                        .save_blocks_per_block(vec![replay])
-                        .unwrap();
+                    persistence_service(provider.clone()).save_blocks_per_block(vec![replay])?;
                 }
-                let provider_ro = provider.database_provider_ro().unwrap();
-                assert_state_boundary(provider_ro.tx_ref(), first_address, height, true, true);
+                let provider_ro = provider.database_provider_ro()?;
+                assert_state_boundary(provider_ro.tx_ref(), first_address, height, true, true)?;
                 assert_eq!(
-                    provider_ro.account_changesets_range(1..=height).unwrap().len(),
+                    provider_ro.account_changesets_range(1..=height)?.len(),
                     height as usize
                 );
-                assert_eq!(provider_ro.storage_changeset(height).unwrap().len(), 1);
+                assert_eq!(provider_ro.storage_changeset(height)?.len(), 1);
                 assert_persisted_trie(provider_ro.tx_ref(), address, &last);
             }
         }
-    }
-
-    fn default_persistence_handle() -> PersistenceHandle<EthPrimitives> {
-        let provider = create_test_provider_factory();
-
-        let (_finished_exex_height_tx, finished_exex_height_rx) =
-            tokio::sync::watch::channel(FinishedExExHeight::NoExExs);
-
-        let pruner =
-            Pruner::new_with_factory(provider.clone(), vec![], 5, 0, None, finished_exex_height_rx);
-
-        let (sync_metrics_tx, _sync_metrics_rx) = unbounded_channel();
-        PersistenceHandle::<EthPrimitives>::spawn_service(provider, pruner, sync_metrics_tx)
-    }
-
-    #[test]
-    fn test_save_blocks_empty() {
-        reth_tracing::init_test_tracing();
-        let handle = default_persistence_handle();
-
-        let blocks = vec![];
-        let (tx, rx) = crossbeam_channel::bounded(1);
-
-        handle.save_blocks(blocks, tx).unwrap();
-
-        let result = rx.recv().unwrap();
-        assert!(result.last_block.is_none());
+        Ok(())
     }
 
     #[test]
     fn merged_persistence_keeps_state_history_and_wipes_complete() {
         for static_changesets in [false, true] {
-            exercise_state_history(static_changesets, true);
+            exercise_state_history(static_changesets, true).unwrap();
         }
     }
 

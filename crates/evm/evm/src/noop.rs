@@ -29,6 +29,8 @@ impl<Inner> NoopEvmConfig<Inner> {
     }
 }
 
+impl<Inner: ConfigureEvm> crate::ConfigureEvmForRead for NoopEvmConfig<Inner> {}
+
 impl<Inner> ConfigureEvm for NoopEvmConfig<Inner>
 where
     Inner: ConfigureEvm,

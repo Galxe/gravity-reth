@@ -76,7 +76,10 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::Debug,
     ops::{Bound, Deref, DerefMut, Range, RangeBounds, RangeInclusive},
-    sync::{mpsc, Arc},
+    sync::{
+        atomic::{AtomicBool, Ordering as AtomicOrdering},
+        mpsc, Arc,
+    },
     thread,
 };
 use tracing::{debug, trace};
@@ -152,6 +155,8 @@ pub struct DatabaseProvider<TX, N: NodeTypes> {
     /// Cached storage layout settings, shared with the provider factory.
     storage_settings: Arc<RwLock<GravityStorageSettings>>,
     pub(crate) read_view: Option<Arc<super::ReadView>>,
+    /// A provider writes at most one combined outcome with history indices.
+    history_write_started: AtomicBool,
 }
 
 impl<TX, N: NodeTypes> DatabaseProvider<TX, N> {
@@ -275,6 +280,7 @@ impl<TX: DbTxMut, N: NodeTypes> DatabaseProvider<TX, N> {
             storage,
             storage_settings,
             read_view: None,
+            history_write_started: AtomicBool::new(false),
         }
     }
 }
@@ -658,6 +664,7 @@ impl<TX: DbTx + 'static, N: NodeTypesForProvider> DatabaseProvider<TX, N> {
             storage,
             storage_settings,
             read_view: None,
+            history_write_started: AtomicBool::new(false),
         }
     }
 
@@ -2096,8 +2103,9 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> DatabaseProvider<TX,
     ///
     /// Changesets are not read back from the transaction: `RocksDB` cursors cannot see pending
     /// writes. Each history key is appended once, including old slots added by storage wipes.
-    /// Call once between commits with the combined outcome for the whole range; separate calls
-    /// for shared keys would read the same committed history tail and overwrite pending appends.
+    /// Call once per provider with the combined outcome for the whole range; separate calls for
+    /// shared keys would read the same committed history tail and overwrite pending appends.
+    /// Create a new provider for the next block/group, including after a failed write.
     /// A primary storage wipe must be in the first block of the range so its old slots can be
     /// read from committed plain state.
     pub fn write_state_with_indices_and_history(
@@ -2107,6 +2115,20 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> DatabaseProvider<TX,
         write_receipts_to: StorageLocation,
         body_indices: Option<Vec<StoredBlockBodyIndices>>,
     ) -> ProviderResult<()> {
+        if let Some(block_index) =
+            execution_outcome.bundle.reverts.iter().enumerate().skip(1).find_map(
+                |(index, reverts)| {
+                    reverts.iter().any(|(_, revert)| revert.wipe_storage).then_some(index)
+                },
+            )
+        {
+            return Err(ProviderError::StorageWipeNotFirstBlock(
+                execution_outcome.first_block() + block_index as u64,
+            ))
+        }
+        if self.history_write_started.swap(true, AtomicOrdering::Relaxed) {
+            return Err(ProviderError::StateHistoryWriteAlreadyStarted)
+        }
         let mut history = StateHistoryIndices::default();
         self.write_state_with_indices_inner(
             execution_outcome,
@@ -3624,8 +3646,13 @@ impl<TX: DbTxMut, N: NodeTypes> ChainStateBlockWriter for DatabaseProvider<TX, N
 impl<TX: DbTx + 'static, N: NodeTypes + 'static> DBProvider for DatabaseProvider<TX, N> {
     type Tx = TX;
 
-    fn uses_trie_v2(&self) -> bool {
-        self.read_view.is_some()
+    fn ensure_trie_read_allowed(&self) -> ProviderResult<()> {
+        if self.read_view.as_ref().is_some_and(|view| !view.consistent) {
+            return Err(ProviderError::other(std::io::Error::other(
+                "trie reads require a consistent view",
+            )))
+        }
+        Ok(())
     }
 
     fn tx_ref(&self) -> &Self::Tx {
@@ -3751,13 +3778,23 @@ mod tests {
             let mut bundle = builder.build();
             bundle.state.get_mut(&address).unwrap().status = AccountStatus::Destroyed;
             bundle.reverts[0][0].1.wipe_storage = true;
-            let outcome = ExecutionOutcome::new(bundle, vec![vec![]; 3], first, Vec::new());
-            provider.write_state_with_indices_and_history(
-                &outcome,
-                OriginalValuesKnown::Yes,
-                StorageLocation::Database,
-                Some(vec![StoredBlockBodyIndices::default(); 3]),
-            )?;
+            let mut outcome = ExecutionOutcome::new(bundle, vec![vec![]; 3], first, Vec::new());
+            let write = |outcome: &ExecutionOutcome<_>| {
+                provider.write_state_with_indices_and_history(
+                    outcome,
+                    OriginalValuesKnown::Yes,
+                    StorageLocation::Database,
+                    Some(vec![StoredBlockBodyIndices::default(); 3]),
+                )
+            };
+            outcome.bundle.reverts[1][0].1.wipe_storage = true;
+            assert!(matches!(
+                write(&outcome),
+                Err(ProviderError::StorageWipeNotFirstBlock(block)) if block == first + 1
+            ));
+            outcome.bundle.reverts[1][0].1.wipe_storage = false;
+            write(&outcome)?;
+            assert!(matches!(write(&outcome), Err(ProviderError::StateHistoryWriteAlreadyStarted)));
             files.commit()?;
             provider.commit_view()?;
 

@@ -1,6 +1,9 @@
 //! `EthApiBuilder` implementation
 
-use crate::{eth::core::EthApiInner, EthApi};
+use crate::{
+    eth::core::{EthApiInner, EthApiReadContext},
+    EthApi,
+};
 use alloy_network::Ethereum;
 use reth_chain_state::CanonStateSubscriptions;
 use reth_chainspec::ChainSpecProvider;
@@ -625,7 +628,7 @@ where
         Rpc: RpcConvert,
         NextEnv: PendingEnvBuilder<N::Evm>,
     {
-        EthApi { inner: Arc::new(self.build_inner()), use_node_provider: false, read_view: None }
+        EthApi { inner: Arc::new(self.build_inner()), read_context: EthApiReadContext::LiveRpc }
     }
 
     /// Sets the timeout for `send_raw_transaction_sync` RPC method.

@@ -8,16 +8,10 @@ use reth_primitives_traits::{Account, Bytecode};
 use reth_storage_api::{BytecodeReader, DBProvider, StateProofProvider, StorageRootProvider};
 use reth_storage_errors::provider::{ProviderError, ProviderResult};
 use reth_trie::{
-    proof::{Proof, StorageProof},
-    updates::TrieUpdates,
-    witness::TrieWitness,
-    AccountProof, HashedPostState, HashedStorage, KeccakKeyHasher, MultiProof, MultiProofTargets,
-    StateRoot, StorageMultiProof, StorageRoot, TrieInput,
+    updates::TrieUpdates, AccountProof, HashedPostState, HashedStorage, KeccakKeyHasher,
+    MultiProof, MultiProofTargets, StorageMultiProof, TrieInput,
 };
-use reth_trie_db::{
-    nested_hash::NestedStateRoot, DatabaseProof, DatabaseStateRoot, DatabaseStorageProof,
-    DatabaseStorageRoot, DatabaseTrieWitness,
-};
+use reth_trie_db::nested_hash::NestedStateRoot;
 
 /// State provider over latest state that takes tx reference.
 ///
@@ -36,6 +30,7 @@ impl<'b, Provider: DBProvider> LatestStateProviderRef<'b, Provider> {
     }
 
     fn trie_state(&self, mut state: HashedPostState) -> ProviderResult<HashedPostState> {
+        self.0.ensure_trie_read_allowed()?;
         super::complete_storage_accounts(self.tx(), &mut state)?;
         Ok(state)
     }
@@ -65,40 +60,27 @@ impl<Provider: BlockHashReader> BlockHashReader for LatestStateProviderRef<'_, P
 
 impl<Provider: DBProvider + Sync> StateRootProvider for LatestStateProviderRef<'_, Provider> {
     fn state_root(&self, hashed_state: HashedPostState) -> ProviderResult<B256> {
-        if self.0.uses_trie_v2() {
-            return NestedStateRoot::new(self.tx(), None).root(&self.trie_state(hashed_state)?)
-        }
-        StateRoot::overlay_root(self.tx(), hashed_state).map_err(ProviderError::from)
+        NestedStateRoot::new(self.tx(), None).root(&self.trie_state(hashed_state)?)
     }
 
     fn state_root_from_nodes(&self, input: TrieInput) -> ProviderResult<B256> {
-        if self.0.uses_trie_v2() {
-            return self.state_root(input.state)
-        }
-        StateRoot::overlay_root_from_nodes(self.tx(), input).map_err(ProviderError::from)
+        self.state_root(input.state)
     }
 
     fn state_root_with_updates(
         &self,
         hashed_state: HashedPostState,
     ) -> ProviderResult<(B256, TrieUpdates)> {
-        if self.0.uses_trie_v2() {
-            return NestedStateRoot::new(self.tx(), None)
-                .calculate(&self.trie_state(hashed_state)?)
-                .map(|(root, updates)| (root, updates.into_legacy()))
-        }
-        StateRoot::overlay_root_with_updates(self.tx(), hashed_state).map_err(ProviderError::from)
+        NestedStateRoot::new(self.tx(), None)
+            .calculate(&self.trie_state(hashed_state)?)
+            .map(|(root, updates)| (root, updates.into_legacy()))
     }
 
     fn state_root_from_nodes_with_updates(
         &self,
         input: TrieInput,
     ) -> ProviderResult<(B256, TrieUpdates)> {
-        if self.0.uses_trie_v2() {
-            return self.state_root_with_updates(input.state)
-        }
-        StateRoot::overlay_root_from_nodes_with_updates(self.tx(), input)
-            .map_err(ProviderError::from)
+        self.state_root_with_updates(input.state)
     }
 }
 
@@ -108,12 +90,8 @@ impl<Provider: DBProvider + Sync> StorageRootProvider for LatestStateProviderRef
         address: Address,
         hashed_storage: HashedStorage,
     ) -> ProviderResult<B256> {
-        if self.0.uses_trie_v2() {
-            return NestedStateRoot::new(self.tx(), None)
-                .storage_root(keccak256(address), &hashed_storage)
-        }
-        StorageRoot::overlay_root(self.tx(), address, hashed_storage)
-            .map_err(|err| ProviderError::Database(err.into()))
+        self.0.ensure_trie_read_allowed()?;
+        NestedStateRoot::new(self.tx(), None).storage_root(keccak256(address), &hashed_storage)
     }
 
     fn storage_proof(
@@ -122,14 +100,9 @@ impl<Provider: DBProvider + Sync> StorageRootProvider for LatestStateProviderRef
         slot: B256,
         hashed_storage: HashedStorage,
     ) -> ProviderResult<reth_trie::StorageProof> {
-        if self.0.uses_trie_v2() {
-            return self
-                .storage_multiproof(address, &[slot], hashed_storage)?
-                .storage_proof(slot)
-                .map_err(Into::into)
-        }
-        StorageProof::overlay_storage_proof(self.tx(), address, slot, hashed_storage)
-            .map_err(ProviderError::from)
+        self.storage_multiproof(address, &[slot], hashed_storage)?
+            .storage_proof(slot)
+            .map_err(Into::into)
     }
 
     fn storage_multiproof(
@@ -138,16 +111,13 @@ impl<Provider: DBProvider + Sync> StorageRootProvider for LatestStateProviderRef
         slots: &[B256],
         hashed_storage: HashedStorage,
     ) -> ProviderResult<StorageMultiProof> {
-        if self.0.uses_trie_v2() {
-            let slots = slots.iter().map(keccak256).collect::<Vec<_>>();
-            return NestedStateRoot::new(self.tx(), None).storage_proof(
-                keccak256(address),
-                &hashed_storage,
-                &slots,
-            )
-        }
-        StorageProof::overlay_storage_multiproof(self.tx(), address, slots, hashed_storage)
-            .map_err(ProviderError::from)
+        self.0.ensure_trie_read_allowed()?;
+        let slots = slots.iter().map(keccak256).collect::<Vec<_>>();
+        NestedStateRoot::new(self.tx(), None).storage_proof(
+            keccak256(address),
+            &hashed_storage,
+            &slots,
+        )
     }
 }
 
@@ -158,17 +128,11 @@ impl<Provider: DBProvider + Sync> StateProofProvider for LatestStateProviderRef<
         address: Address,
         slots: &[B256],
     ) -> ProviderResult<AccountProof> {
-        if self.0.uses_trie_v2() {
-            let targets = MultiProofTargets::from_iter([(
-                keccak256(address),
-                slots.iter().map(keccak256).collect(),
-            )]);
-            return self
-                .multiproof(input, targets)?
-                .account_proof(address, slots)
-                .map_err(Into::into)
-        }
-        Proof::overlay_account_proof(self.tx(), input, address, slots).map_err(ProviderError::from)
+        let targets = MultiProofTargets::from_iter([(
+            keccak256(address),
+            slots.iter().map(keccak256).collect(),
+        )]);
+        self.multiproof(input, targets)?.account_proof(address, slots).map_err(Into::into)
     }
 
     fn multiproof(
@@ -176,20 +140,12 @@ impl<Provider: DBProvider + Sync> StateProofProvider for LatestStateProviderRef<
         input: TrieInput,
         targets: MultiProofTargets,
     ) -> ProviderResult<MultiProof> {
-        if self.0.uses_trie_v2() {
-            return NestedStateRoot::new(self.tx(), None)
-                .multiproof(&self.trie_state(input.state)?, targets)
-        }
-        Proof::overlay_multiproof(self.tx(), input, targets).map_err(ProviderError::from)
+        NestedStateRoot::new(self.tx(), None).multiproof(&self.trie_state(input.state)?, targets)
     }
 
-    fn witness(&self, input: TrieInput, target: HashedPostState) -> ProviderResult<Vec<Bytes>> {
-        if self.0.uses_trie_v2() {
-            return Err(ProviderError::UnsupportedProvider)
-        }
-        TrieWitness::overlay_witness(self.tx(), input, target)
-            .map_err(ProviderError::from)
-            .map(|hm| hm.into_values().collect())
+    fn witness(&self, _input: TrieInput, _target: HashedPostState) -> ProviderResult<Vec<Bytes>> {
+        self.0.ensure_trie_read_allowed()?;
+        Err(ProviderError::UnsupportedProvider)
     }
 }
 

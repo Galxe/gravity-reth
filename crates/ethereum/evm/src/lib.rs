@@ -198,6 +198,8 @@ where
     }
 }
 
+impl<ChainSpec> reth_evm::ConfigureEvmForRead for EthEvmConfig<ChainSpec> where Self: ConfigureEvm {}
+
 impl<ChainSpec> ConfigureEvm for EthEvmConfig<ChainSpec>
 where
     ChainSpec: EthExecutorSpec + EthChainSpec<Header = Header> + Hardforks + 'static,

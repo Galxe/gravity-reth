@@ -41,9 +41,9 @@ use reth_provider::{
     AccountReader, BlockHashReader, BlockIdReader, BlockNumReader, BlockReader, BytecodeReader,
     CanonChainTracker, CanonStateNotification, CanonStateNotifications, CanonStateSubscriptions,
     ChainStateBlockReader, ChainStateBlockWriter, ChangeSetReader, DatabaseProviderFactory,
-    HeaderProvider, PruneCheckpointReader, ReceiptProvider, StageCheckpointReader, StateProvider,
-    StateProviderBox, StateProviderFactory, StateReader, StateRootProvider, StorageReader,
-    TransactionVariant, TransactionsProvider,
+    HeaderProvider, ProviderReadView, PruneCheckpointReader, ReceiptProvider,
+    StageCheckpointReader, StateProvider, StateProviderBox, StateProviderFactory, StateReader,
+    StateRootProvider, StorageReader, TransactionVariant, TransactionsProvider,
 };
 use reth_prune_types::{PruneCheckpoint, PruneSegment};
 use reth_stages_types::{StageCheckpoint, StageId};
@@ -543,6 +543,8 @@ where
         Err(ProviderError::UnsupportedProvider)
     }
 }
+
+impl<P, Node: NodeTypes, N> ProviderReadView for AlloyRethProvider<P, Node, N> where Self: Clone {}
 
 impl<P, Node, N> StateProviderFactory for AlloyRethProvider<P, Node, N>
 where
@@ -1491,6 +1493,9 @@ where
         Err(ProviderError::UnsupportedProvider)
     }
 }
+
+impl<P, Node: NodeTypes, N> ProviderReadView for AlloyRethStateProvider<P, Node, N> where Self: Clone
+{}
 
 impl<P, Node, N> StateProviderFactory for AlloyRethStateProvider<P, Node, N>
 where

@@ -25,9 +25,12 @@ pub trait DBProvider: Sized {
     /// Consumes the provider and returns the underlying transaction.
     fn into_tx(self) -> Self::Tx;
 
-    /// Whether this provider reads the nested trie layout.
-    fn uses_trie_v2(&self) -> bool {
-        false
+    /// Checks whether this read context allows trie reads.
+    ///
+    /// Providers with only a state snapshot must reject trie reads: live trie data cannot
+    /// safely be combined with that snapshot.
+    fn ensure_trie_read_allowed(&self) -> ProviderResult<()> {
+        Ok(())
     }
 
     /// Disables long-lived read transaction safety guarantees for leaks prevention and
@@ -156,16 +159,6 @@ pub trait DatabaseProviderFactory: Send + Sync {
 
     /// Read-write provider type returned by the factory.
     type ProviderRW: DBProvider<Tx = <Self::DB as Database>::TXMut>;
-
-    /// Selects fixed state reads for external queries without changing execution providers.
-    /// Call on the concrete factory before wrapping it; generated proxies only clone themselves.
-    #[auto_impl(keep_default_for(&, Arc))]
-    fn rpc_provider(&self) -> Self
-    where
-        Self: Sized + Clone,
-    {
-        self.clone()
-    }
 
     /// Create new read-only database provider.
     fn database_provider_ro(&self) -> ProviderResult<Self::Provider>;

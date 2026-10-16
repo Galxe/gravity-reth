@@ -374,3 +374,34 @@ where
         self.inner.receipts()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gravity::{
+        test_utils::{gravity_chain_spec, MockChainReader},
+        GravityEvmConfig,
+    };
+    use reth_evm::ConfigureEvmForRead;
+    use reth_storage_api::noop::NoopProvider;
+
+    #[test]
+    fn arc_config_rebinds_auxiliary_reads_and_replay_mode() {
+        let randomness = B256::repeat_byte(0x17);
+        let original = Arc::new(GravityEvmConfig::new(
+            gravity_chain_spec(),
+            Arc::new(MockChainReader::default().with_mix_hash(1, randomness)),
+        ));
+        let captured = original
+            .chain_block_mode()
+            .with_read_provider(NoopProvider::<reth_chainspec::ChainSpec>::default());
+
+        assert!(captured.chain_block_mode);
+        assert!(!original.chain_block_mode);
+        assert_eq!(captured.executor_factory.reader.mix_hash_by_number(1).unwrap(), None);
+        assert_eq!(
+            original.executor_factory.reader.mix_hash_by_number(1).unwrap(),
+            Some(randomness)
+        );
+    }
+}

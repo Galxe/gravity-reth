@@ -8,13 +8,14 @@ use futures::{Stream, StreamExt};
 use jsonrpsee::{core::RpcResult, PendingSubscriptionSink, SubscriptionMessage, SubscriptionSink};
 use reth_chain_state::{CanonStateNotification, CanonStateSubscriptions, ForkChoiceSubscriptions};
 use reth_errors::RethResult;
-use reth_evm::{execute::Executor, ConfigureEvm};
+use reth_evm::{execute::Executor, ConfigureEvmForRead};
 use reth_execution_types::ExecutionOutcome;
 use reth_primitives_traits::{NodePrimitives, SealedHeader};
 use reth_rpc_api::RethApiServer;
 use reth_rpc_eth_types::{EthApiError, EthResult};
 use reth_storage_api::{
-    BlockReader, BlockReaderIdExt, ChangeSetReader, StateProviderFactory, TransactionVariant,
+    BlockReader, BlockReaderIdExt, ChangeSetReader, ProviderReadView, StateProviderFactory,
+    TransactionVariant,
 };
 use reth_tasks::{pool::BlockingTaskGuard, Runtime};
 use serde::Serialize;
@@ -55,7 +56,12 @@ impl<Provider, EvmConfig> RethApi<Provider, EvmConfig> {
 
 impl<Provider, EvmConfig> RethApi<Provider, EvmConfig>
 where
-    Provider: BlockReaderIdExt + ChangeSetReader + StateProviderFactory + Clone + 'static,
+    Provider: BlockReaderIdExt
+        + ChangeSetReader
+        + StateProviderFactory
+        + ProviderReadView
+        + Clone
+        + 'static,
     EvmConfig: Send + Sync + 'static,
 {
     /// Executes the future on a new blocking task.
@@ -109,11 +115,12 @@ where
     Provider: BlockReaderIdExt
         + ChangeSetReader
         + StateProviderFactory
+        + ProviderReadView
         + BlockReader<Block = N::Block, Receipt = N::Receipt, Header = N::BlockHeader>
         + CanonStateSubscriptions<Primitives = N>
         + Clone
         + 'static,
-    EvmConfig: ConfigureEvm<Primitives = N> + 'static,
+    EvmConfig: ConfigureEvmForRead<Primitives = N> + 'static,
 {
     /// Re-executes one or more consecutive blocks and returns the execution outcome.
     pub async fn block_execution_outcome(
@@ -190,6 +197,7 @@ where
     Provider: BlockReaderIdExt
         + ChangeSetReader
         + StateProviderFactory
+        + ProviderReadView
         + BlockReader<
             Block = <Provider::Primitives as NodePrimitives>::Block,
             Receipt = <Provider::Primitives as NodePrimitives>::Receipt,
@@ -198,7 +206,7 @@ where
         + ForkChoiceSubscriptions<Header = <Provider::Primitives as NodePrimitives>::BlockHeader>
         + Clone
         + 'static,
-    EvmConfig: ConfigureEvm<Primitives = Provider::Primitives> + 'static,
+    EvmConfig: ConfigureEvmForRead<Primitives = Provider::Primitives> + 'static,
 {
     /// Handler for `reth_getBalanceChangesInBlock`
     async fn reth_get_balance_changes_in_block(

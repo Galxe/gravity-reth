@@ -26,7 +26,7 @@ use reth_node_builder::EngineNodeLauncher;
 use reth_node_ethereum::{node::EthereumAddOns, EthereumNode};
 use reth_pipe_exec_layer_ext_v2::{new_pipe_exec_layer_api, ExecutionArgs};
 use reth_provider::{
-    providers::BlockchainProvider, BlockHashReader, HeaderProvider, StateProviderFactory,
+    providers::BlockchainProvider, BlockHashReader, HeaderProvider, ProviderReadView,
 };
 use rpc::RpcClient;
 use std::{

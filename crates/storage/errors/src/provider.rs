@@ -167,6 +167,14 @@ pub enum ProviderError {
     /// Received invalid output from configured storage implementation.
     #[error("received invalid output from storage")]
     InvalidStorageOutput,
+    /// A provider cannot append history for multiple pending execution outcomes.
+    #[error(
+        "state and history write already started; use a new provider for the next block/group"
+    )]
+    StateHistoryWriteAlreadyStarted,
+    /// Storage wipe reverts require the state committed before the persistence unit.
+    #[error("storage wipe at block #{_0} must start a new persistence group")]
+    StorageWipeNotFirstBlock(BlockNumber),
     /// Missing trie updates.
     #[error("missing trie updates for block {0}")]
     MissingTrieUpdates(B256),

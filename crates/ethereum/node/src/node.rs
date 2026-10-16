@@ -34,7 +34,7 @@ use reth_node_builder::{
     BuilderContext, DebugNode, Node, NodeAdapter, PayloadBuilderConfig,
 };
 use reth_payload_primitives::PayloadTypes;
-use reth_provider::{providers::ProviderFactoryBuilder, DatabaseProviderFactory, EthStorage};
+use reth_provider::{providers::ProviderFactoryBuilder, EthStorage, ProviderReadView};
 use reth_rpc::{
     eth::core::{EthApiFor, EthRpcConverterFor},
     TestingApi, ValidationApi,

@@ -21,7 +21,7 @@ use reth_consensus::{Consensus, FullConsensus};
 use reth_consensus_common::validation::MAX_RLP_BLOCK_SIZE;
 use reth_engine_primitives::PayloadValidator;
 use reth_errors::{BlockExecutionError, ConsensusError, ProviderError};
-use reth_evm::{execute::Executor, ConfigureEvm};
+use reth_evm::{execute::Executor, ConfigureEvm, ConfigureEvmForRead};
 use reth_execution_types::BlockExecutionOutput;
 use reth_metrics::{
     metrics,
@@ -36,7 +36,7 @@ use reth_primitives_traits::{
 use reth_revm::{cached::CachedReads, database::StateProviderDatabase};
 use reth_rpc_api::BlockSubmissionValidationApiServer;
 use reth_rpc_server_types::result::{internal_rpc_err, invalid_params_rpc_err};
-use reth_storage_api::{BlockReaderIdExt, StateProviderFactory};
+use reth_storage_api::{BlockReaderIdExt, ProviderReadView, StateProviderFactory};
 use reth_tasks::Runtime;
 use revm_primitives::{Address, B256, U256};
 use serde::{Deserialize, Serialize};
@@ -119,9 +119,10 @@ where
             Receipt = <E::Primitives as NodePrimitives>::Receipt,
         > + ChainSpecProvider<ChainSpec: EthereumHardforks>
         + StateProviderFactory
+        + ProviderReadView
         + Clone
         + 'static,
-    E: ConfigureEvm + 'static,
+    E: ConfigureEvmForRead + 'static,
     T: PayloadTypes<ExecutionData = ExecutionData>,
 {
     /// Validates the given block and a [`BidTrace`] against it.
@@ -520,9 +521,10 @@ where
             Receipt = <E::Primitives as NodePrimitives>::Receipt,
         > + ChainSpecProvider<ChainSpec: EthereumHardforks>
         + StateProviderFactory
+        + ProviderReadView
         + Clone
         + 'static,
-    E: ConfigureEvm + 'static,
+    E: ConfigureEvmForRead + 'static,
     T: PayloadTypes<ExecutionData = ExecutionData>,
 {
     async fn validate_builder_submission_v1(

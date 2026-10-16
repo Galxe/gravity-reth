@@ -260,12 +260,13 @@ where
         hashed_state: &HashedPostState,
         targets: MultiProofTargets,
     ) -> ProviderResult<(B256, MultiProof)> {
-        self.calculate_and_proof(hashed_state, targets).map(|(root, _, proof)| (root, proof))
+        self.calculate_with_mode(hashed_state, CalculationMode::WithProof(targets))
+            .map(|(root, _, proof)| (root, proof))
     }
 
     /// Calculate only the V2 state root after applying the hashed-state overlay.
     pub fn root(&self, hashed_state: &HashedPostState) -> ProviderResult<B256> {
-        self.calculate(hashed_state).map(|r| r.0)
+        self.calculate_with_mode(hashed_state, CalculationMode::Root).map(|(root, _, _)| root)
     }
 
     /// Calculate the root hash of nested trie.
@@ -274,7 +275,8 @@ where
         &self,
         hashed_state: &HashedPostState,
     ) -> ProviderResult<(B256, TrieUpdatesV2)> {
-        self.calculate_and_proof(hashed_state, Default::default()).map(|r| (r.0, r.1))
+        self.calculate_with_mode(hashed_state, CalculationMode::WithUpdates)
+            .map(|(root, updates, _)| (root, updates))
     }
 
     /// Calculate a V2 storage root after applying a hashed storage overlay.
@@ -283,16 +285,21 @@ where
         hashed_address: B256,
         storage: &HashedStorage,
     ) -> ProviderResult<B256> {
-        self.storage_proof(hashed_address, storage, &[]).map(|proof| proof.root)
+        self.storage_trie(hashed_address, storage).map(|mut trie| trie.hash())
     }
 
-    fn calculate_and_proof(
+    fn calculate_with_mode(
         &self,
         hashed_state: &HashedPostState,
-        targets: MultiProofTargets,
+        mode: CalculationMode,
     ) -> ProviderResult<(B256, TrieUpdatesV2, MultiProof)> {
-        let need_update = targets.is_empty();
+        let retain_updates = matches!(mode, CalculationMode::WithUpdates);
+        let targets = match mode {
+            CalculationMode::WithProof(targets) => targets,
+            _ => MultiProofTargets::default(),
+        };
         let trie_update = Mutex::new(TrieUpdatesV2::default());
+        let storage_proofs = Mutex::new(B256Map::default());
         let updated_account_nodes: [Mutex<Vec<(Nibbles, Option<Node>)>>; 16] = Default::default();
         let mut partitioned_accounts: [Vec<(&B256, &Option<Account>)>; 16] = Default::default();
         let HashedPostState { accounts: hashed_accounts, storages: hashed_storages } = hashed_state;
@@ -315,82 +322,36 @@ where
                             let hashed_address = *hashed_address;
                             let account = *account;
                             let path = Nibbles::unpack(hashed_address);
-                            let deleted_storage = || {
-                                if need_update {
-                                    trie_update
-                                        .lock()
-                                        .storage_tries
-                                        .insert(hashed_address, StorageTrieUpdatesV2::deleted());
-                                }
-                            };
                             if let Some(account) = account {
-                                let storage = hashed_storages.get(&hashed_address);
-                                // If the account was wiped (self-destructed, and possibly
-                                // recreated in the same block) the storage trie must be rebuilt
-                                // from scratch: the on-disk / cached nodes belong to the
-                                // destroyed incarnation and must not be read. We build the trie
-                                // with an empty reader and flag the update as `is_deleted` so the
-                                // writer drops all previous nodes before applying the rebuilt
-                                // ones. Note: the recreated slots are still applied below, which
-                                // is exactly what was dropped before this fix.
-                                let wiped = storage.is_some_and(|storage| storage.wiped);
-
-                                let mut updated_storage_nodes: [Vec<(Nibbles, Option<Node>)>; 16] =
-                                    Default::default();
-                                // only make the large storage trie parallel
-                                let parallel = storage.is_some_and(|storage| {
-                                    storage.storage.len() > MIN_PARALLEL_NODES
-                                });
-                                if let Some(storage) = storage {
-                                    for (hashed_slot, value) in &storage.storage {
-                                        let nibbles = Nibbles::unpack(*hashed_slot);
-                                        let index = nibbles.get_unchecked(0) as usize;
-                                        let value = if value.is_zero() {
-                                            None
-                                        } else {
-                                            let value = encode_fixed_size(value);
-                                            Some(Node::ValueNode(value.to_vec()))
-                                        };
-                                        updated_storage_nodes[index].push((nibbles, value));
-                                    }
-                                }
-
-                                let create_reader = || {
-                                    if wiped {
-                                        Ok(MaybeEmptyStorageReader::Empty)
-                                    } else {
-                                        let cursor =
-                                            self.tx.cursor_dup_read::<tables::StoragesTrieV2>()?;
-                                        Ok(MaybeEmptyStorageReader::Storage(
-                                            StorageTrieReader::new(
-                                                cursor,
-                                                hashed_address,
-                                                self.cache.clone(),
-                                            ),
-                                        ))
-                                    }
-                                };
-                                let trie_reader = create_reader()?;
-                                let mut storage_trie = Trie::new(trie_reader, parallel)?;
-                                storage_trie
-                                    .parallel_update(updated_storage_nodes, create_reader)?;
+                                let empty_storage = HashedStorage::default();
+                                let storage =
+                                    hashed_storages.get(&hashed_address).unwrap_or(&empty_storage);
+                                let mut storage_trie =
+                                    self.storage_trie(hashed_address, storage)?;
                                 let account = account.into_trie_account(storage_trie.hash());
                                 updated_account_nodes.push((
                                     path,
                                     Some(Node::ValueNode(alloy_rlp::encode(account))),
                                 ));
+                                if let Some(slots) = targets.get(&hashed_address) {
+                                    let proof = storage_proof_from_trie(
+                                        &mut storage_trie,
+                                        slots.iter().copied(),
+                                    )?;
+                                    storage_proofs.lock().insert(hashed_address, proof);
+                                }
 
-                                if need_update {
+                                if retain_updates {
                                     let trie_output = storage_trie.take_output();
                                     // A wipe must emit a deletion marker even when no nodes remain.
-                                    if wiped || !trie_output.is_empty() {
+                                    if storage.wiped || !trie_output.is_empty() {
                                         assert!(trie_update
                                             .lock()
                                             .storage_tries
                                             .insert(
                                                 hashed_address,
                                                 StorageTrieUpdatesV2 {
-                                                    is_deleted: wiped,
+                                                    is_deleted: storage.wiped,
                                                     storage_nodes: trie_output.update_nodes,
                                                     removed_nodes: trie_output.removed_nodes,
                                                 }
@@ -400,7 +361,12 @@ where
                                 }
                             } else {
                                 updated_account_nodes.push((path, None));
-                                deleted_storage();
+                                if retain_updates {
+                                    trie_update
+                                        .lock()
+                                        .storage_tries
+                                        .insert(hashed_address, StorageTrieUpdatesV2::deleted());
+                                }
                             }
                         }
                         Ok(())
@@ -418,6 +384,7 @@ where
         let updated_account_nodes = updated_account_nodes.map(|u| u.into_inner());
         let mut trie_update = trie_update.into_inner();
         let mut proofs = MultiProof::default();
+        let mut storage_proofs = storage_proofs.into_inner();
         let create_reader = || {
             let cursor = self.tx.cursor_read::<tables::AccountsTrieV2>()?;
             Ok(AccountTrieReader(cursor, self.cache.clone()))
@@ -434,12 +401,13 @@ where
                 proofs.account_subtree.insert(path, Bytes::from(alloy_rlp::encode(node)));
             }
             let storage_proof = if let Some(account) = account {
-                let empty_storage = HashedStorage::default();
-                let proof = self.storage_proof(
-                    hashed_address,
-                    hashed_storages.get(&hashed_address).unwrap_or(&empty_storage),
-                    &slots.into_iter().collect::<Vec<_>>(),
-                )?;
+                let proof = if let Some(proof) = storage_proofs.remove(&hashed_address) {
+                    proof
+                } else {
+                    // Accounts outside the overlay retain their persisted storage trie.
+                    let mut trie = self.storage_trie(hashed_address, &HashedStorage::default())?;
+                    storage_proof_from_trie(&mut trie, slots)?
+                };
                 if proof.root != account.storage_root {
                     return Err(DatabaseError::Other(format!(
                         "V2 storage proof root for {hashed_address} does not match account leaf"
@@ -452,7 +420,7 @@ where
             };
             proofs.storages.insert(hashed_address, storage_proof);
         }
-        if need_update {
+        if retain_updates {
             let output = account_trie.take_output();
             trie_update.account_nodes = output.update_nodes;
             trie_update.removed_nodes = output.removed_nodes;
@@ -468,8 +436,20 @@ where
         storage: &HashedStorage,
         slots: &[B256],
     ) -> ProviderResult<StorageMultiProof> {
+        storage_proof_from_trie(
+            &mut self.storage_trie(hashed_address, storage)?,
+            slots.iter().copied(),
+        )
+    }
+
+    fn storage_trie(
+        &self,
+        hashed_address: B256,
+        storage: &HashedStorage,
+    ) -> ProviderResult<Trie<MaybeEmptyStorageReader<Tx::DupCursor<tables::StoragesTrieV2>>>> {
         let create_reader = || {
             if storage.wiped {
+                // A recreated account cannot reuse nodes from its previous incarnation.
                 Ok(MaybeEmptyStorageReader::Empty)
             } else {
                 let cursor = self.tx.cursor_dup_read::<tables::StoragesTrieV2>()?;
@@ -489,20 +469,33 @@ where
             updated_nodes[path.get_unchecked(0) as usize].push((path, node));
         }
         trie.parallel_update(updated_nodes, create_reader)?;
-        let root = trie.hash();
-        let mut proof = StorageMultiProof {
-            root,
-            subtree: Default::default(),
-            branch_node_hash_masks: Default::default(),
-            branch_node_tree_masks: Default::default(),
-        };
-        for slot in slots {
-            for (path, node) in trie.get_proof_with_paths(Nibbles::unpack(*slot))? {
-                proof.subtree.insert(path, Bytes::from(alloy_rlp::encode(node)));
-            }
-        }
-        Ok(proof)
+        Ok(trie)
     }
+}
+
+/// Select the work needed in addition to calculating the state root.
+enum CalculationMode {
+    Root,
+    WithUpdates,
+    WithProof(MultiProofTargets),
+}
+
+fn storage_proof_from_trie<R: TrieReader>(
+    trie: &mut Trie<R>,
+    slots: impl IntoIterator<Item = B256>,
+) -> ProviderResult<StorageMultiProof> {
+    let mut proof = StorageMultiProof {
+        root: trie.hash(),
+        subtree: Default::default(),
+        branch_node_hash_masks: Default::default(),
+        branch_node_tree_masks: Default::default(),
+    };
+    for slot in slots {
+        for (path, node) in trie.get_proof_with_paths(Nibbles::unpack(slot))? {
+            proof.subtree.insert(path, Bytes::from(alloy_rlp::encode(node)));
+        }
+    }
+    Ok(proof)
 }
 
 fn account_from_proof(
@@ -808,18 +801,21 @@ mod tests {
 
         let reader = factory.database_provider_ro().unwrap();
         let nested = NestedStateRoot::new(reader.tx_ref(), None);
-        for overlay in [false, true] {
+        for overlay in [None, Some(false), Some(true)] {
             let mut state = HashedPostState::default();
             let mut expected_storage = storage.clone();
             let mut expected_account = account;
-            if overlay {
+            if let Some(wiped) = overlay {
+                if wiped {
+                    expected_storage.clear();
+                }
                 expected_storage.remove(&slots[0]);
                 expected_storage.insert(slots[2], U256::from(33));
                 expected_account.balance = U256::from(43);
                 state = single_account_state(
                     keccak256(addresses[0]),
                     expected_account,
-                    false,
+                    wiped,
                     &HashMap::from_iter([(slots[0], U256::ZERO), (slots[2], U256::from(33))]),
                 );
             }
@@ -827,9 +823,19 @@ mod tests {
                 (addresses[0], (expected_account, expected_storage.clone())),
                 (addresses[1], (account, HashMap::default())),
             ]);
-            if !overlay {
+            if overlay.is_none() {
                 assert_eq!(expected, root);
             }
+            // Storage overlays without an account entry do not modify that account's root.
+            state.storages.insert(
+                keccak256(addresses[1]),
+                HashedStorage::from_iter(false, [(keccak256(slots[0]), U256::from(99))]),
+            );
+            assert_eq!(nested.root(&state).unwrap(), expected);
+            assert_eq!(nested.calculate(&state).unwrap().0, expected);
+            let (empty_proof_root, _) =
+                nested.multiproof_with_root(&state, Default::default()).unwrap();
+            assert_eq!(empty_proof_root, expected);
             let targets = addresses
                 .into_iter()
                 .map(|address| (keccak256(address), slots.into_iter().map(keccak256).collect()))

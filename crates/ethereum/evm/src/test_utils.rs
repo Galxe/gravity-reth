@@ -159,6 +159,8 @@ impl<'a, DB: StateDB, I: Inspector<EthEvmContext<DB>>> BlockExecutor for MockExe
     }
 }
 
+impl reth_evm::ConfigureEvmForRead for MockEvmConfig {}
+
 impl ConfigureEvm for MockEvmConfig {
     type BlockAssembler = <EthEvmConfig as ConfigureEvm>::BlockAssembler;
     type BlockExecutorFactory = Self;

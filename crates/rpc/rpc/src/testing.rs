@@ -27,7 +27,7 @@ use reth_consensus_common::validation::MAX_RLP_BLOCK_SIZE;
 use reth_errors::RethError;
 use reth_ethereum_engine_primitives::EthBuiltPayload;
 use reth_ethereum_primitives::EthPrimitives;
-use reth_evm::{execute::BlockBuilder, ConfigureEvm, NextBlockEnvAttributes};
+use reth_evm::{execute::BlockBuilder, ConfigureEvmForRead, NextBlockEnvAttributes};
 use reth_primitives_traits::{
     transaction::{recover::try_recover_signers, signed::RecoveryError},
     AlloyBlockHeader as BlockTrait, ReceiptTy, TxTy,
@@ -90,7 +90,7 @@ where
                       + ChainSpecProvider<ChainSpec: EthereumHardforks>,
         Pool: TransactionPool<Transaction: PoolTransaction<Consensus = TxTy<Evm::Primitives>>>,
     >,
-    Evm: ConfigureEvm<NextBlockEnvCtx = NextBlockEnvAttributes, Primitives = EthPrimitives>
+    Evm: ConfigureEvmForRead<NextBlockEnvCtx = NextBlockEnvAttributes, Primitives = EthPrimitives>
         + 'static,
 {
     async fn build_block_v1(
@@ -261,7 +261,7 @@ where
                       + ChainSpecProvider<ChainSpec: EthereumHardforks>,
         Pool: TransactionPool<Transaction: PoolTransaction<Consensus = TxTy<Evm::Primitives>>>,
     >,
-    Evm: ConfigureEvm<NextBlockEnvCtx = NextBlockEnvAttributes, Primitives = EthPrimitives>
+    Evm: ConfigureEvmForRead<NextBlockEnvCtx = NextBlockEnvAttributes, Primitives = EthPrimitives>
         + 'static,
 {
     /// Handles `testing_buildBlockV1` by gating concurrency via a semaphore and offloading heavy

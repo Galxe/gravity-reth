@@ -1,14 +1,14 @@
 //! Support for building a pending block with transactions from local view of mempool.
 
-use crate::EthApi;
-use reth_evm::ConfigureEvm;
+use crate::{eth::core::EthApiReadContext, EthApi};
+use reth_evm::ConfigureEvmForRead;
 use reth_rpc_convert::RpcConvert;
 use reth_rpc_eth_api::{
     helpers::{pending_block::PendingEnvBuilder, LoadPendingBlock},
     FromEvmError, RpcNodeCore,
 };
 use reth_rpc_eth_types::{builder::config::PendingBlockKind, EthApiError, PendingBlock};
-use reth_storage_api::StateProviderFactory;
+use reth_storage_api::ProviderReadView;
 
 impl<N, Rpc> LoadPendingBlock for EthApi<N, Rpc>
 where
@@ -17,7 +17,7 @@ where
     Rpc: RpcConvert<Primitives = N::Primitives, Error = EthApiError>,
 {
     fn with_view(&self) -> Result<Self, Self::Error> {
-        if self.use_node_provider || self.read_view.is_some() {
+        if !matches!(&self.read_context, EthApiReadContext::LiveRpc) {
             return Ok(self.clone());
         }
         let provider = self
@@ -26,7 +26,7 @@ where
             .map_err(<EthApiError as From<reth_errors::ProviderError>>::from)?;
         let evm = self.evm_config().with_read_provider(provider.clone());
         let mut scoped = self.clone();
-        scoped.read_view = Some((provider, evm));
+        scoped.read_context = EthApiReadContext::View { provider, evm };
         Ok(scoped)
     }
 
@@ -37,7 +37,7 @@ where
             .map_err(<EthApiError as From<reth_errors::ProviderError>>::from)?;
         let evm = self.evm_config().with_read_provider(provider.clone());
         let mut scoped = self.clone();
-        scoped.read_view = Some((provider, evm));
+        scoped.read_context = EthApiReadContext::View { provider, evm };
         Ok(scoped)
     }
 

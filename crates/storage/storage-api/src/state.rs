@@ -2,7 +2,7 @@ use super::{
     AccountReader, BlockHashReader, BlockIdReader, StateProofProvider, StateRootProvider,
     StorageRootProvider,
 };
-use alloc::boxed::Box;
+use alloc::{boxed::Box, sync::Arc};
 use alloy_consensus::constants::KECCAK_EMPTY;
 use alloy_eips::{BlockId, BlockNumberOrTag};
 use alloy_primitives::{Address, BlockHash, BlockNumber, StorageKey, StorageValue, B256, U256};
@@ -142,33 +142,8 @@ pub trait TryIntoHistoricalStateProvider {
 /// This affects tracing, or replaying blocks, which will need to be executed on top of the state of
 /// the parent block. For example, in order to trace block `n`, the state after block `n - 1` needs
 /// to be used, since block `n` was executed on its parent block's state.
-///
-/// Capture views on the concrete factory before wrapping it in `&`, `Arc`, or `Box`. The generated
-/// proxy implementations retain the default cloning behavior for methods returning `Self`.
 #[auto_impl(&, Arc, Box)]
 pub trait StateProviderFactory: BlockIdReader + Send + Sync {
-    /// Captures a read view reused by all reads in a computation.
-    /// No coordination between separate databases is required.
-    #[auto_impl(keep_default_for(&, Arc, Box))]
-    fn view(&self) -> ProviderResult<Self>
-    where
-        Self: Sized + Clone,
-    {
-        Ok(self.clone())
-    }
-
-    /// Captures state and trie data at one completed height, paired with a fixed memory chain.
-    ///
-    /// Select this before reading state or replaying blocks. If this is an ordinary view,
-    /// captures a new view instead of combining its state snapshot with newer trie snapshots.
-    #[auto_impl(keep_default_for(&, Arc, Box))]
-    fn consistent_view(&self) -> ProviderResult<Self>
-    where
-        Self: Sized + Clone,
-    {
-        self.view()
-    }
-
     /// Storage provider for latest block.
     fn latest(&self) -> ProviderResult<StateProviderBox>;
 
@@ -224,4 +199,57 @@ pub trait StateProviderFactory: BlockIdReader + Send + Sync {
     ///
     /// This will return `None` if there's no pending state.
     fn maybe_pending(&self) -> ProviderResult<Option<StateProviderBox>>;
+}
+
+/// An owned provider factory that can bind subsequent reads to a shared read context.
+///
+/// `Arc` and `Box` delegate to the underlying factory and wrap the captured result. References
+/// deliberately do not implement this trait: a borrowed factory cannot own a newly captured view.
+pub trait ProviderReadView: Clone {
+    /// Captures a read view reused by all reads in a computation, without coordinating databases.
+    /// Providers without a separate read context may retain the default cloning behavior.
+    fn view(&self) -> ProviderResult<Self> {
+        Ok(self.clone())
+    }
+
+    /// Captures state and trie data at one completed height, paired with a fixed memory chain.
+    ///
+    /// Select this before reading state or replaying blocks. An ordinary view must be recaptured
+    /// rather than combining its state snapshot with newer trie snapshots.
+    fn consistent_view(&self) -> ProviderResult<Self> {
+        self.view()
+    }
+
+    /// Selects fixed state reads for external queries without changing execution providers.
+    fn rpc_provider(&self) -> Self {
+        self.clone()
+    }
+}
+
+impl<T: ProviderReadView> ProviderReadView for Arc<T> {
+    fn view(&self) -> ProviderResult<Self> {
+        T::view(self).map(Self::new)
+    }
+
+    fn consistent_view(&self) -> ProviderResult<Self> {
+        T::consistent_view(self).map(Self::new)
+    }
+
+    fn rpc_provider(&self) -> Self {
+        Self::new(T::rpc_provider(self))
+    }
+}
+
+impl<T: ProviderReadView> ProviderReadView for Box<T> {
+    fn view(&self) -> ProviderResult<Self> {
+        T::view(self).map(Self::new)
+    }
+
+    fn consistent_view(&self) -> ProviderResult<Self> {
+        T::consistent_view(self).map(Self::new)
+    }
+
+    fn rpc_provider(&self) -> Self {
+        Self::new(T::rpc_provider(self))
+    }
 }

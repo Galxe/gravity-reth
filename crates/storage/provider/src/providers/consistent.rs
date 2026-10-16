@@ -36,9 +36,10 @@ use std::{
 };
 use tracing::trace;
 
-/// Type that interacts with a snapshot view of the blockchain (storage and in-memory) at time of
-/// instantiation, EXCEPT for pending, safe and finalized block which might change while holding
-/// this provider.
+/// Pairs retained canonical memory with a database transaction.
+///
+/// Execution providers keep live pending, safe and finalized tags. Captured request views also
+/// retain those tags, so every read in the request uses the same chain context.
 ///
 /// CAUTION: Avoid holding this provider for too long or the inner database transaction will
 /// time-out.
@@ -92,16 +93,16 @@ impl<N: ProviderNodeTypes> ConsistentProvider<N> {
     }
 
     pub(crate) fn with_view(
-        factory: ProviderFactory<N>,
+        storage_provider: DatabaseProviderRO<N::DB, N>,
         state: CanonicalInMemoryState<N::Primitives>,
         memory: Arc<ReadMemory<N::Primitives>>,
-    ) -> ProviderResult<Self> {
-        Ok(Self {
-            storage_provider: factory.provider()?,
+    ) -> Self {
+        Self {
+            storage_provider,
             head_block: memory.head.clone(),
             canonical_in_memory_state: state,
             read_memory: Some(memory),
-        })
+        }
     }
 
     pub(crate) fn into_latest_state_provider(self) -> ProviderResult<Box<dyn StateProvider>> {
@@ -891,16 +892,11 @@ impl<N: ProviderNodeTypes> BlockNumReader for ConsistentProvider<N> {
 
 impl<N: ProviderNodeTypes> BlockIdReader for ConsistentProvider<N> {
     fn block_hash_for_id(&self, block_id: BlockId) -> ProviderResult<Option<B256>> {
-        if let (Some(memory), BlockId::Hash(hash)) = (&self.read_memory, block_id) {
-            if !hash.require_canonical.unwrap_or(false) &&
-                memory.pending.as_ref().is_some_and(|pending| pending.hash() == hash.block_hash)
-            {
-                return Ok(Some(hash.block_hash))
-            }
-            let Some(number) = self.block_number(hash.block_hash)? else { return Ok(None) };
-            return Ok((self.block_hash(number)? == Some(hash.block_hash)).then_some(hash.block_hash))
-        }
         match block_id {
+            BlockId::Hash(hash) if hash.require_canonical.unwrap_or(false) => {
+                let Some(number) = self.block_number(hash.block_hash)? else { return Ok(None) };
+                Ok((self.block_hash(number)? == Some(hash.block_hash)).then_some(hash.block_hash))
+            }
             BlockId::Hash(hash) => Ok(Some(hash.block_hash)),
             BlockId::Number(BlockNumberOrTag::Pending) => {
                 Ok(self.pending_block_num_hash()?.map(|pending| pending.hash))

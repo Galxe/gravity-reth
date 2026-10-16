@@ -5,9 +5,9 @@ use crate::{
     BlockSource, CanonChainTracker, CanonStateNotifications, CanonStateSubscriptions,
     ChainSpecProvider, ChainStateBlockReader, ChangeSetReader, DatabaseProvider,
     DatabaseProviderFactory, FullProvider, HashedPostStateProvider, HeaderProvider, ProviderError,
-    ProviderFactory, PruneCheckpointReader, ReceiptProvider, ReceiptProviderIdExt,
-    StageCheckpointReader, StateProviderBox, StateProviderFactory, StateReader,
-    StaticFileProviderFactory, TransactionVariant, TransactionsProvider,
+    ProviderFactory, ProviderReadView, PruneCheckpointReader, ReceiptProvider,
+    ReceiptProviderIdExt, StageCheckpointReader, StateProviderBox, StateProviderFactory,
+    StateReader, StaticFileProviderFactory, TransactionVariant, TransactionsProvider,
 };
 use alloy_consensus::{transaction::TransactionMeta, BlockHeader, Header};
 use alloy_eips::{
@@ -136,14 +136,19 @@ impl<N: ProviderNodeTypes> BlockchainProvider<N> {
     #[track_caller]
     pub fn consistent_provider(&self) -> ProviderResult<ConsistentProvider<N>> {
         if let Some(memory) = &self.read_memory {
-            return ConsistentProvider::with_view(
-                self.database.clone(),
+            return Ok(ConsistentProvider::with_view(
+                self.database.provider()?,
                 self.canonical_in_memory_state(),
                 memory.clone(),
-            )
+            ))
         }
         if self.database.uses_state_reads() {
-            return self.view()?.consistent_provider()
+            let (view, storage) = self.capture_view_provider(false)?;
+            return Ok(ConsistentProvider::with_view(
+                storage,
+                view.canonical_in_memory_state,
+                view.read_memory.expect("captured view has memory"),
+            ))
         }
         ConsistentProvider::new(self.database.clone(), self.canonical_in_memory_state())
     }
@@ -177,12 +182,6 @@ impl<N: ProviderNodeTypes> DatabaseProviderFactory for BlockchainProvider<N> {
     type DB = N::DB;
     type Provider = <ProviderFactory<N> as DatabaseProviderFactory>::Provider;
     type ProviderRW = <ProviderFactory<N> as DatabaseProviderFactory>::ProviderRW;
-
-    fn rpc_provider(&self) -> Self {
-        let mut provider = self.clone();
-        provider.database = self.database.rpc_provider();
-        provider
-    }
 
     fn database_provider_ro(&self) -> ProviderResult<Self::Provider> {
         self.database.database_provider_ro()
@@ -562,6 +561,13 @@ impl<N: ProviderNodeTypes> BlockchainProvider<N> {
         if self.read_memory.is_some() && (!consistent || self.database.has_consistent_view()) {
             return Ok(self.clone())
         }
+        self.capture_view_provider(consistent).map(|(view, _)| view)
+    }
+
+    fn capture_view_provider(
+        &self,
+        consistent: bool,
+    ) -> ProviderResult<(Self, super::DatabaseProviderRO<N::DB, N>)> {
         // Capture tags before the head so normal chain advancement cannot put them ahead of it.
         let safe = self.canonical_in_memory_state.get_safe_num_hash();
         let finalized = self.canonical_in_memory_state.get_finalized_num_hash();
@@ -569,8 +575,7 @@ impl<N: ProviderNodeTypes> BlockchainProvider<N> {
         let pending = self.canonical_in_memory_state.pending_state();
         // Retain memory before opening the DB snapshot. Persistence may overlap this chain;
         // state reads use its historical anchor, even if the DB has advanced past its head.
-        let database = self.database.capture_view(consistent)?;
-        let storage = database.provider()?;
+        let (database, storage) = self.database.capture_view_provider(consistent)?;
         let bounds = storage.read_bounds().expect("read view has bounds");
         let best = if let Some(head) = &head {
             let anchor = head.anchor();
@@ -597,21 +602,30 @@ impl<N: ProviderNodeTypes> BlockchainProvider<N> {
             }
             _ => None,
         };
-        Ok(Self {
-            database,
-            canonical_in_memory_state: self.canonical_in_memory_state.clone(),
-            read_memory: Some(Arc::new(super::consistent::ReadMemory {
-                head,
-                best,
-                pending,
-                safe,
-                finalized,
-            })),
-        })
+        Ok((
+            Self {
+                database,
+                canonical_in_memory_state: self.canonical_in_memory_state.clone(),
+                read_memory: Some(Arc::new(super::consistent::ReadMemory {
+                    head,
+                    best,
+                    pending,
+                    safe,
+                    finalized,
+                })),
+            },
+            storage,
+        ))
     }
 }
 
-impl<N: ProviderNodeTypes> StateProviderFactory for BlockchainProvider<N> {
+impl<N: ProviderNodeTypes> ProviderReadView for BlockchainProvider<N> {
+    fn rpc_provider(&self) -> Self {
+        let mut provider = self.clone();
+        provider.database = self.database.rpc_provider();
+        provider
+    }
+
     fn view(&self) -> ProviderResult<Self> {
         self.capture_view(false)
     }
@@ -619,7 +633,9 @@ impl<N: ProviderNodeTypes> StateProviderFactory for BlockchainProvider<N> {
     fn consistent_view(&self) -> ProviderResult<Self> {
         self.capture_view(true)
     }
+}
 
+impl<N: ProviderNodeTypes> StateProviderFactory for BlockchainProvider<N> {
     /// Storage provider for latest block
     fn latest(&self) -> ProviderResult<StateProviderBox> {
         trace!(target: "providers::blockchain", "Getting latest block state provider");
@@ -944,8 +960,8 @@ mod tests {
     use reth_storage_api::{
         BlockBodyIndicesProvider, BlockHashReader, BlockIdReader, BlockNumReader, BlockReader,
         BlockReaderIdExt, BlockSource, ChangeSetReader, DatabaseProviderFactory, HeaderProvider,
-        ReceiptProvider, ReceiptProviderIdExt, StateProviderFactory, TransactionVariant,
-        TransactionsProvider,
+        ProviderReadView, ReceiptProvider, ReceiptProviderIdExt, StateProviderFactory,
+        TransactionVariant, TransactionsProvider,
     };
     use reth_testing_utils::generators::{
         self, random_block, random_block_range, random_changeset_range, random_eoa_accounts,
@@ -1967,6 +1983,7 @@ mod tests {
 
     #[test]
     fn rpc_view_rejects_database_fork_overlapping_captured_memory() -> eyre::Result<()> {
+        use alloy_eips::BlockId;
         use reth_storage_api::StageCheckpointWriter;
 
         let mut rng = generators::rng();
@@ -2000,6 +2017,14 @@ mod tests {
         assert!(captured
             .state_by_block_id(alloy_eips::BlockId::hash_canonical(memory_blocks[0].hash()))
             .is_ok());
+        assert_eq!(captured.block_hash_for_id(BlockId::hash_canonical(fork_hash))?, None);
+        assert_eq!(
+            captured.block_hash_for_id(BlockId::hash_canonical(memory_blocks[0].hash()))?,
+            Some(memory_blocks[0].hash()),
+        );
+        assert_eq!(captured.block_hash_for_id(BlockId::hash(fork_hash))?, Some(fork_hash));
+        let unknown_hash = B256::repeat_byte(0xc7);
+        assert_eq!(captured.block_hash_for_id(BlockId::hash(unknown_hash))?, Some(unknown_hash));
         Ok(())
     }
 
