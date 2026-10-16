@@ -8,6 +8,12 @@ use reth_db_api::{tables, transaction::DbTx};
 use reth_storage_errors::provider::ProviderResult;
 use reth_trie::HashedPostState;
 
+// The native engine only produces legacy trie updates. Gravity pipe execution produces V2
+// updates, so disabling pipe execution must also select the native engine's trie representation.
+fn uses_legacy_trie() -> bool {
+    gravity_primitives::get_gravity_config().disable_pipe_execution
+}
+
 /// Storage changes also rewrite account leaves. Explicit account entries, including deletions,
 /// take precedence over persisted accounts.
 fn complete_storage_accounts<TX: DbTx>(tx: &TX, state: &mut HashedPostState) -> ProviderResult<()> {

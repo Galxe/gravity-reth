@@ -309,7 +309,9 @@ where
     /// Submits a payload to the engine.
     pub async fn submit_payload(&self, payload: Payload::BuiltPayload) -> eyre::Result<B256> {
         let block_hash = payload.block().hash();
-        self.inner.add_ons_handle.beacon_engine_handle.new_payload(payload.into()).await?;
+        let status =
+            self.inner.add_ons_handle.beacon_engine_handle.new_payload(payload.into()).await?;
+        eyre::ensure!(status.is_valid(), "Payload {block_hash} was not accepted: {status:?}");
 
         Ok(block_hash)
     }
