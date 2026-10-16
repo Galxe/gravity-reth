@@ -133,6 +133,19 @@ impl<N: ProviderNodeTypes> ConsistentProvider<N> {
         }
     }
 
+    // An unrelated tag must not prevent capturing a view. Validate it only when requested.
+    fn validate_canonical_tag(
+        &self,
+        tag: Option<BlockNumHash>,
+    ) -> ProviderResult<Option<BlockNumHash>> {
+        if let Some(tag) = tag &&
+            self.block_hash(tag.number)? != Some(tag.hash)
+        {
+            return Err(ProviderError::BlockHashNotFound(tag.hash))
+        }
+        Ok(tag)
+    }
+
     // Helper function to convert range bounds
     fn convert_range_bounds<T>(
         &self,
@@ -689,17 +702,15 @@ impl<N: ProviderNodeTypes> ConsistentProvider<N> {
 }
 
 impl<N: ProviderNodeTypes> ConsistentProvider<N> {
-    /// Ensures that the given block number is canonical (synced)
-    ///
-    /// This is a helper for guarding the `HistoricalStateProvider` against block numbers that are
-    /// out of range and would lead to invalid results, mainly during initial sync.
-    ///
-    /// Verifying the `block_number` would be expensive since we need to lookup sync table
-    /// Instead, we ensure that the `block_number` is within the range of the
-    /// [`Self::best_block_number`] which is updated when a block is synced.
+    /// Rejects state requests beyond both the captured memory chain and the complete DB boundary.
+    /// This prevents historical reads outside the available state, including during initial sync.
     #[inline]
     pub(crate) fn ensure_canonical_block(&self, block_number: BlockNumber) -> ProviderResult<()> {
-        let latest = self.best_block_number()?;
+        let mut latest = self.best_block_number()?;
+        if let Some(bounds) = self.storage_provider.read_bounds() {
+            // The DB snapshot may include blocks persisted after the memory head was captured.
+            latest = latest.max(bounds.block_number);
+        }
         if block_number > latest {
             Err(ProviderError::HeaderNotFound(block_number.into()))
         } else {
@@ -887,9 +898,7 @@ impl<N: ProviderNodeTypes> BlockIdReader for ConsistentProvider<N> {
                 return Ok(Some(hash.block_hash))
             }
             let Some(number) = self.block_number(hash.block_hash)? else { return Ok(None) };
-            return Ok((number <= memory.best.number &&
-                self.block_hash(number)? == Some(hash.block_hash))
-            .then_some(hash.block_hash))
+            return Ok((self.block_hash(number)? == Some(hash.block_hash)).then_some(hash.block_hash))
         }
         match block_id {
             BlockId::Hash(hash) => Ok(Some(hash.block_hash)),
@@ -915,17 +924,17 @@ impl<N: ProviderNodeTypes> BlockIdReader for ConsistentProvider<N> {
     }
 
     fn safe_block_num_hash(&self) -> ProviderResult<Option<BlockNumHash>> {
-        Ok(match &self.read_memory {
-            Some(memory) => memory.safe,
-            None => self.canonical_in_memory_state.get_safe_num_hash(),
-        })
+        match &self.read_memory {
+            Some(memory) => self.validate_canonical_tag(memory.safe),
+            None => Ok(self.canonical_in_memory_state.get_safe_num_hash()),
+        }
     }
 
     fn finalized_block_num_hash(&self) -> ProviderResult<Option<BlockNumHash>> {
-        Ok(match &self.read_memory {
-            Some(memory) => memory.finalized,
-            None => self.canonical_in_memory_state.get_finalized_num_hash(),
-        })
+        match &self.read_memory {
+            Some(memory) => self.validate_canonical_tag(memory.finalized),
+            None => Ok(self.canonical_in_memory_state.get_finalized_num_hash()),
+        }
     }
 }
 

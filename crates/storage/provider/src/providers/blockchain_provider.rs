@@ -566,64 +566,53 @@ impl<N: ProviderNodeTypes> BlockchainProvider<N> {
         if self.read_memory.is_some() && (!consistent || self.database.has_consistent_view()) {
             return Ok(self.clone())
         }
-        // Memory must precede the DB snapshot: persistence may evict the captured chain meanwhile.
-        for _ in 0..3 {
-            let files = self.database.read_lease()?;
-            let head = self.canonical_in_memory_state.head_state();
-            let best = head
-                .as_ref()
-                .map(|head| BlockNumHash::new(head.number(), head.hash()))
-                .unwrap_or_else(|| self.canonical_in_memory_state.get_canonical_head().num_hash());
-            let pending = self.canonical_in_memory_state.pending_state();
-            let safe = self.canonical_in_memory_state.get_safe_num_hash();
-            let finalized = self.canonical_in_memory_state.get_finalized_num_hash();
-            let database = self.database.capture_view(files, consistent)?;
-            let storage = database.provider()?;
-            let bounds = storage.read_bounds().expect("read view has bounds");
-            let anchor = head.as_ref().map(|head| head.anchor()).unwrap_or(best);
-            if bounds.block_number > best.number ||
-                anchor.number > bounds.block_number ||
-                storage.block_hash(anchor.number)? != Some(anchor.hash)
+        let files = self.database.read_lease()?;
+        // Capture tags before the head so normal chain advancement cannot put them ahead of it.
+        let safe = self.canonical_in_memory_state.get_safe_num_hash();
+        let finalized = self.canonical_in_memory_state.get_finalized_num_hash();
+        let head = self.canonical_in_memory_state.head_state();
+        let pending = self.canonical_in_memory_state.pending_state();
+        // Retain memory before opening the DB snapshot. Persistence may overlap this chain;
+        // state reads use its historical anchor, even if the DB has advanced past its head.
+        let database = self.database.capture_view(files, consistent)?;
+        let storage = database.provider()?;
+        let bounds = storage.read_bounds().expect("read view has bounds");
+        let best = if let Some(head) = &head {
+            let anchor = head.anchor();
+            if storage.block_hash(anchor.number)? != Some(anchor.hash) {
+                return Err(ProviderError::BlockHashNotFound(anchor.hash))
+            }
+            BlockNumHash::new(head.number(), head.hash())
+        } else {
+            BlockNumHash::new(
+                bounds.block_number,
+                storage
+                    .block_hash(bounds.block_number)?
+                    .ok_or(ProviderError::HeaderNotFound(bounds.block_number.into()))?,
+            )
+        };
+        let pending = match pending {
+            Some(pending)
+                if pending.number() == best.number.saturating_add(1) &&
+                    pending.block_ref().recovered_block().parent_hash() == best.hash &&
+                    storage.block_hash(pending.anchor().number)? ==
+                        Some(pending.anchor().hash) =>
             {
-                continue
-            }
-            let mut tags_match = true;
-            for tag in [safe, finalized].into_iter().flatten() {
-                let hash = head
-                    .as_ref()
-                    .and_then(|head| head.block_on_chain(tag.number.into()))
-                    .map(|state| state.hash())
-                    .or(storage.block_hash(tag.number)?);
-                tags_match &= tag.number <= best.number && hash == Some(tag.hash);
-            }
-            if !tags_match {
-                continue
-            }
-            let pending = match pending {
                 Some(pending)
-                    if pending.number() == best.number.saturating_add(1) &&
-                        pending.block_ref().recovered_block().parent_hash() == best.hash &&
-                        pending.anchor().number <= bounds.block_number &&
-                        storage.block_hash(pending.anchor().number)? ==
-                            Some(pending.anchor().hash) =>
-                {
-                    Some(pending)
-                }
-                _ => None,
-            };
-            return Ok(Self {
-                database,
-                canonical_in_memory_state: self.canonical_in_memory_state.clone(),
-                read_memory: Some(Arc::new(super::consistent::ReadMemory {
-                    head,
-                    best,
-                    pending,
-                    safe,
-                    finalized,
-                })),
-            })
-        }
-        Err(ProviderError::BestBlockNotFound)
+            }
+            _ => None,
+        };
+        Ok(Self {
+            database,
+            canonical_in_memory_state: self.canonical_in_memory_state.clone(),
+            read_memory: Some(Arc::new(super::consistent::ReadMemory {
+                head,
+                best,
+                pending,
+                safe,
+                finalized,
+            })),
+        })
     }
 }
 
@@ -1947,9 +1936,9 @@ mod tests {
     }
 
     #[test]
-    fn rpc_view_retries_when_database_passes_captured_head() -> eyre::Result<()> {
+    fn rpc_view_without_memory_uses_database_head_and_checks_only_requested_tags(
+    ) -> eyre::Result<()> {
         use reth_storage_api::StageCheckpointWriter;
-        use std::sync::atomic::{AtomicUsize, Ordering};
 
         let (provider, blocks, _, _) = provider_with_random_blocks(
             &mut generators::rng(),
@@ -1961,23 +1950,23 @@ mod tests {
         db.update_pipeline_stages(2, false)?;
         db.commit()?;
         provider.set_canonical_head(blocks[1].clone_sealed_header());
+        let fork = reth_primitives_traits::SealedHeader::new(
+            blocks[1].header().clone(),
+            B256::repeat_byte(0xff),
+        );
+        provider.set_safe(fork.clone());
+        provider.set_finalized(fork);
 
-        let state = provider.canonical_in_memory_state();
-        let latest = blocks[2].clone_sealed_header();
-        let reads = Arc::new(AtomicUsize::new(0));
-        let hook_reads = reads.clone();
-        provider.database.db_ref().set_post_transaction_hook(Box::new(move || {
-            if hook_reads.fetch_add(1, Ordering::Relaxed) == 0 {
-                // The first attempt has captured the old head; the next sees the advanced head.
-                state.set_canonical_head(latest.clone());
-            }
-        }));
-        let captured = provider.rpc_provider().view();
-        provider.database.db_ref().set_post_transaction_hook(Box::new(|| ()));
-        let captured = captured?;
-        assert!(reads.load(Ordering::Relaxed) > 2, "must retry the complete view");
-        assert_eq!(captured.best_block_number()?, 2);
-        assert_eq!(captured.block_hash(2)?, Some(blocks[2].hash()));
+        for captured in
+            [provider.rpc_provider().view()?, provider.rpc_provider().consistent_view()?]
+        {
+            assert_eq!(captured.best_block_number()?, 2);
+            assert_eq!(captured.block_hash(2)?, Some(blocks[2].hash()));
+            assert!(captured.latest().is_ok());
+            assert!(captured.history_by_block_number(1).is_ok());
+            assert!(captured.state_by_block_number_or_tag(BlockNumberOrTag::Safe).is_err());
+            assert!(captured.state_by_block_number_or_tag(BlockNumberOrTag::Finalized).is_err());
+        }
         Ok(())
     }
 
@@ -2134,6 +2123,43 @@ mod tests {
                 )]);
                 assert_eq!(state.state_root(HashedPostState::default())?, expected);
                 state.proof(TrieInput::default(), address, &[slot])?.verify(expected)?;
+            }
+        }
+
+        // Model a retained head at 2 while persistence has already reached 3.
+        let db = provider.database.provider_rw()?;
+        UnifiedStorageWriter::from(&db, &provider.static_file_provider())
+            .save_blocks(vec![executed[1].clone()])?;
+        db.update_pipeline_stages(3, false)?;
+        provider.static_file_provider().commit()?;
+        db.commit()?;
+        provider.canonical_in_memory_state.update_chain(NewCanonicalChain::Reorg {
+            new: vec![executed[0].clone()],
+            old: vec![executed[1].clone().into()],
+        });
+        for view in [rpc.view()?, rpc.consistent_view()?] {
+            assert_eq!(view.best_block_number()?, 2);
+            assert_eq!(view.database.provider()?.read_bounds().unwrap().block_number, 3);
+            assert_eq!(view.latest()?.basic_account(&address)?, Some(account(20)));
+            assert_eq!(view.latest()?.storage(address, slot)?, Some(U256::from(20)));
+            assert_eq!(
+                view.history_by_block_number(3)?.basic_account(&address)?,
+                Some(account(30))
+            );
+            assert_eq!(
+                view.block_hash_for_id(alloy_eips::BlockId::hash_canonical(blocks[1].hash()))?,
+                Some(blocks[1].hash())
+            );
+            assert_eq!(
+                view.history_by_block_number(1)?.basic_account(&address)?,
+                Some(account(10))
+            );
+            if view.database.has_consistent_view() {
+                let expected = reth_trie::test_utils::state_root([(
+                    address,
+                    (account(20), [(slot, U256::from(20))]),
+                )]);
+                view.latest()?.proof(TrieInput::default(), address, &[slot])?.verify(expected)?;
             }
         }
 
