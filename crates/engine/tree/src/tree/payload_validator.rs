@@ -718,7 +718,7 @@ where
         }
 
         if let Err(e) = self.consensus.validate_block_pre_execution(block.sealed_block()) {
-            error!(target: "engine::tree", ?block, "Failed to validate block {}: {e}", block.hash());
+            error!(target: "engine::tree", block = ?block.block_with_parent(), %e, "Failed to validate block");
             return Err(e)
         }
 
