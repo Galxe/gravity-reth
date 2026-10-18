@@ -901,6 +901,8 @@ impl<N: ProviderNodeTypes> BlockIdReader for ConsistentProvider<N> {
             BlockId::Number(BlockNumberOrTag::Pending) => {
                 Ok(self.pending_block_num_hash()?.map(|pending| pending.hash))
             }
+            BlockId::Number(BlockNumberOrTag::Safe) => self.safe_block_hash(),
+            BlockId::Number(BlockNumberOrTag::Finalized) => self.finalized_block_hash(),
             BlockId::Number(number) => self
                 .convert_block_number(number)?
                 .map(|number| self.block_hash(number))
@@ -1416,11 +1418,12 @@ impl<N: ProviderNodeTypes> BlockReaderIdExt for ConsistentProvider<N> {
                     .pending_state()
                     .map(|state| state.block_ref().recovered_block().sealed_header().clone()))
             }
-            return self
-                .convert_block_number(id)?
-                .map(|number| self.sealed_header(number))
-                .transpose()
-                .map(Option::flatten)
+            let number = match id {
+                BlockNumberOrTag::Safe => self.safe_block_number()?,
+                BlockNumberOrTag::Finalized => self.finalized_block_number()?,
+                _ => self.convert_block_number(id)?,
+            };
+            return number.map(|number| self.sealed_header(number)).transpose().map(Option::flatten)
         }
         match id {
             BlockNumberOrTag::Latest => {

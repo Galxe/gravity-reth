@@ -1947,19 +1947,23 @@ mod tests {
     }
 
     #[test]
-    fn rpc_view_without_memory_uses_database_head_and_checks_only_requested_tags(
-    ) -> eyre::Result<()> {
+    fn rpc_views_resolve_database_head_and_optional_tags() -> eyre::Result<()> {
         use reth_storage_api::StageCheckpointWriter;
 
-        let (provider, blocks, _, _) = provider_with_random_blocks(
-            &mut generators::rng(),
-            3,
-            0,
-            BlockRangeParams { tx_count: 0..0, ..Default::default() },
-        )?;
+        let params = BlockRangeParams { tx_count: 0..0, ..Default::default() };
+        let (provider, blocks, _, _) =
+            provider_with_random_blocks(&mut generators::rng(), 3, 0, params)?;
         let db = provider.database.provider_rw()?;
         db.update_pipeline_stages(2, false)?;
         db.commit()?;
+        let rpc = BlockchainProvider::new(provider.database.clone())?.rpc_provider();
+        for view in [rpc.clone(), rpc.view()?, rpc.consistent_view()?] {
+            for tag in [BlockNumberOrTag::Safe, BlockNumberOrTag::Finalized] {
+                assert_eq!(view.block_hash_for_id(tag.into())?, None);
+                assert_eq!(view.header_by_number_or_tag(tag)?, None);
+                assert_eq!(view.sealed_header_by_number_or_tag(tag)?, None);
+            }
+        }
         provider.set_canonical_head(blocks[1].clone_sealed_header());
         let fork = reth_primitives_traits::SealedHeader::new(
             blocks[1].header().clone(),
