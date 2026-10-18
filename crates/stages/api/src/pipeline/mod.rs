@@ -622,8 +622,7 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
                 .number
                 .saturating_sub(
                     BEACON_CONSENSUS_REORG_UNWIND_DEPTH.saturating_mul(self.detached_head_attempts),
-                )
-                .max(1);
+                );
 
             self.last_detached_head_unwind_target = self.provider_factory.block_hash(unwind_to)?;
             Ok(Some(ControlFlow::Unwind { target: unwind_to, bad_block: local_head }))
@@ -722,10 +721,14 @@ mod tests {
 
     use super::*;
     use crate::{test_utils::TestStage, UnwindOutput};
+    use alloy_eips::{eip1898::BlockWithParent, BlockNumHash};
     use assert_matches::assert_matches;
     use reth_consensus::ConsensusError;
     use reth_errors::ProviderError;
-    use reth_provider::test_utils::{create_test_provider_factory, MockNodeTypesWithDB};
+    use reth_provider::test_utils::{
+        create_test_provider_factory,
+        MockNodeTypesWithDB,
+    };
     use reth_prune::PruneModes;
     use reth_testing_utils::generators::{self, random_block_with_parent};
     use tokio_stream::StreamExt;
@@ -1286,5 +1289,32 @@ mod tests {
                 ProviderError::BlockBodyIndicesNotFound(5)
             )))
         );
+    }
+
+    #[test]
+    fn detached_head_unwinds_no_lower_than_genesis() {
+        for genesis in [0] {
+            let factory = create_test_provider_factory();
+            let mut pipeline = Pipeline::<MockNodeTypesWithDB>::builder()
+                .build(factory.clone(), StaticFileProducer::new(factory, PruneModes::default()));
+            let block = |number| {
+                Box::new(BlockWithParent {
+                    parent: B256::ZERO,
+                    block: BlockNumHash::new(number, B256::repeat_byte(1)),
+                })
+            };
+            let error = StageError::DetachedHead {
+                local_head: block(genesis + 1),
+                header: block(genesis + 2),
+                error: Box::new(ConsensusError::BaseFeeMissing),
+            };
+
+            let flow = pipeline.on_stage_error(StageId::Headers, None, error).unwrap();
+
+            assert_eq!(
+                flow,
+                Some(ControlFlow::Unwind { target: genesis, bad_block: block(genesis + 1) })
+            );
+        }
     }
 }
