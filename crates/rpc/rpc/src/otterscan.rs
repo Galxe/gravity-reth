@@ -16,7 +16,7 @@ use reth_primitives_traits::TxTy;
 use reth_rpc_api::{EthApiServer, OtterscanServer};
 use reth_rpc_convert::RpcTxReq;
 use reth_rpc_eth_api::{
-    helpers::{EthTransactions, TraceExt},
+    helpers::{EthTransactions, SpawnBlocking, TraceExt},
     FullEthApiTypes, RpcBlock, RpcHeader, RpcReceipt, RpcTransaction,
 };
 use reth_rpc_eth_types::{utils::binary_search, EthApiError};
@@ -26,6 +26,7 @@ use revm_inspectors::{
     tracing::{types::CallTraceNode, TracingInspectorConfig},
     transfer::{TransferInspector, TransferKind},
 };
+use tokio::sync::OwnedSemaphorePermit;
 
 const API_LEVEL: u64 = 8;
 
@@ -61,6 +62,16 @@ where
             .sum::<u128>();
 
         Ok(BlockDetails::new(block, Default::default(), U256::from(total_fees)))
+    }
+
+    /// Acquires a permit to execute a tracing call.
+    ///
+    /// The permit should be moved into the spawned trace so it is held until the trace completes.
+    async fn acquire_trace_permit(&self) -> RpcResult<OwnedSemaphorePermit>
+    where
+        Eth: SpawnBlocking,
+    {
+        Ok(self.eth.acquire_owned_tracing().await.map_err(|_| EthApiError::InternalEthError)?)
     }
 }
 
@@ -99,12 +110,16 @@ where
 
     /// Handler for `ots_getInternalOperations`
     async fn get_internal_operations(&self, tx_hash: TxHash) -> RpcResult<Vec<InternalOperation>> {
+        let permit = self.acquire_trace_permit().await?;
         let internal_operations = self
             .eth
             .spawn_trace_transaction_in_block_with_inspector(
                 tx_hash,
                 TransferInspector::new(false),
-                |_tx_info, inspector, _, _| Ok(inspector.into_transfers()),
+                move |_tx_info, inspector, _, _| {
+                    let _permit = permit;
+                    Ok(inspector.into_transfers())
+                },
             )
             .await
             .map_err(Into::into)?
@@ -130,11 +145,15 @@ where
 
     /// Handler for `ots_getTransactionError`
     async fn get_transaction_error(&self, tx_hash: TxHash) -> RpcResult<Option<Bytes>> {
+        let permit = self.acquire_trace_permit().await?;
         let maybe_revert = self
             .eth
-            .spawn_replay_transaction(tx_hash, |_tx_info, res, _| match res.result {
-                ExecutionResult::Revert { output, .. } => Ok(Some(output)),
-                _ => Ok(None),
+            .spawn_replay_transaction(tx_hash, move |_tx_info, res, _| {
+                let _permit = permit;
+                match res.result {
+                    ExecutionResult::Revert { output, .. } => Ok(Some(output)),
+                    _ => Ok(None),
+                }
             })
             .await
             .map(Option::flatten)
@@ -144,12 +163,16 @@ where
 
     /// Handler for `ots_traceTransaction`
     async fn trace_transaction(&self, tx_hash: TxHash) -> RpcResult<Option<Vec<TraceEntry>>> {
+        let permit = self.acquire_trace_permit().await?;
         let traces = self
             .eth
             .spawn_trace_transaction_in_block(
                 tx_hash,
                 TracingInspectorConfig::default_parity(),
-                move |_tx_info, inspector, _, _| Ok(inspector.into_traces().into_nodes()),
+                move |_tx_info, inspector, _, _| {
+                    let _permit = permit;
+                    Ok(inspector.into_traces().into_nodes())
+                },
             )
             .await
             .map_err(Into::into)?
@@ -321,6 +344,7 @@ where
             return Ok(None);
         }
 
+        let permit = self.acquire_trace_permit().await?;
         let num = binary_search::<_, _, ErrorObjectOwned>(
             1,
             self.eth.block_number()?.saturating_to(),
@@ -340,7 +364,8 @@ where
                 num.into(),
                 None,
                 TracingInspectorConfig::default_parity(),
-                |tx_info, mut ctx| {
+                move |tx_info, mut ctx| {
+                    let _permit = &permit;
                     Ok(ctx
                         .take_inspector()
                         .into_parity_builder()
@@ -399,7 +424,12 @@ fn block_transaction_page_range(
 
 #[cfg(test)]
 mod tests {
-    use super::block_transaction_page_range;
+    use super::*;
+    use reth_chainspec::MAINNET;
+    use reth_evm_ethereum::EthEvmConfig;
+    use reth_network_api::noop::NoopNetwork;
+    use reth_provider::test_utils::MockEthProvider;
+    use reth_transaction_pool::test_utils::testing_pool;
 
     #[test]
     fn block_transaction_page_range_returns_first_pages_in_block_order() {
@@ -411,5 +441,34 @@ mod tests {
     fn block_transaction_page_range_caps_pages_at_the_block_length() {
         assert_eq!(block_transaction_page_range(25, 2, 10), 20..25);
         assert_eq!(block_transaction_page_range(25, 3, 10), 25..25);
+    }
+    #[tokio::test]
+    async fn trace_methods_wait_for_tracing_permit() {
+        use reth_rpc_eth_api::helpers::SpawnBlocking;
+        use std::time::Duration;
+
+        let api = OtterscanApi::new(
+            crate::eth::EthApiBuilder::new(
+                MockEthProvider::default(),
+                testing_pool(),
+                NoopNetwork::default(),
+                EthEvmConfig::new(MAINNET.clone()),
+            )
+            .proof_permits(1)
+            .build(),
+        );
+        let permit = api.eth.acquire_owned_tracing().await.unwrap();
+
+        let timeout = Duration::from_millis(100);
+        assert!(tokio::time::timeout(timeout, api.trace_transaction(B256::ZERO)).await.is_err());
+        assert!(tokio::time::timeout(timeout, api.get_transaction_error(B256::ZERO))
+            .await
+            .is_err());
+        assert!(tokio::time::timeout(timeout, api.get_internal_operations(B256::ZERO))
+            .await
+            .is_err());
+
+        drop(permit);
+        assert_eq!(api.trace_transaction(B256::ZERO).await.unwrap(), None);
     }
 }

@@ -16,8 +16,9 @@ use reth_revm::{
     database::StateProviderDatabase,
     db::{bal::EvmDatabaseError, State},
 };
-use reth_rpc_eth_types::cache::db::StateCacheDb;
+use reth_rpc_eth_types::{cache::db::StateCacheDb, EthApiError};
 use reth_storage_api::{ProviderBlock, ProviderTx};
+use reth_tasks::cancel::is_cancelled;
 use revm::{
     context::{
         result::{ExecutionResult, ResultAndState},
@@ -361,6 +362,9 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> + Call {
                 let mut results: Vec<R> = Vec::with_capacity(max_transactions);
 
                 while let Some(tx) = txs_iter.next() {
+                    if is_cancelled() {
+                        return Err(EthApiError::InternalEthError.into())
+                    }
                     let tx_hash = *tx.tx_hash();
                     let ResultAndState { result, state, .. } = match current_evm.transact(tx) {
                         Ok(r) => r,

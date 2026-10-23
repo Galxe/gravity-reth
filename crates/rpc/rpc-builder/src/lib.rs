@@ -1330,9 +1330,15 @@ impl<RpcMiddleware> RpcServerConfig<RpcMiddleware> {
     }
 
     /// Returns a [`CompressionLayer`] that adds compression support (gzip, deflate, brotli, zstd)
-    /// based on the client's `Accept-Encoding` header
-    fn maybe_compression_layer(disable_compression: bool) -> Option<CompressionLayer> {
-        if disable_compression {
+    /// based on the client's `Accept-Encoding` header.
+    ///
+    /// Servers listening on a loopback address only serve local clients, which gain nothing from
+    /// compression, so they get no compression layer.
+    fn maybe_compression_layer(
+        addr: SocketAddr,
+        disable_compression: bool,
+    ) -> Option<CompressionLayer> {
+        if disable_compression || addr.ip().to_canonical().is_loopback() {
             None
         } else {
             Some(CompressionLayer::new())
@@ -1409,6 +1415,7 @@ impl<RpcMiddleware> RpcServerConfig<RpcMiddleware> {
                             .option_layer(Self::maybe_cors_layer(cors)?)
                             .option_layer(Self::maybe_jwt_layer(self.jwt_secret))
                             .option_layer(Self::maybe_compression_layer(
+                                http_socket_addr,
                                 self.http_disable_compression,
                             )),
                     )
@@ -1494,7 +1501,10 @@ impl<RpcMiddleware> RpcServerConfig<RpcMiddleware> {
                     tower::ServiceBuilder::new()
                         .option_layer(Self::maybe_cors_layer(self.http_cors_domains.clone())?)
                         .option_layer(Self::maybe_jwt_layer(self.jwt_secret))
-                        .option_layer(Self::maybe_compression_layer(self.http_disable_compression)),
+                        .option_layer(Self::maybe_compression_layer(
+                            http_socket_addr,
+                            self.http_disable_compression,
+                        )),
                 )
                 .set_rpc_middleware(
                     RpcServiceBuilder::default()

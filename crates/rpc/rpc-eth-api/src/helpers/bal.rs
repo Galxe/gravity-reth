@@ -36,7 +36,13 @@ pub trait GetBlockAccessList: Trace + Call + LoadBlock + RpcNodeCoreExt {
                 return Ok(Some(cached_bal.as_bal().clone().into_alloy_bal()))
             }
 
+            let permit = this
+                .acquire_owned_blocking_io()
+                .await
+                .map_err(|_| EthApiError::InternalEthError)?;
+
             this.spawn_blocking_io(move |eth_api| {
+                let _permit = permit;
                 let state = eth_api
                     .provider()
                     .state_by_block_id(block.parent_hash().into())
