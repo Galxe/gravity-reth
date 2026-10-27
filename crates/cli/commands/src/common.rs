@@ -154,7 +154,32 @@ impl<C: ChainSpecParser> EnvironmentArgs<C> {
         let factory = ProviderFactory::<NodeTypesWithDBAdapter<N, Arc<DatabaseEnv>>>::new(
             db,
             self.chain.clone(),
-            static_file_provider,
+            static_file_provider.with_blocks_per_file([
+                (
+                    reth_static_file_types::StaticFileSegment::Headers,
+                    config.static_files.blocks_per_file.headers,
+                ),
+                (
+                    reth_static_file_types::StaticFileSegment::Transactions,
+                    config.static_files.blocks_per_file.transactions,
+                ),
+                (
+                    reth_static_file_types::StaticFileSegment::Receipts,
+                    config.static_files.blocks_per_file.receipts,
+                ),
+                (
+                    reth_static_file_types::StaticFileSegment::TransactionSenders,
+                    config.static_files.blocks_per_file.transaction_senders,
+                ),
+                (
+                    reth_static_file_types::StaticFileSegment::AccountChangeSets,
+                    config.static_files.blocks_per_file.account_change_sets,
+                ),
+                (
+                    reth_static_file_types::StaticFileSegment::StorageChangeSets,
+                    config.static_files.blocks_per_file.storage_change_sets,
+                ),
+            ])?,
         )
         .with_prune_modes(prune_modes.clone());
 

@@ -382,6 +382,17 @@ where
     }
 }
 
+/// Event that woke the pipe execution loop.
+///
+/// The pipe loop is driven by the executor, but it still has to service `Terminate` from the
+/// engine channel, so both channels are selected on together.
+enum PipeLoopEvent<T: PayloadTypes, N: NodePrimitives> {
+    /// An event emitted by the pipe execution layer.
+    Pipe(PipeExecLayerEvent<N>),
+    /// A message that arrived on the engine channel.
+    Engine(FromEngine<EngineApiRequest<T, N>, N::Block>),
+}
+
 impl<N, P, T, V, C> EngineApiTreeHandler<N, P, T, V, C>
 where
     N: PipeExecPrimitives,
@@ -504,8 +515,9 @@ where
         )))
     }
 
-    /// Blocks until the next pipe exec event arrives or, while persistence is in flight, until
-    /// persistence completes. Returns `None` in the latter case, and on a spurious wakeup.
+    /// Blocks until the next pipe exec event arrives, an engine message arrives, or, while
+    /// persistence is in flight, until persistence completes. Returns `None` in the latter case,
+    /// and on a spurious wakeup.
     ///
     /// Waking on persistence completion matters because the executor may be blocked on the
     /// persistence gap and send nothing until the next batch is persisted, which only this loop
@@ -514,21 +526,36 @@ where
     fn try_recv_pipe_exec_event(
         &self,
         event_rx: &Receiver<PipeExecLayerEvent<N>>,
-    ) -> Result<Option<PipeExecLayerEvent<N>>, RecvError> {
-        let Some((persistence_rx, _, _)) = &self.persistence_state.rx else {
-            return event_rx.recv().map(Some)
-        };
-
+    ) -> Result<Option<PipeLoopEvent<T, N>>, RecvError> {
         let mut select = crossbeam_channel::Select::new();
-        let persistence_done = select.recv(persistence_rx);
-        select.recv(event_rx);
-        if select.ready() == persistence_done {
+        let persistence_done = self
+            .persistence_state
+            .rx
+            .as_ref()
+            .map(|(persistence_rx, _, _)| select.recv(persistence_rx));
+        let pipe_event = select.recv(event_rx);
+        // `Terminate` arrives on the engine channel, not the pipe channel. Registering it here
+        // wakes an idle pipe for shutdown without any timeout polling.
+        let engine_message = select.recv(&self.incoming);
+
+        let ready = select.ready();
+        if Some(ready) == persistence_done {
             return Ok(None)
         }
 
-        match event_rx.try_recv() {
-            Ok(event) => Ok(Some(event)),
+        if ready == pipe_event {
+            return match event_rx.try_recv() {
+                Ok(event) => Ok(Some(PipeLoopEvent::Pipe(event))),
+                Err(TryRecvError::Empty) => Ok(None),
+                Err(TryRecvError::Disconnected) => Err(RecvError),
+            }
+        }
+
+        debug_assert_eq!(ready, engine_message);
+        match self.incoming.try_recv() {
+            Ok(message) => Ok(Some(PipeLoopEvent::Engine(message))),
             Err(TryRecvError::Empty) => Ok(None),
+            // Unreachable in practice: this handler keeps `incoming_tx` alive.
             Err(TryRecvError::Disconnected) => Err(RecvError),
         }
     }
@@ -646,10 +673,26 @@ where
         let pipe_event_rx = N::pipe_exec_layer_event_bus().event_rx.lock().unwrap().take().unwrap();
         loop {
             match self.try_recv_pipe_exec_event(&pipe_event_rx) {
-                Ok(Some(event)) => self.on_pipe_exec_event(event),
+                Ok(Some(PipeLoopEvent::Pipe(event))) => self.on_pipe_exec_event(event),
+                Ok(Some(PipeLoopEvent::Engine(FromEngine::Event(
+                    FromOrchestrator::Terminate { tx },
+                )))) => {
+                    if let Err(err) = self.finish_termination(tx) {
+                        error!(target: "engine::tree", %err, "Pipe execution termination failed");
+                    }
+                    return
+                }
+                Ok(Some(PipeLoopEvent::Engine(message))) => {
+                    // The executor drives the chain in pipe mode, so engine API requests and
+                    // downloaded blocks have nothing to act on here.
+                    debug!(target: "engine::tree", %message, "Ignoring engine message in pipe execution mode");
+                }
                 Ok(None) => {}
                 Err(RecvError) => {
-                    error!(target: "engine::tree", "Pipe exec layer channel disconnected");
+                    debug!(target: "engine::tree", "Pipe exec layer channel disconnected, draining persistence");
+                    if let Err(err) = self.persist_and_wait_idle() {
+                        error!(target: "engine::tree", %err, "Draining pipe persistence failed");
+                    }
                     return
                 }
             }
@@ -1655,9 +1698,18 @@ where
         pending_termination: oneshot::Sender<()>,
     ) -> Result<(), AdvancePersistenceError> {
         trace!(target: "engine::tree", "finishing termination, persisting remaining blocks");
-        let result = self.persist_until_complete();
+        let result = self.persist_and_wait_idle();
         let _ = pending_termination.send(());
         result
+    }
+
+    /// Persists all remaining blocks, then waits until queued writes and pruning have finished.
+    ///
+    /// `persist_until_complete` only waits for the blocks it submits itself; pruning of already
+    /// committed blocks continues in the persistence task afterwards.
+    fn persist_and_wait_idle(&mut self) -> Result<(), AdvancePersistenceError> {
+        self.persist_until_complete()?;
+        self.persistence.wait_for_idle().map_err(|_| AdvancePersistenceError::ChannelClosed)
     }
 
     /// Persists all remaining blocks until none are left.

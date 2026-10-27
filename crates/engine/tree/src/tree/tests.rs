@@ -482,13 +482,34 @@ fn test_pipe_event_wait_delivers_events_while_persisting() {
         .unwrap();
     assert_matches!(
         test_harness.tree.try_recv_pipe_exec_event(&event_rx),
-        Ok(Some(PipeExecLayerEvent::WaitForPersistence(event))) if event.block_number == 7
+        Ok(Some(PipeLoopEvent::Pipe(PipeExecLayerEvent::WaitForPersistence(event))))
+            if event.block_number == 7
     );
 
     // A stopped pipe service still ends the loop while persistence is in flight.
     drop(event_tx);
     assert!(test_harness.tree.try_recv_pipe_exec_event(&event_rx).is_err());
     assert!(test_harness.tree.persistence_state.in_progress());
+}
+
+#[test]
+fn test_pipe_event_wait_wakes_on_terminate_while_idle() {
+    // `Terminate` is sent on the engine channel, not the pipe channel. An idle pipe loop used to
+    // block in `recv` here and never observe shutdown.
+    let mut test_harness = TestHarness::new(MAINNET.clone());
+    let (_event_tx, event_rx) = crossbeam_channel::unbounded();
+
+    let (tx, _rx) = oneshot::channel();
+    test_harness
+        .tree
+        .incoming_tx
+        .send(FromEngine::Event(FromOrchestrator::Terminate { tx }))
+        .unwrap();
+
+    assert_matches!(
+        test_harness.tree.try_recv_pipe_exec_event(&event_rx),
+        Ok(Some(PipeLoopEvent::Engine(FromEngine::Event(FromOrchestrator::Terminate { .. }))))
+    );
 }
 
 #[tokio::test]

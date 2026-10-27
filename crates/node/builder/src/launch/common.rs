@@ -173,8 +173,13 @@ impl LaunchContext {
         toml_config.peers.trusted_nodes_only |= config.network.trusted_only;
 
         // Merge static file CLI arguments with config file, giving priority to CLI
-        toml_config.static_files =
+        let static_files =
             config.static_files.merge_with_config(toml_config.static_files, config.pruning.minimal);
+        static_files.validate()?;
+        if toml_config.static_files != static_files {
+            toml_config.static_files = static_files;
+            toml_config.save(&config_path)?;
+        }
 
         Ok(toml_config)
     }
@@ -479,7 +484,34 @@ where
         let factory = ProviderFactory::new(
             self.right().clone(),
             self.chain_spec(),
-            StaticFileProvider::read_write(self.data_dir().static_files())?,
+            StaticFileProvider::read_write(self.data_dir().static_files())?.with_blocks_per_file(
+                [
+                    (
+                        reth_provider::StaticFileSegment::Headers,
+                        self.toml_config().static_files.blocks_per_file.headers,
+                    ),
+                    (
+                        reth_provider::StaticFileSegment::Transactions,
+                        self.toml_config().static_files.blocks_per_file.transactions,
+                    ),
+                    (
+                        reth_provider::StaticFileSegment::Receipts,
+                        self.toml_config().static_files.blocks_per_file.receipts,
+                    ),
+                    (
+                        reth_provider::StaticFileSegment::TransactionSenders,
+                        self.toml_config().static_files.blocks_per_file.transaction_senders,
+                    ),
+                    (
+                        reth_provider::StaticFileSegment::AccountChangeSets,
+                        self.toml_config().static_files.blocks_per_file.account_change_sets,
+                    ),
+                    (
+                        reth_provider::StaticFileSegment::StorageChangeSets,
+                        self.toml_config().static_files.blocks_per_file.storage_change_sets,
+                    ),
+                ],
+            )?,
         )
         .with_prune_modes(self.prune_modes())
         .with_static_files_metrics();
