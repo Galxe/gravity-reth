@@ -174,8 +174,7 @@ pub(crate) fn prune_static_files<Provider: StaticFileProviderFactory>(
     let mut output = SegmentOutput::done();
     output.checkpoint =
         input.previous_checkpoint.map(SegmentOutputCheckpoint::from_prune_checkpoint);
-    loop {
-        let Some(end) = files.get_lowest_static_file_block(segment) else { break };
+    while let Some(end) = files.get_lowest_static_file_block(segment) {
         if end > input.to_block ||
             (!segment.is_receipts() && Some(end) == files.get_highest_static_file_block(segment))
         {
@@ -313,7 +312,7 @@ mod tests {
 
     #[test]
     fn test_prune_input_get_next_tx_checkpoint_without_tx_number() {
-        // Create a prune input with a previous checkpoint without a tx number (unexpected)
+        // A block-only checkpoint resumes after that block instead of revisiting its prefix.
         let input = PruneInput {
             previous_checkpoint: Some(PruneCheckpoint {
                 block_number: Some(5),
@@ -327,11 +326,11 @@ mod tests {
         let mut rng = generators::rng();
         let factory = create_test_provider_factory();
 
-        // Generate 10 random blocks
+        // Use a fixed transaction count so both sides of the checkpoint are nonempty.
         let blocks = random_block_range(
             &mut rng,
             0..=10,
-            BlockRangeParams { parent: Some(B256::ZERO), tx_count: 0..5, ..Default::default() },
+            BlockRangeParams { parent: Some(B256::ZERO), tx_count: 2..3, ..Default::default() },
         );
 
         // Insert the blocks into the database
@@ -351,10 +350,29 @@ mod tests {
         // Fetch the range and check if it is correct
         let range = input.get_next_tx_num_range(&provider).expect("Expected range").unwrap();
 
-        // Calculate the total number of transactions
-        let num_txs = blocks.iter().map(|block| block.transaction_count() as u64).sum::<u64>();
+        // Blocks 0..=5 contain transactions 0..=11; blocks 6..=10 contain 12..=21.
+        assert_eq!(range, 12..=21);
+    }
 
-        assert_eq!(range, 0..=num_txs - 1,);
+    #[test]
+    fn test_prune_input_get_next_tx_checkpoint_empty_prefix() {
+        use reth_db_api::models::StoredBlockBodyIndices;
+
+        let provider = MockEthProvider::default();
+        provider.add_block_body_indices(5, StoredBlockBodyIndices { first_tx_num: 0, tx_count: 0 });
+        provider
+            .add_block_body_indices(10, StoredBlockBodyIndices { first_tx_num: 0, tx_count: 2 });
+        let input = PruneInput {
+            previous_checkpoint: Some(PruneCheckpoint {
+                block_number: Some(5),
+                tx_number: None,
+                prune_mode: PruneMode::Full,
+            }),
+            to_block: 10,
+            limiter: PruneLimiter::default(),
+        };
+
+        assert_eq!(input.get_next_tx_num_range(&provider).unwrap(), Some(0..=1));
     }
 
     #[test]
