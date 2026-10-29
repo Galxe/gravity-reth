@@ -496,7 +496,7 @@ fn test_pipe_event_wait_delivers_events_while_persisting() {
 fn test_pipe_event_wait_wakes_on_terminate_while_idle() {
     // `Terminate` is sent on the engine channel, not the pipe channel. An idle pipe loop used to
     // block in `recv` here and never observe shutdown.
-    let mut test_harness = TestHarness::new(MAINNET.clone());
+    let test_harness = TestHarness::new(MAINNET.clone());
     let (_event_tx, event_rx) = crossbeam_channel::unbounded();
 
     let (tx, _rx) = oneshot::channel();

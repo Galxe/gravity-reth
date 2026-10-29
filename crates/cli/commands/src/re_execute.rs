@@ -205,7 +205,12 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + Hardforks + EthereumHardforks>
                         {
                             let correct_receipts = provider_factory
                                 .receipts_by_block(block.number().into())?
-                                .unwrap();
+                                .ok_or_else(|| {
+                                    eyre::eyre!(
+                                        "receipts for block {} not found in the database",
+                                        block.number()
+                                    )
+                                })?;
 
                             for (i, (receipt, correct_receipt)) in
                                 result.receipts.iter().zip(correct_receipts.iter()).enumerate()

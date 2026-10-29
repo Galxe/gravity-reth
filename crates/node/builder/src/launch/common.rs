@@ -481,37 +481,16 @@ where
         N: ProviderNodeTypes<DB = DB, ChainSpec = ChainSpec>,
         Evm: ConfigureEvm<Primitives = N::Primitives> + 'static,
     {
+        // `as_blocks_per_file_map` matches every segment exhaustively, so a new segment is a
+        // compile error there instead of being silently missed here.
+        let blocks_per_file_map = self.toml_config().static_files.as_blocks_per_file_map();
+        let blocks_per_file =
+            blocks_per_file_map.iter().map(|(segment, &size)| (segment, Some(size)));
         let factory = ProviderFactory::new(
             self.right().clone(),
             self.chain_spec(),
-            StaticFileProvider::read_write(self.data_dir().static_files())?.with_blocks_per_file(
-                [
-                    (
-                        reth_provider::StaticFileSegment::Headers,
-                        self.toml_config().static_files.blocks_per_file.headers,
-                    ),
-                    (
-                        reth_provider::StaticFileSegment::Transactions,
-                        self.toml_config().static_files.blocks_per_file.transactions,
-                    ),
-                    (
-                        reth_provider::StaticFileSegment::Receipts,
-                        self.toml_config().static_files.blocks_per_file.receipts,
-                    ),
-                    (
-                        reth_provider::StaticFileSegment::TransactionSenders,
-                        self.toml_config().static_files.blocks_per_file.transaction_senders,
-                    ),
-                    (
-                        reth_provider::StaticFileSegment::AccountChangeSets,
-                        self.toml_config().static_files.blocks_per_file.account_change_sets,
-                    ),
-                    (
-                        reth_provider::StaticFileSegment::StorageChangeSets,
-                        self.toml_config().static_files.blocks_per_file.storage_change_sets,
-                    ),
-                ],
-            )?,
+            StaticFileProvider::read_write(self.data_dir().static_files())?
+                .with_blocks_per_file(blocks_per_file)?,
         )
         .with_prune_modes(self.prune_modes())
         .with_static_files_metrics();

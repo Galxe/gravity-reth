@@ -208,12 +208,64 @@ pub(crate) fn prune_static_files<Provider: StaticFileProviderFactory>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::B256;
+    use alloy_consensus::{SignableTransaction, TxLegacy};
+    use alloy_primitives::{Signature, B256};
+    use reth_chainspec::MAINNET;
+    use reth_db::test_utils::{create_test_rw_db, create_test_static_files_dir};
     use reth_provider::{
-        providers::BlockchainProvider,
-        test_utils::{create_test_provider_factory, MockEthProvider},
+        providers::{BlockchainProvider, StaticFileProvider},
+        test_utils::{create_test_provider_factory, MockEthProvider, MockNodeTypesWithDB},
+        ProviderFactory, StaticFileWriter,
     };
     use reth_testing_utils::generators::{self, random_block_range, BlockRangeParams};
+
+    #[test]
+    fn prune_static_files_retains_active_transactions_jar() -> Result<(), Box<dyn std::error::Error>>
+    {
+        // 10 blocks per jar gives [0..=9], [10..=19] and [20..=29].
+        let (static_dir, _) = create_test_static_files_dir();
+        let provider = ProviderFactory::<MockNodeTypesWithDB>::new(
+            create_test_rw_db(),
+            MAINNET.clone(),
+            StaticFileProvider::read_write(&static_dir)?.with_custom_blocks_per_file(10),
+        );
+        let files = provider.static_file_provider();
+        for segment in [StaticFileSegment::Transactions, StaticFileSegment::Receipts] {
+            let mut writer = files.latest_writer(segment)?;
+            for block in 0..30u64 {
+                writer.increment_block(block)?;
+                if segment.is_receipts() {
+                    writer.append_receipt(block, &Default::default())?;
+                } else {
+                    let tx = TxLegacy::default().into_signed(Signature::test_signature()).into();
+                    writer.append_transaction(block, &tx)?;
+                }
+            }
+            writer.commit()?;
+        }
+        files.initialize_index()?;
+
+        let input = |to_block| PruneInput {
+            previous_checkpoint: None,
+            to_block,
+            limiter: PruneLimiter::default(),
+        };
+
+        // A target inside the last jar leaves it in place...
+        prune_static_files(&provider, input(25), StaticFileSegment::Receipts)?;
+        assert_eq!(files.get_lowest_static_file_block(StaticFileSegment::Receipts), Some(29));
+
+        // ...and receipt jars have no writer once receipts are pruned, so it is reclaimed below.
+        prune_static_files(&provider, input(100), StaticFileSegment::Receipts)?;
+        assert_eq!(files.get_lowest_static_file_block(StaticFileSegment::Receipts), None);
+
+        // The jar still being written must survive a target past the tip.
+        prune_static_files(&provider, input(100), StaticFileSegment::Transactions)?;
+        assert_eq!(files.get_lowest_static_file_block(StaticFileSegment::Transactions), Some(29));
+        assert_eq!(files.get_highest_static_file_block(StaticFileSegment::Transactions), Some(29));
+
+        Ok(())
+    }
 
     #[test]
     fn test_prune_input_get_next_tx_num_range_no_to_block() {
