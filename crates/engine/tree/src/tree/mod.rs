@@ -11,7 +11,7 @@ use alloy_primitives::{map::B256Map, B256};
 use alloy_rpc_types_engine::{
     ForkchoiceState, PayloadStatus, PayloadStatusEnum, PayloadValidationError,
 };
-use crossbeam_channel::{Receiver, Sender};
+use crossbeam_channel::{Receiver, RecvError, Sender, TryRecvError};
 use error::{InsertBlockError, InsertBlockFatalError};
 use gravity_primitives::get_gravity_config;
 use persistence_state::CurrentPersistenceAction;
@@ -48,10 +48,7 @@ use std::{
     collections::BTreeMap,
     fmt::Debug,
     ops,
-    sync::{
-        mpsc::{RecvError, RecvTimeoutError},
-        Arc,
-    },
+    sync::Arc,
     time::{Duration, Instant},
 };
 use tokio::sync::{
@@ -507,23 +504,32 @@ where
         )))
     }
 
+    /// Blocks until the next pipe exec event arrives or, while persistence is in flight, until
+    /// persistence completes. Returns `None` in the latter case, and on a spurious wakeup.
+    ///
+    /// Waking on persistence completion matters because the executor may be blocked on the
+    /// persistence gap and send nothing until the next batch is persisted, which only this loop
+    /// can dispatch. Only readiness is checked here; the result stays in the channel for
+    /// `try_poll_persistence`.
     fn try_recv_pipe_exec_event(
         &self,
-        event_rx: &std::sync::mpsc::Receiver<PipeExecLayerEvent<N>>,
+        event_rx: &Receiver<PipeExecLayerEvent<N>>,
     ) -> Result<Option<PipeExecLayerEvent<N>>, RecvError> {
-        if self.persistence_state.in_progress() {
-            // wait for a shorter duration if there are waiters
-            match event_rx.recv_timeout(std::time::Duration::from_millis(
-                if self.persistence_waiters.is_empty() { 500 } else { 10 },
-            )) {
-                Ok(event) => Ok(Some(event)),
-                Err(err) => match err {
-                    RecvTimeoutError::Timeout => Ok(None),
-                    RecvTimeoutError::Disconnected => Err(RecvError),
-                },
-            }
-        } else {
-            event_rx.recv().map(Some)
+        let Some((persistence_rx, _, _)) = &self.persistence_state.rx else {
+            return event_rx.recv().map(Some)
+        };
+
+        let mut select = crossbeam_channel::Select::new();
+        let persistence_done = select.recv(persistence_rx);
+        select.recv(event_rx);
+        if select.ready() == persistence_done {
+            return Ok(None)
+        }
+
+        match event_rx.try_recv() {
+            Ok(event) => Ok(Some(event)),
+            Err(TryRecvError::Empty) => Ok(None),
+            Err(TryRecvError::Disconnected) => Err(RecvError),
         }
     }
 

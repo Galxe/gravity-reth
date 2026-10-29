@@ -421,6 +421,76 @@ fn test_tree_persist_blocks() {
     assert_eq!(rx.try_recv(), Ok(()));
 }
 
+/// Starts a save-blocks persistence task and returns the sender that completes it, along with the
+/// last block being saved.
+fn start_pipe_persistence(
+    test_harness: &mut TestHarness,
+) -> (crossbeam_channel::Sender<PersistenceResult>, BlockNumHash) {
+    test_harness.tree.advance_persistence().unwrap();
+    let PersistenceAction::SaveBlocks(saved_blocks, sender) =
+        test_harness.action_rx.recv_timeout(Duration::from_secs(5)).unwrap()
+    else {
+        panic!("expected a save blocks action");
+    };
+    (sender, saved_blocks.last().unwrap().recovered_block().num_hash())
+}
+
+fn pipe_persistence_harness() -> TestHarness {
+    let tree_config = TreeConfig::default();
+    let chain_spec = MAINNET.clone();
+    let blocks: Vec<_> = TestBlockBuilder::eth()
+        .with_chain_spec((*chain_spec).clone())
+        .get_executed_blocks(1..tree_config.persistence_threshold() + 2)
+        .collect();
+    TestHarness::new(chain_spec).with_blocks(blocks)
+}
+
+#[test]
+fn test_pipe_event_wait_wakes_on_persistence_completion() {
+    // While the executor is blocked on the persistence gap it sends no pipe events, so the pipe
+    // loop has to wake on persistence completion itself to dispatch the next batch.
+    let mut test_harness = pipe_persistence_harness();
+    let (sender, last_block) = start_pipe_persistence(&mut test_harness);
+
+    let (_event_tx, event_rx) = crossbeam_channel::unbounded();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(20));
+        sender.send(PersistenceResult { last_block: Some(last_block), commit_duration: None })
+    });
+
+    // The pre-fix loop only noticed completion after a 500ms timeout.
+    let start = Instant::now();
+    assert!(test_harness.tree.try_recv_pipe_exec_event(&event_rx).unwrap().is_none());
+    let waited = start.elapsed();
+    assert!(waited < Duration::from_millis(400), "woke {waited:?} after persistence started");
+    // The completion is left in the channel for the poll that follows in the pipe loop.
+    assert!(test_harness.tree.try_poll_persistence().unwrap());
+}
+
+#[test]
+fn test_pipe_event_wait_delivers_events_while_persisting() {
+    let mut test_harness = pipe_persistence_harness();
+    let (_persistence_tx, _) = start_pipe_persistence(&mut test_harness);
+
+    let (event_tx, event_rx) = crossbeam_channel::unbounded();
+    let (tx, _rx) = oneshot::channel();
+    event_tx
+        .send(PipeExecLayerEvent::WaitForPersistence(WaitForPersistenceEvent {
+            block_number: 7,
+            tx,
+        }))
+        .unwrap();
+    assert_matches!(
+        test_harness.tree.try_recv_pipe_exec_event(&event_rx),
+        Ok(Some(PipeExecLayerEvent::WaitForPersistence(event))) if event.block_number == 7
+    );
+
+    // A stopped pipe service still ends the loop while persistence is in flight.
+    drop(event_tx);
+    assert!(test_harness.tree.try_recv_pipe_exec_event(&event_rx).is_err());
+    assert!(test_harness.tree.persistence_state.in_progress());
+}
+
 #[tokio::test]
 async fn test_in_memory_state_trait_impl() {
     let blocks: Vec<_> = TestBlockBuilder::eth().get_executed_blocks(0..10).collect();

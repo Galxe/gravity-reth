@@ -1,13 +1,11 @@
 //! Event bus for the pipe execution layer.
 
 use alloy_primitives::TxHash;
+use crossbeam_channel::{Receiver, Sender};
 use reth_chain_state::ExecutedBlockWithTrieUpdates;
 use reth_ethereum_primitives::EthPrimitives;
 use reth_primitives::NodePrimitives;
-use std::sync::{
-    mpsc::{Receiver, Sender},
-    LazyLock,
-};
+use std::sync::LazyLock;
 use tokio::sync::{
     mpsc::{UnboundedReceiver, UnboundedSender},
     oneshot,
@@ -70,7 +68,9 @@ pub struct PipeExecLayerEventBus<N: NodePrimitives> {
 
 impl<N: NodePrimitives> PipeExecLayerEventBus<N> {
     fn new() -> Self {
-        let (event_tx, event_rx) = std::sync::mpsc::channel();
+        // crossbeam rather than std mpsc: the engine tree selects on this receiver together with
+        // its persistence completion channel.
+        let (event_tx, event_rx) = crossbeam_channel::unbounded();
         let (discard_txs_tx, discard_txs_rx) = tokio::sync::mpsc::unbounded_channel();
         Self {
             event_tx: std::sync::Mutex::new(Some(event_tx)),

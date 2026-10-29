@@ -436,7 +436,7 @@ struct Core<Storage: GravityStorage> {
     chain_spec: Arc<ChainSpec>,
     bls_pop_verify_precompile: DynParallelPrecompile,
     pre_alpha_precompiles: Arc<Vec<(Address, DynParallelPrecompile)>>,
-    event_tx: std::sync::mpsc::Sender<PipeExecLayerEvent<EthPrimitives>>,
+    event_tx: crossbeam_channel::Sender<PipeExecLayerEvent<EthPrimitives>>,
     execute_block_barrier: Channel<(u64, u64) /* epoch, block number */, ExecuteBlockContext>,
     merklize_barrier: Channel<u64 /* block number */, ()>,
     seal_barrier: Channel<u64 /* block number */, B256 /* block hash */>,
@@ -1613,7 +1613,7 @@ pub struct PipeExecLayerApi<Storage, EthApi> {
     ordered_block_tx: UnboundedSender<ReceivedBlock>,
     execution_result_rx: Mutex<UnboundedReceiver<ExecutionResult>>,
     verified_block_hash_tx: Arc<Channel<B256 /* block id */, Option<B256> /* block hash */>>,
-    event_tx: std::sync::mpsc::Sender<PipeExecLayerEvent<EthPrimitives>>,
+    event_tx: crossbeam_channel::Sender<PipeExecLayerEvent<EthPrimitives>>,
     storage: Arc<Storage>,
     onchain_config_fetcher: OnchainConfigFetcher<EthApi>,
 }

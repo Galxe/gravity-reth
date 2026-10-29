@@ -40,6 +40,7 @@ alloy-sol-macro.workspace = true
 alloy-sol-types.workspace = true
 tokio.workspace = true
 rayon.workspace = true
+crossbeam-channel.workspace = true
 
 # ethereum
 revm.workspace = true
