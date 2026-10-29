@@ -1794,10 +1794,14 @@ impl<TX: DbTx + 'static, N: NodeTypesForProvider> ReceiptProvider for DatabasePr
                 Ok(Some(Vec::new()))
             } else {
                 let receipts = self.receipts_by_tx_range(tx_range)?;
+                // Pruning removes receipts from static files, so a block below the prune
+                // boundary returns a short range. Report the block's receipts as unavailable
+                // rather than handing back an incomplete set. With a log filter the remaining
+                // receipts are the filtered ones, so a short range is expected.
                 if self.prune_modes.receipts_log_filter.is_empty() &&
                     receipts.len() as u64 != body.tx_count()
                 {
-                    return Err(ProviderError::ReceiptNotFound(number.into()))
+                    return Ok(None)
                 }
                 Ok(Some(receipts))
             }

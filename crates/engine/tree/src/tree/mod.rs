@@ -386,6 +386,7 @@ where
 ///
 /// The pipe loop is driven by the executor, but it still has to service `Terminate` from the
 /// engine channel, so both channels are selected on together.
+#[derive(Debug)]
 enum PipeLoopEvent<T: PayloadTypes, N: NodePrimitives> {
     /// An event emitted by the pipe execution layer.
     Pipe(PipeExecLayerEvent<N>),
@@ -535,7 +536,8 @@ where
             .map(|(persistence_rx, _, _)| select.recv(persistence_rx));
         let pipe_event = select.recv(event_rx);
         // `Terminate` arrives on the engine channel, not the pipe channel. Registering it here
-        // wakes an idle pipe for shutdown without any timeout polling.
+        // wakes an idle pipe for shutdown without any timeout polling. `Select` picks randomly
+        // among ready operands, so engine messages cannot starve pipe events.
         let engine_message = select.recv(&self.incoming);
 
         let ready = select.ready();
@@ -551,13 +553,17 @@ where
             }
         }
 
-        debug_assert_eq!(ready, engine_message);
-        match self.incoming.try_recv() {
-            Ok(message) => Ok(Some(PipeLoopEvent::Engine(message))),
-            Err(TryRecvError::Empty) => Ok(None),
-            // Unreachable in practice: this handler keeps `incoming_tx` alive.
-            Err(TryRecvError::Disconnected) => Err(RecvError),
+        if ready == engine_message {
+            return match self.incoming.try_recv() {
+                Ok(message) => Ok(Some(PipeLoopEvent::Engine(message))),
+                Err(TryRecvError::Empty) => Ok(None),
+                // Unreachable in practice: this handler keeps its own `incoming_tx` alive.
+                Err(TryRecvError::Disconnected) => Err(RecvError),
+            }
         }
+
+        // A spurious wakeup: the operation `Select` reported is no longer ready.
+        Ok(None)
     }
 
     /// DESIGN: The `.expect()` calls on oneshot sends below are intentional. In
@@ -684,12 +690,17 @@ where
                 }
                 Ok(Some(PipeLoopEvent::Engine(message))) => {
                     // The executor drives the chain in pipe mode, so engine API requests and
-                    // downloaded blocks have nothing to act on here.
+                    // downloaded blocks have nothing to act on here. They are consumed rather
+                    // than left in the unbounded engine channel: an ignored request never gets
+                    // its reply, but dropping the message keeps the channel from growing.
                     debug!(target: "engine::tree", %message, "Ignoring engine message in pipe execution mode");
                 }
                 Ok(None) => {}
                 Err(RecvError) => {
-                    debug!(target: "engine::tree", "Pipe exec layer channel disconnected, draining persistence");
+                    // Either the pipe event bus or the engine channel hung up. Drain persistence
+                    // before returning so pruning queued behind the last save is not abandoned
+                    // half-done; this blocks until the queue is empty.
+                    warn!(target: "engine::tree", "Pipe execution channel closed, draining persistence");
                     if let Err(err) = self.persist_and_wait_idle() {
                         error!(target: "engine::tree", %err, "Draining pipe persistence failed");
                     }
