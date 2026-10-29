@@ -5,18 +5,23 @@ mod user;
 
 use crate::{PruneLimiter, PrunerError};
 use alloy_primitives::{BlockNumber, TxNumber};
-use reth_provider::{errors::provider::ProviderResult, BlockReader, PruneCheckpointWriter};
-use reth_prune_types::{PruneCheckpoint, PruneMode, PrunePurpose, PruneSegment, SegmentOutput};
+use reth_provider::{
+    errors::provider::ProviderResult, BlockReader, PruneCheckpointWriter, StaticFileProviderFactory,
+};
+use reth_prune_types::{
+    PruneCheckpoint, PruneMode, PrunePurpose, PruneSegment, PruneSegmentError, SegmentOutput,
+    SegmentOutputCheckpoint,
+};
+use reth_static_file_types::StaticFileSegment;
 pub use set::SegmentSet;
 pub use static_file::{
     Headers as StaticFileHeaders, Receipts as StaticFileReceipts,
     Transactions as StaticFileTransactions,
 };
 use std::{fmt::Debug, ops::RangeInclusive};
-use tracing::error;
 pub use user::{
-    AccountHistory, Receipts as UserReceipts, ReceiptsByLogs, SenderRecovery, StorageHistory,
-    TransactionLookup,
+    AccountHistory, Bodies, Receipts as UserReceipts, ReceiptsByLogs, SenderRecovery,
+    StorageHistory, TransactionLookup,
 };
 
 /// A segment represents a pruning of some portion of the data.
@@ -35,6 +40,17 @@ pub trait Segment<Provider>: Debug + Send + Sync {
 
     /// Purpose of the segment.
     fn purpose(&self) -> PrunePurpose;
+
+    /// Resolves the current target, including retention constraints imposed by other segments.
+    fn target_block(
+        &self,
+        tip: BlockNumber,
+    ) -> Result<Option<(BlockNumber, PruneMode)>, PruneSegmentError> {
+        self.mode()
+            .map(|mode| mode.prune_target_block(tip, self.segment(), self.purpose()))
+            .transpose()
+            .map(Option::flatten)
+    }
 
     /// Prune data for [`Self::segment`] using the provided input.
     fn prune(&self, provider: &Provider, input: PruneInput) -> Result<SegmentOutput, PrunerError>;
@@ -76,17 +92,18 @@ impl PruneInput {
         &self,
         provider: &Provider,
     ) -> ProviderResult<Option<RangeInclusive<TxNumber>>> {
-        let from_tx_number = self.previous_checkpoint
-            // Checkpoint exists, prune from the next transaction after the highest pruned one
-            .and_then(|checkpoint| match checkpoint.tx_number {
-                Some(tx_number) => Some(tx_number + 1),
-                _ => {
-                    error!(target: "pruner", ?checkpoint, "Expected transaction number in prune checkpoint, found None");
-                    None
-                },
-            })
-            // No checkpoint exists, prune from genesis
-            .unwrap_or_default();
+        let from_tx_number = match self.previous_checkpoint {
+            Some(checkpoint) => match (checkpoint.tx_number, checkpoint.block_number) {
+                (Some(tx_number), _) => tx_number + 1,
+                // An empty prefix has a block checkpoint but no transaction checkpoint.
+                (None, Some(block)) => provider
+                    .block_body_indices(block)?
+                    .map(|body| body.next_tx_num())
+                    .unwrap_or_default(),
+                (None, None) => 0,
+            },
+            None => 0,
+        };
 
         let to_tx_number = match provider.block_body_indices(self.to_block)? {
             Some(body) => {
@@ -140,6 +157,52 @@ impl PruneInput {
             // No checkpoint exists, prune from genesis
             .unwrap_or(0)
     }
+}
+
+/// Removes complete jars below the target, retaining the boundary jar.
+/// Transactions retain their active jar. Legacy receipt files have no writer after switching
+/// to receipt pruning, so their final jar can also be removed once it is entirely expired.
+/// File ranges are the source of progress, so deletion is resumable even if the DB checkpoint
+/// commit was interrupted. A single jar is the minimum unit of work and may exceed the row budget.
+pub(crate) fn prune_static_files<Provider: StaticFileProviderFactory>(
+    provider: &Provider,
+    input: PruneInput,
+    segment: StaticFileSegment,
+) -> Result<SegmentOutput, PrunerError> {
+    let files = provider.static_file_provider();
+    let mut limiter = input.limiter;
+    let mut output = SegmentOutput::done();
+    output.checkpoint =
+        input.previous_checkpoint.map(SegmentOutputCheckpoint::from_prune_checkpoint);
+    while let Some(end) = files.get_lowest_static_file_block(segment) {
+        if end > input.to_block ||
+            (!segment.is_receipts() && Some(end) == files.get_highest_static_file_block(segment))
+        {
+            break
+        }
+        if limiter.is_limit_reached() {
+            output.progress = limiter.progress(false);
+            break
+        }
+        let header = {
+            let jar = files
+                .get_segment_provider(segment, || Some(files.find_fixed_range(segment, end)), None)?
+                .ok_or(PrunerError::InconsistentData("Static file to prune is missing"))?;
+            jar.user_header().clone()
+        };
+        files.delete_jar(segment, end)?;
+        let pruned = header.tx_range().map_or(0, |range| range.len() as usize);
+        limiter.increment_deleted_entries_count_by(pruned);
+        output.pruned += pruned;
+        output.checkpoint = Some(SegmentOutputCheckpoint {
+            block_number: Some(end),
+            tx_number: header
+                .tx_range()
+                .map(|range| range.end())
+                .or_else(|| output.checkpoint.and_then(|checkpoint| checkpoint.tx_number)),
+        });
+    }
+    Ok(output)
 }
 
 #[cfg(test)]
@@ -249,7 +312,7 @@ mod tests {
 
     #[test]
     fn test_prune_input_get_next_tx_checkpoint_without_tx_number() {
-        // Create a prune input with a previous checkpoint without a tx number (unexpected)
+        // A block-only checkpoint resumes after that block instead of revisiting its prefix.
         let input = PruneInput {
             previous_checkpoint: Some(PruneCheckpoint {
                 block_number: Some(5),
@@ -263,11 +326,11 @@ mod tests {
         let mut rng = generators::rng();
         let factory = create_test_provider_factory();
 
-        // Generate 10 random blocks
+        // Use a fixed transaction count so both sides of the checkpoint are nonempty.
         let blocks = random_block_range(
             &mut rng,
             0..=10,
-            BlockRangeParams { parent: Some(B256::ZERO), tx_count: 0..5, ..Default::default() },
+            BlockRangeParams { parent: Some(B256::ZERO), tx_count: 2..3, ..Default::default() },
         );
 
         // Insert the blocks into the database
@@ -287,10 +350,29 @@ mod tests {
         // Fetch the range and check if it is correct
         let range = input.get_next_tx_num_range(&provider).expect("Expected range").unwrap();
 
-        // Calculate the total number of transactions
-        let num_txs = blocks.iter().map(|block| block.transaction_count() as u64).sum::<u64>();
+        // Blocks 0..=5 contain transactions 0..=11; blocks 6..=10 contain 12..=21.
+        assert_eq!(range, 12..=21);
+    }
 
-        assert_eq!(range, 0..=num_txs - 1,);
+    #[test]
+    fn test_prune_input_get_next_tx_checkpoint_empty_prefix() {
+        use reth_db_api::models::StoredBlockBodyIndices;
+
+        let provider = MockEthProvider::default();
+        provider.add_block_body_indices(5, StoredBlockBodyIndices { first_tx_num: 0, tx_count: 0 });
+        provider
+            .add_block_body_indices(10, StoredBlockBodyIndices { first_tx_num: 0, tx_count: 2 });
+        let input = PruneInput {
+            previous_checkpoint: Some(PruneCheckpoint {
+                block_number: Some(5),
+                tx_number: None,
+                prune_mode: PruneMode::Full,
+            }),
+            to_block: 10,
+            limiter: PruneLimiter::default(),
+        };
+
+        assert_eq!(input.get_next_tx_num_range(&provider).unwrap(), Some(0..=1));
     }
 
     #[test]

@@ -32,6 +32,6 @@ impl Metrics {
 pub(crate) struct PrunerSegmentMetrics {
     /// Pruning duration for this segment
     pub(crate) duration_seconds: Histogram,
-    /// Highest pruned block per segment
+    /// Persisted pruning checkpoint per segment (including DB data moved to static files).
     pub(crate) highest_pruned_block: Gauge,
 }

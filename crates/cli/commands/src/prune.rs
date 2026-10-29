@@ -13,7 +13,7 @@ use reth_node_metrics::{
     server::{MetricServer, MetricServerConfig},
     version::VersionInfo,
 };
-use reth_provider::StaticFileProviderFactory;
+use reth_provider::{PruneCheckpointReader, StaticFileProviderFactory};
 use reth_prune::PrunerBuilder;
 use reth_static_file::StaticFileProducer;
 use std::sync::Arc;
@@ -109,6 +109,7 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> PruneComma
                     break;
                 }
 
+                let previous_checkpoints = provider_factory.provider()?.get_prune_checkpoints()?;
                 let output = pruner.run(prune_tip)?;
                 let batch_pruned: usize = output.segments.iter().map(|(_, seg)| seg.pruned).sum();
                 total_pruned = total_pruned.saturating_add(batch_pruned);
@@ -118,7 +119,10 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> PruneComma
                     break;
                 }
 
-                if batch_pruned == 0 {
+                if batch_pruned == 0 &&
+                    previous_checkpoints ==
+                        provider_factory.provider()?.get_prune_checkpoints()?
+                {
                     return Err(eyre::eyre!(
                         "pruner made no progress but reported more data remaining; \
                          aborting to prevent infinite loop"

@@ -106,7 +106,12 @@ where
             pruned += entries_pruned;
         }
 
-        let done = last_pruned_block == Some(block_range_end);
+        // The tables can already be empty, or end before the target, after data has moved
+        // to static files. Exhaustion without a budget interruption completes that range.
+        let done = last_pruned_block == Some(block_range_end) || !limiter.is_limit_reached();
+        if done {
+            last_pruned_block = Some(block_range_end);
+        }
         let progress = limiter.progress(done);
 
         Ok(SegmentOutput {
@@ -245,6 +250,43 @@ mod tests {
     use reth_stages::test_utils::TestStageDB;
     use reth_testing_utils::{generators, generators::random_header_range};
     use tracing::trace;
+
+    #[test]
+    fn prune_exhausted_range_and_budget() {
+        // Exhausting all three tables completes the range even when its final block is absent.
+        for (rows, limit, done, checkpoint, pruned) in [
+            (0, 100, true, Some(10), 0),
+            (4, 100, true, Some(10), 12),
+            (11, 100, true, Some(10), 33),
+            (4, 6, false, Some(1), 6),
+            (0, 0, false, None, 0),
+        ] {
+            let db = TestStageDB::default();
+            let mut rng = generators::rng();
+            let headers = random_header_range(&mut rng, 0..rows, B256::ZERO);
+            let tx = db.factory.provider_rw().unwrap().into_tx();
+            for header in &headers {
+                TestStageDB::insert_header(None, &tx, header, U256::ZERO).unwrap();
+            }
+            tx.commit().unwrap();
+
+            let provider = db.factory.database_provider_rw().unwrap();
+            let segment = super::Headers::new(db.factory.static_file_provider());
+            let result = segment
+                .prune(
+                    &provider,
+                    PruneInput {
+                        previous_checkpoint: None,
+                        to_block: 10 + reth_prune_types::MINIMUM_DISTANCE,
+                        limiter: PruneLimiter::default().set_deleted_entries_limit(limit),
+                    },
+                )
+                .unwrap();
+            assert_eq!(result.progress.is_finished(), done, "rows={rows}, limit={limit}");
+            assert_eq!(result.pruned, pruned);
+            assert_eq!(result.checkpoint.unwrap().block_number, checkpoint);
+        }
+    }
 
     #[ignore = "todo"]
     #[test]

@@ -117,6 +117,26 @@ where
         provider: &Provider,
         tip_block_number: BlockNumber,
     ) -> PrunerResult {
+        // Checkpoints include DB data moved to static files, not just deleted history.
+        // Restore them even if this run has no work, and clear gauges removed by an unwind.
+        let checkpoints = provider.get_prune_checkpoints()?;
+        for segment in &self.segments {
+            let block = checkpoints
+                .iter()
+                .find(|(id, _)| *id == segment.segment())
+                .and_then(|(_, checkpoint)| checkpoint.block_number)
+                .unwrap_or_default();
+            self.metrics
+                .get_prune_segment_metrics(segment.segment())
+                .highest_pruned_block
+                .set(block as f64);
+        }
+        for (segment, checkpoint) in checkpoints {
+            self.metrics
+                .get_prune_segment_metrics(segment)
+                .highest_pruned_block
+                .set(checkpoint.block_number.unwrap_or_default() as f64);
+        }
         let Some(tip_block_number) =
             self.adjust_tip_block_number_to_finished_exex_height(tip_block_number)
         else {
@@ -188,18 +208,12 @@ where
         };
 
         for segment in &self.segments {
-            if limiter.is_limit_reached() {
-                break
-            }
+            if let Some((to_block, prune_mode)) = segment.target_block(tip_block_number)? {
+                if limiter.is_limit_reached() {
+                    output.progress = output.progress.combine(limiter.progress(false));
+                    break
+                }
 
-            if let Some((to_block, prune_mode)) = segment
-                .mode()
-                .map(|mode| {
-                    mode.prune_target_block(tip_block_number, segment.segment(), segment.purpose())
-                })
-                .transpose()?
-                .flatten()
-            {
                 debug!(
                     target: "pruner",
                     segment = ?segment.segment(),
@@ -232,7 +246,7 @@ where
                         .set(highest_pruned_block as f64);
                 }
 
-                output.progress = segment_output.progress;
+                output.progress = output.progress.combine(segment_output.progress);
                 output.segments.push((segment.segment(), segment_output));
 
                 debug!(
