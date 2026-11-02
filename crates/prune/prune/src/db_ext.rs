@@ -1,6 +1,6 @@
 use crate::PruneLimiter;
 use reth_db_api::{
-    cursor::{DbCursorRO, DbCursorRW, RangeWalker},
+    cursor::{DbCursorRO, RangeWalker},
     table::{Table, TableRow},
     transaction::DbTxMut,
     DatabaseError,
@@ -9,46 +9,6 @@ use std::{fmt::Debug, ops::RangeBounds};
 use tracing::debug;
 
 pub(crate) trait DbTxPruneExt: DbTxMut {
-    /// Prune the table for the specified pre-sorted key iterator.
-    ///
-    /// Returns number of rows pruned.
-    fn prune_table_with_iterator<T: Table>(
-        &self,
-        keys: impl IntoIterator<Item = T::Key>,
-        limiter: &mut PruneLimiter,
-        mut delete_callback: impl FnMut(TableRow<T>),
-    ) -> Result<(usize, bool), DatabaseError> {
-        let mut cursor = self.cursor_write::<T>()?;
-        let mut keys = keys.into_iter();
-
-        let mut deleted_entries = 0;
-
-        for key in &mut keys {
-            if limiter.is_limit_reached() {
-                debug!(
-                    target: "providers::db",
-                    ?limiter,
-                    deleted_entries_limit = %limiter.is_deleted_entries_limit_reached(),
-                    time_limit = %limiter.is_time_limit_reached(),
-                    table = %T::NAME,
-                    "Pruning limit reached"
-                );
-                break
-            }
-
-            let row = cursor.seek_exact(key)?;
-            if let Some(row) = row {
-                cursor.delete_current()?;
-                limiter.increment_deleted_entries_count();
-                deleted_entries += 1;
-                delete_callback(row);
-            }
-        }
-
-        let done = keys.next().is_none();
-        Ok((deleted_entries, done))
-    }
-
     /// Prune the table for the specified key range.
     ///
     /// Returns number of rows pruned.

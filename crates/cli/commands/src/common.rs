@@ -151,10 +151,15 @@ impl<C: ChainSpecParser> EnvironmentArgs<C> {
     {
         let has_receipt_pruning = config.prune.has_receipts_pruning();
         let prune_modes = config.prune.segments.clone();
+        // `as_blocks_per_file_map` matches every segment exhaustively, so a new segment is a
+        // compile error there instead of being silently missed here.
+        let blocks_per_file_map = config.static_files.as_blocks_per_file_map();
+        let blocks_per_file =
+            blocks_per_file_map.iter().map(|(segment, &size)| (segment, Some(size)));
         let factory = ProviderFactory::<NodeTypesWithDBAdapter<N, Arc<DatabaseEnv>>>::new(
             db,
             self.chain.clone(),
-            static_file_provider,
+            static_file_provider.with_blocks_per_file(blocks_per_file)?,
         )
         .with_prune_modes(prune_modes.clone());
 

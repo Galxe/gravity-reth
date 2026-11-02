@@ -1,6 +1,6 @@
 use crate::segments::{
-    AccountHistory, ReceiptsByLogs, Segment, SenderRecovery, StorageHistory, TransactionLookup,
-    UserReceipts,
+    AccountHistory, Bodies, ReceiptsByLogs, Segment, SenderRecovery, StorageHistory,
+    TransactionLookup, UserReceipts,
 };
 use alloy_eips::eip2718::Encodable2718;
 use reth_db_api::{table::Value, transaction::DbTxMut};
@@ -67,7 +67,7 @@ where
             receipts,
             account_history,
             storage_history,
-            bodies_history: _,
+            bodies_history,
             receipts_log_filter,
         } = prune_modes;
 
@@ -76,8 +76,9 @@ where
             .segment(StaticFileHeaders::new(static_file_provider.clone()))
             // Static file transactions
             .segment(StaticFileTransactions::new(static_file_provider.clone()))
-            // Static file receipts
-            .segment(StaticFileReceipts::new(static_file_provider))
+            // Both receipt segments share a DB-cleanup checkpoint. With user pruning enabled,
+            // let that segment own it so two pending writes cannot overwrite each other's progress.
+            .segment_opt(receipts.is_none().then(|| StaticFileReceipts::new(static_file_provider)))
             // Account history
             .segment_opt(account_history.map(AccountHistory::new))
             // Storage history
@@ -89,6 +90,9 @@ where
                 (!receipts_log_filter.is_empty())
                     .then(|| ReceiptsByLogs::new(receipts_log_filter.clone())),
             )
+            // Read the previously committed lookup checkpoint before pruning more lookup entries.
+            // A crash after deleting a jar must not leave lookup pruning dependent on that jar.
+            .segment_opt(bodies_history.map(|mode| Bodies::new(mode, transaction_lookup)))
             // Transaction lookup
             .segment_opt(transaction_lookup.map(TransactionLookup::new))
             // Sender recovery

@@ -1,11 +1,14 @@
 use crate::{
-    db_ext::DbTxPruneExt,
     segments::{PruneInput, Segment, SegmentOutput},
     PrunerError,
 };
 use alloy_eips::eip2718::Encodable2718;
 use rayon::prelude::*;
-use reth_db_api::{tables, transaction::DbTxMut};
+use reth_db_api::{
+    cursor::{DbCursorRO, DbCursorRW},
+    tables,
+    transaction::DbTxMut,
+};
 use reth_provider::{BlockReader, DBProvider, PruneCheckpointReader};
 use reth_prune_types::{PruneMode, PrunePurpose, PruneSegment, SegmentOutputCheckpoint};
 use tracing::{debug, instrument, trace};
@@ -38,8 +41,6 @@ where
         PrunePurpose::User
     }
 
-    // `PruneSegment::Transactions` is deprecated but index-stable; still read for the checkpoint.
-    #[allow(deprecated)]
     #[instrument(level = "trace", target = "pruner", skip(self, provider), ret)]
     fn prune(
         &self,
@@ -50,7 +51,7 @@ where
         // data. If the TransactionLookup checkpoint is lagging behind (which can happen e.g. when
         // pre-merge history is dropped and then later tx lookup pruning is enabled) then we can
         // only prune from the tx checkpoint and onwards.
-        if let Some(txs_checkpoint) = provider.get_prune_checkpoint(PruneSegment::Transactions)? &&
+        if let Some(txs_checkpoint) = provider.get_prune_checkpoint(PruneSegment::Bodies)? &&
             input
                 .previous_checkpoint
                 .is_none_or(|checkpoint| checkpoint.block_number < txs_checkpoint.block_number)
@@ -59,23 +60,34 @@ where
             debug!(
                 target: "pruner",
                 transactions_checkpoint = ?input.previous_checkpoint,
-                "No TransactionLookup checkpoint found, using Transactions checkpoint as fallback"
+                "No TransactionLookup checkpoint found, using Bodies checkpoint as fallback"
             );
         }
 
-        let (start, end) = match input.get_next_tx_num_range(provider)? {
-            Some(range) => range,
-            None => {
-                trace!(target: "pruner", "No transaction lookup entries to prune");
-                return Ok(SegmentOutput::done())
+        let (start, end) =
+            match input.get_next_tx_num_range(provider)? {
+                Some(range) => range,
+                None => {
+                    trace!(target: "pruner", "No transaction lookup entries to prune");
+                    let mut output = SegmentOutput::done();
+                    if input
+                        .previous_checkpoint
+                        .is_none_or(|cp| cp.block_number < Some(input.to_block)) &&
+                        let Some(body) = provider.block_body_indices(input.to_block)?
+                    {
+                        output.checkpoint = Some(SegmentOutputCheckpoint {
+                            block_number: Some(input.to_block),
+                            tx_number: body.next_tx_num().checked_sub(1),
+                        });
+                    }
+                    return Ok(output)
+                }
             }
-        }
-        .into_inner();
+            .into_inner();
         let tx_range = start..=
             Some(end)
                 .min(input.limiter.deleted_entries_limit_left().map(|left| start + left as u64 - 1))
                 .unwrap();
-        let tx_range_end = *tx_range.end();
 
         // Retrieve transactions in the range and calculate their hashes in parallel
         let hashes = provider
@@ -94,29 +106,39 @@ where
 
         let mut limiter = input.limiter;
 
+        // Minimal nodes omit new lookup entries. Advance by transactions examined, including
+        // missing entries, but never checkpoint past work skipped by a timeout.
         let mut last_pruned_transaction = None;
-        let (pruned, done) =
-            provider.tx_ref().prune_table_with_iterator::<tables::TransactionHashNumbers>(
-                hashes,
-                &mut limiter,
-                |row| {
-                    last_pruned_transaction =
-                        Some(last_pruned_transaction.unwrap_or(row.1).max(row.1))
-                },
-            )?;
-
-        let done = done && tx_range_end == end;
+        let mut pruned = 0;
+        let mut cursor = provider.tx_ref().cursor_write::<tables::TransactionHashNumbers>()?;
+        for (offset, hash) in hashes.into_iter().enumerate() {
+            if limiter.is_limit_reached() {
+                break
+            }
+            if cursor.seek_exact(hash)?.is_some() {
+                cursor.delete_current()?;
+                limiter.increment_deleted_entries_count();
+                pruned += 1;
+            }
+            last_pruned_transaction = Some(start + offset as u64);
+        }
+        let Some(last_pruned_transaction) = last_pruned_transaction else {
+            return Ok(SegmentOutput::not_done(
+                limiter.interrupt_reason(),
+                input.previous_checkpoint.map(SegmentOutputCheckpoint::from_prune_checkpoint),
+            ))
+        };
+        let done = last_pruned_transaction == end;
         trace!(target: "pruner", %pruned, %done, "Pruned transaction lookup");
 
-        let last_pruned_transaction = last_pruned_transaction.unwrap_or(tx_range_end);
-
-        let last_pruned_block = provider
-            .transaction_block(last_pruned_transaction)?
-            .ok_or(PrunerError::InconsistentData("Block for transaction is not found"))?
-            // If there's more transaction lookup entries to prune, set the checkpoint block number
-            // to previous, so we could finish pruning its transaction lookup entries on the next
-            // run.
-            .checked_sub(if done { 0 } else { 1 });
+        let last_pruned_block = if done {
+            Some(input.to_block)
+        } else {
+            provider
+                .transaction_block(last_pruned_transaction)?
+                .ok_or(PrunerError::InconsistentData("Block for transaction is not found"))?
+                .checked_sub(1)
+        };
 
         let progress = limiter.progress(done);
 

@@ -140,6 +140,11 @@ where
                 PersistenceAction::SaveSafeBlock(safe_block) => {
                     self.pending_safe_block = Some(safe_block);
                 }
+                PersistenceAction::Barrier(sender) => {
+                    // SaveBlocks acknowledges before pruning. Reaching this action also waits
+                    // for the preceding prune transaction and static file deletions to finish.
+                    let _ = sender.send(());
+                }
             }
         }
         Ok(())
@@ -470,6 +475,9 @@ pub enum PersistenceAction<N: NodePrimitives = EthPrimitives> {
 
     /// Update the persisted safe block on disk
     SaveSafeBlock(u64),
+
+    /// Acknowledge after all previously queued writes and pruning have completed.
+    Barrier(Sender<()>),
 }
 
 /// A handle to the persistence service
@@ -520,6 +528,13 @@ impl<T: NodePrimitives> PersistenceHandle<T> {
             sender: db_service_tx,
             _service_guard: Arc::new(ServiceGuard(Some(join_handle))),
         }
+    }
+
+    /// Waits for all queued writes, including pruning after save acknowledgements.
+    pub fn wait_for_idle(&self) -> Result<(), std::sync::mpsc::RecvError> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.send_action(PersistenceAction::Barrier(tx)).map_err(|_| std::sync::mpsc::RecvError)?;
+        rx.recv()
     }
 
     /// Sends a specific [`PersistenceAction`] in the contained channel. The caller is responsible

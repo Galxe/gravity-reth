@@ -1793,7 +1793,18 @@ impl<TX: DbTx + 'static, N: NodeTypesForProvider> ReceiptProvider for DatabasePr
             return if tx_range.is_empty() {
                 Ok(Some(Vec::new()))
             } else {
-                self.receipts_by_tx_range(tx_range).map(Some)
+                let receipts = self.receipts_by_tx_range(tx_range)?;
+                // Pruning removes receipts from static files, so a block below the prune boundary
+                // yields a shorter range than its body claims. Report the block's receipts as
+                // unavailable rather than handing back an incomplete set; callers that tolerate a
+                // missing block skip it. With a log filter only the matching receipts are kept,
+                // so a short range is expected there and the data is returned as is.
+                if self.prune_modes.receipts_log_filter.is_empty() &&
+                    receipts.len() as u64 != body.tx_count()
+                {
+                    return Ok(None)
+                }
+                Ok(Some(receipts))
             }
         }
         Ok(None)
@@ -3683,8 +3694,10 @@ struct StateHistoryIndices {
 mod tests {
     use super::*;
     use crate::{
-        test_utils::{blocks::BlockchainTestData, create_test_provider_factory},
-        BlockWriter, DatabaseProviderFactory,
+        test_utils::{
+            blocks::BlockchainTestData, create_test_provider_factory, MockNodeTypesWithDB,
+        },
+        BlockWriter, DatabaseProviderFactory, ProviderFactory,
     };
     use reth_testing_utils::generators::{self, random_block, BlockParams};
 
@@ -3943,6 +3956,46 @@ mod tests {
         let legacy = create_test_provider_factory();
         let legacy_provider = legacy.provider().unwrap();
         assert!(legacy_provider.account_block_changeset(1).unwrap().is_empty());
+    }
+
+    /// Inserts block 1 with two transactions but no receipts, as a pruned block looks: the body
+    /// indices survive, the receipts do not.
+    fn insert_block_with_pruned_receipts(factory: &ProviderFactory<MockNodeTypesWithDB>) {
+        let provider_rw = factory.provider_rw().unwrap();
+        provider_rw
+            .tx_ref()
+            .put::<tables::BlockBodyIndices>(
+                1,
+                StoredBlockBodyIndices { first_tx_num: 0, tx_count: 2 },
+            )
+            .unwrap();
+        provider_rw.commit_view().unwrap();
+    }
+
+    #[test]
+    fn test_receipts_by_block_pruned_receipts_return_none() {
+        let factory = create_test_provider_factory();
+        insert_block_with_pruned_receipts(&factory);
+
+        let provider = factory.provider().unwrap();
+        assert_eq!(provider.receipts_by_block(1.into()).unwrap(), None);
+    }
+
+    #[test]
+    fn test_receipts_by_block_log_filter_returns_partial_receipts() {
+        // With a log filter only matching receipts are retained, so a range shorter than the
+        // block's transaction count is expected rather than a sign of missing data.
+        let factory = create_test_provider_factory().with_prune_modes(PruneModes {
+            receipts_log_filter: reth_prune_types::ReceiptsLogPruneConfig(BTreeMap::from([(
+                Address::ZERO,
+                PruneMode::Full,
+            )])),
+            ..Default::default()
+        });
+        insert_block_with_pruned_receipts(&factory);
+
+        let provider = factory.provider().unwrap();
+        assert_eq!(provider.receipts_by_block(1.into()).unwrap(), Some(vec![]));
     }
 
     #[test]

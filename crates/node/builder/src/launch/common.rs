@@ -173,8 +173,13 @@ impl LaunchContext {
         toml_config.peers.trusted_nodes_only |= config.network.trusted_only;
 
         // Merge static file CLI arguments with config file, giving priority to CLI
-        toml_config.static_files =
+        let static_files =
             config.static_files.merge_with_config(toml_config.static_files, config.pruning.minimal);
+        static_files.validate()?;
+        if toml_config.static_files != static_files {
+            toml_config.static_files = static_files;
+            toml_config.save(&config_path)?;
+        }
 
         Ok(toml_config)
     }
@@ -476,10 +481,16 @@ where
         N: ProviderNodeTypes<DB = DB, ChainSpec = ChainSpec>,
         Evm: ConfigureEvm<Primitives = N::Primitives> + 'static,
     {
+        // `as_blocks_per_file_map` matches every segment exhaustively, so a new segment is a
+        // compile error there instead of being silently missed here.
+        let blocks_per_file_map = self.toml_config().static_files.as_blocks_per_file_map();
+        let blocks_per_file =
+            blocks_per_file_map.iter().map(|(segment, &size)| (segment, Some(size)));
         let factory = ProviderFactory::new(
             self.right().clone(),
             self.chain_spec(),
-            StaticFileProvider::read_write(self.data_dir().static_files())?,
+            StaticFileProvider::read_write(self.data_dir().static_files())?
+                .with_blocks_per_file(blocks_per_file)?,
         )
         .with_prune_modes(self.prune_modes())
         .with_static_files_metrics();

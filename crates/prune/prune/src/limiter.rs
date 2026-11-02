@@ -96,7 +96,7 @@ impl PruneLimiter {
 
     /// Returns the number of deleted entries left before the limit is reached.
     pub fn deleted_entries_limit_left(&self) -> Option<usize> {
-        self.deleted_entries_limit.as_ref().map(|limit| limit.limit - limit.deleted)
+        self.deleted_entries_limit.as_ref().map(|limit| limit.limit.saturating_sub(limit.deleted))
     }
 
     /// Returns the limit on the number of deleted entries (rows in the database).
