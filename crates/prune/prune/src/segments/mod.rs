@@ -215,7 +215,7 @@ mod tests {
     use reth_provider::{
         providers::{BlockchainProvider, StaticFileProvider},
         test_utils::{create_test_provider_factory, MockEthProvider, MockNodeTypesWithDB},
-        ProviderFactory, StaticFileWriter,
+        ProviderFactory, ReceiptProvider, StaticFileWriter, TransactionsProvider,
     };
     use reth_testing_utils::generators::{self, random_block_range, BlockRangeParams};
 
@@ -243,7 +243,10 @@ mod tests {
             }
             writer.commit()?;
         }
-        files.initialize_index()?;
+        for segment in [StaticFileSegment::Transactions, StaticFileSegment::Receipts] {
+            assert_eq!(files.get_lowest_static_file_block(segment), Some(9));
+            assert_eq!(files.get_highest_static_file_block(segment), Some(29));
+        }
 
         let input = |to_block| PruneInput {
             previous_checkpoint: None,
@@ -251,18 +254,37 @@ mod tests {
             limiter: PruneLimiter::default(),
         };
 
-        // A target inside the last jar leaves it in place...
-        prune_static_files(&provider, input(25), StaticFileSegment::Receipts)?;
-        assert_eq!(files.get_lowest_static_file_block(StaticFileSegment::Receipts), Some(29));
-
-        // ...and receipt jars have no writer once receipts are pruned, so it is reclaimed below.
-        prune_static_files(&provider, input(100), StaticFileSegment::Receipts)?;
-        assert_eq!(files.get_lowest_static_file_block(StaticFileSegment::Receipts), None);
-
-        // The jar still being written must survive a target past the tip.
-        prune_static_files(&provider, input(100), StaticFileSegment::Transactions)?;
+        // Exercise the index populated by writer commits, before any index rebuild.
+        let output = prune_static_files(&provider, input(100), StaticFileSegment::Transactions)?;
+        assert_eq!(output.pruned, 20);
         assert_eq!(files.get_lowest_static_file_block(StaticFileSegment::Transactions), Some(29));
         assert_eq!(files.get_highest_static_file_block(StaticFileSegment::Transactions), Some(29));
+        assert!(files.transaction_by_id(0)?.is_none());
+        assert!(files.transaction_by_id(10)?.is_none());
+        assert!(files.transaction_by_id(20)?.is_some());
+        assert!(files.transaction_by_id(29)?.is_some());
+
+        // A target inside the last jar leaves it in place.
+        let output = prune_static_files(&provider, input(25), StaticFileSegment::Receipts)?;
+        assert_eq!(output.pruned, 20);
+        assert_eq!(files.get_lowest_static_file_block(StaticFileSegment::Receipts), Some(29));
+        assert!(files.receipt(0)?.is_none());
+        assert!(files.receipt(10)?.is_none());
+        assert!(files.receipt(20)?.is_some());
+
+        // Receipt jars have no writer once receipts are pruned, so the last jar is reclaimed.
+        let output = prune_static_files(&provider, input(100), StaticFileSegment::Receipts)?;
+        assert_eq!(output.pruned, 10);
+        assert_eq!(files.get_lowest_static_file_block(StaticFileSegment::Receipts), None);
+        assert!(files.receipt(20)?.is_none());
+
+        let mut writer = files.latest_writer(StaticFileSegment::Transactions)?;
+        writer.increment_block(30)?;
+        let tx = TxLegacy::default().into_signed(Signature::test_signature()).into();
+        writer.append_transaction(30, &tx)?;
+        writer.commit()?;
+        assert!(files.transaction_by_id(29)?.is_some());
+        assert!(files.transaction_by_id(30)?.is_some());
 
         Ok(())
     }
