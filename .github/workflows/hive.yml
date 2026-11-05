@@ -188,7 +188,7 @@ jobs:
       - name: Upload test logs
         id: upload-logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: hive-logs
           path: hive/workspace/logs/
