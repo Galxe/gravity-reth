@@ -37,6 +37,11 @@ const MAX_PAYLOAD_SIZE: usize = 16 * 1024 * 1024;
 /// there are any incoming messages with an ID greater than this, they are subprotocol messages.
 pub const MAX_RESERVED_MESSAGE_ID: u8 = 0x0f;
 
+/// Largest valid disconnect reason encoded as an RLP list.
+const MAX_DISCONNECT_PAYLOAD_SIZE: usize = 2;
+/// Bounds malformed peer payloads included in logs.
+const MAX_LOGGED_PAYLOAD_SIZE: usize = 64;
+
 /// [`MAX_P2P_MESSAGE_ID`] is the maximum message ID in use for the `p2p` subprotocol.
 const MAX_P2P_MESSAGE_ID: u8 = P2PMessageID::Pong as u8;
 
@@ -147,7 +152,7 @@ where
                 Err(P2PStreamError::HandshakeError(P2PHandshakeError::Disconnected(reason)))
             }
             Err(err) => {
-                debug!(%err, msg=%hex::encode(&first_message_bytes), "Failed to decode first message from peer");
+                debug!(%err, msg=%hex::encode(log_prefix(&first_message_bytes)), "Failed to decode first message from peer");
                 Err(P2PStreamError::HandshakeError(err.into()))
             }
             Ok(msg) => {
@@ -505,6 +510,13 @@ where
                 })))
             }
 
+            if id == P2PMessageID::Disconnect as u8 && decompressed_len > MAX_DISCONNECT_PAYLOAD_SIZE {
+                return Poll::Ready(Some(Err(P2PStreamError::MessageTooBig {
+                    message_size: decompressed_len,
+                    max_size: MAX_DISCONNECT_PAYLOAD_SIZE,
+                })))
+            }
+
             // create a buffer to hold the decompressed message, adding a byte to the length for
             // the message ID byte, which is the first byte in this buffer
             let mut decompress_buf = BytesMut::zeroed(decompressed_len + 1);
@@ -514,7 +526,7 @@ where
             this.decoder.decompress(&bytes[1..], &mut decompress_buf[1..]).map_err(|err| {
                 debug!(
                     %err,
-                    msg=%hex::encode(&bytes[1..]),
+                    msg=%hex::encode(log_prefix(&bytes[1..])),
                     "error decompressing p2p message"
                 );
                 err
@@ -589,6 +601,10 @@ where
 
         Poll::Pending
     }
+}
+
+fn log_prefix(bytes: &[u8]) -> &[u8] {
+    &bytes[..bytes.len().min(MAX_LOGGED_PAYLOAD_SIZE)]
 }
 
 impl<S> Sink<Bytes> for P2PStream<S>
@@ -879,6 +895,7 @@ mod tests {
     /// A sink that records started frames and counts flushes, to observe batching behavior.
     #[derive(Default)]
     struct FlushCountingTransport {
+        incoming: VecDeque<io::Result<BytesMut>>,
         sent: Vec<Bytes>,
         flushes: usize,
     }
@@ -886,8 +903,8 @@ mod tests {
     impl Stream for FlushCountingTransport {
         type Item = io::Result<BytesMut>;
 
-        fn poll_next(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-            Poll::Pending
+        fn poll_next(mut self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            self.incoming.pop_front().map_or(Poll::Pending, |frame| Poll::Ready(Some(frame)))
         }
     }
 
@@ -922,6 +939,24 @@ mod tests {
             vec![Capability::eth(EthVersion::Eth68)],
         )
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn rejects_oversized_disconnect_before_decompression() {
+        // A snappy header advertising a 16 MiB payload, with no compressed body behind it.
+        let frame =
+            BytesMut::from([P2PMessageID::Disconnect as u8, 0x80, 0x80, 0x80, 0x08].as_slice());
+        let mut transport = FlushCountingTransport::default();
+        transport.incoming.push_back(Ok(frame));
+        let mut stream = P2PStream::new(transport, eth_shared_capabilities());
+
+        assert!(matches!(
+            stream.next().await.unwrap().unwrap_err(),
+            P2PStreamError::MessageTooBig {
+                message_size: MAX_PAYLOAD_SIZE,
+                max_size: MAX_DISCONNECT_PAYLOAD_SIZE,
+            }
+        ));
     }
 
     #[tokio::test]
