@@ -34,8 +34,10 @@ mod tests {
     use super::*;
     use alloy_primitives::{
         map::{AddressMap, B256Map},
-        Address, StorageKey, StorageValue, U256,
+        Address, StorageKey, StorageValue, B256, U256,
     };
+    use alloy_serde::JsonStorageKey;
+    use reth_rpc_server_types::constants::DEFAULT_MAX_PROOF_SLOTS;
     use reth_chainspec::ChainSpec;
     use reth_evm_ethereum::EthEvmConfig;
     use reth_network_api::noop::NoopNetwork;
@@ -103,4 +105,18 @@ mod tests {
         let account = eth_api.get_account(address, Default::default()).await.unwrap();
         assert!(account.is_none());
     }
+    #[test]
+    fn test_get_proof_key_cap() {
+        let eth_api = noop_eth_api();
+        let address = Address::random();
+        let keys = |len| vec![JsonStorageKey::from(B256::ZERO); len];
+
+        assert!(eth_api.get_proof(address, keys(DEFAULT_MAX_PROOF_SLOTS), None).is_ok());
+
+        let Err(err) = eth_api.get_proof(address, keys(DEFAULT_MAX_PROOF_SLOTS + 1), None) else {
+            panic!("expected over-limit request to be rejected");
+        };
+        assert_eq!(err.to_string(), "storage key count 1025 exceeds limit 1024");
+    }
+
 }
