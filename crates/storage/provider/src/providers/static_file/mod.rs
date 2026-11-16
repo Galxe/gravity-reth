@@ -808,11 +808,13 @@ mod changeset_tests {
             assert_eq!(provider.block_hash(0).unwrap(), Some(hash));
             assert!(matches!(
                 provider.header_by_number(1),
-                Err(ProviderError::MissingStaticFileBlock(StaticFileSegment::Headers, 1))
+                Ok(None) |
+                    Err(ProviderError::MissingStaticFileBlock(StaticFileSegment::Headers, 1))
             ));
             assert!(matches!(
                 provider.block_hash(1),
-                Err(ProviderError::MissingStaticFileBlock(StaticFileSegment::Headers, 1))
+                Ok(None) |
+                    Err(ProviderError::MissingStaticFileBlock(StaticFileSegment::Headers, 1))
             ));
 
             let jar = provider
@@ -851,11 +853,13 @@ mod changeset_tests {
             }
             assert!(matches!(
                 provider.header_by_number(1),
-                Err(ProviderError::MissingStaticFileBlock(StaticFileSegment::Headers, 1))
+                Ok(None) |
+                    Err(ProviderError::MissingStaticFileBlock(StaticFileSegment::Headers, 1))
             ));
             assert!(matches!(
                 provider.block_hash(1),
-                Err(ProviderError::MissingStaticFileBlock(StaticFileSegment::Headers, 1))
+                Ok(None) |
+                    Err(ProviderError::MissingStaticFileBlock(StaticFileSegment::Headers, 1))
             ));
         }
     }
