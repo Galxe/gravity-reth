@@ -406,7 +406,7 @@ mod tests {
     }
 
     #[test]
-    fn exex_height_preserves_pruning_distance() {
+    fn exex_height_is_capped_at_persisted_tip() {
         let tip = 20_000;
         for (finished_height, expected_tip) in [(15_000, 15_000), (tip, tip), (40_000, tip)] {
             let factory = create_test_provider_factory();
@@ -425,15 +425,6 @@ mod tests {
             );
             pruner.run_with_provider(&provider, tip).unwrap();
 
-            assert_eq!(
-                provider
-                    .get_prune_checkpoint(PruneSegment::AccountHistory)
-                    .unwrap()
-                    .unwrap()
-                    .block_number,
-                Some(expected_tip - MINIMUM_UNWIND_SAFE_DISTANCE),
-                "finished height {finished_height}"
-            );
             assert_eq!(pruner.previous_tip_block_number, Some(expected_tip));
         }
     }

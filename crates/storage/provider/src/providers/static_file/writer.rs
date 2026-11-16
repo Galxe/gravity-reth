@@ -455,6 +455,12 @@ impl<N: NodePrimitives> StaticFileProviderRW<N> {
         Ok(())
     }
 
+    /// Flushes data without publishing offsets, to exercise concurrent readers in tests.
+    #[cfg(test)]
+    pub(crate) fn sync_all(&mut self) -> ProviderResult<()> {
+        self.writer.sync_all().map_err(ProviderError::other)
+    }
+
     /// Commits configuration changes to disk and updates the reader index with the new changes.
     pub fn commit(&mut self) -> ProviderResult<()> {
         let start = Instant::now();

@@ -80,18 +80,16 @@ mod tests {
     };
     use alloy_consensus::{Header, SignableTransaction, Transaction, TxLegacy};
     use alloy_primitives::{BlockHash, Signature, TxNumber, B256, U256};
-    use assert_matches::assert_matches;
     use rand::seq::SliceRandom;
     use reth_db::test_utils::create_test_static_files_dir;
     use reth_db_api::{
         transaction::DbTxMut, CanonicalHeaders, HeaderNumbers, HeaderTerminalDifficulties, Headers,
     };
     use reth_ethereum_primitives::{EthPrimitives, Receipt, TransactionSigned};
-    use reth_nippy_jar::NippyJarError;
     use reth_static_file_types::{
         find_fixed_range, SegmentRangeInclusive, DEFAULT_BLOCKS_PER_STATIC_FILE,
     };
-    use reth_storage_api::{BlockHashReader, ReceiptProvider, TransactionsProvider};
+    use reth_storage_api::{ReceiptProvider, TransactionsProvider};
     use reth_testing_utils::generators::{self, random_header_range};
     use std::{fmt::Debug, fs, ops::Range, path::Path};
 
@@ -591,11 +589,17 @@ mod tests {
 mod changeset_tests {
     use super::*;
     use crate::{test_utils::create_test_provider_factory, StaticFileProviderFactory};
+    use alloy_consensus::Header;
     use alloy_primitives::{Address, B256, U256};
+    use assert_matches::assert_matches;
     use reth_db::test_utils::create_test_static_files_dir;
     use reth_db_api::models::{AccountBeforeTx, StorageBeforeTx};
     use reth_ethereum_primitives::EthPrimitives;
-    use reth_storage_api::{ChangeSetReader, StorageChangeSetReader};
+    use reth_nippy_jar::NippyJarError;
+    use reth_primitives_traits::Account;
+    use reth_storage_api::{
+        BlockHashReader, ChangeSetReader, HeaderProvider, StorageChangeSetReader,
+    };
 
     #[test]
     fn changeset_segments_roundtrip() -> eyre::Result<()> {
@@ -759,31 +763,32 @@ mod changeset_tests {
     #[test]
     fn test_read_headers_while_appending() {
         let (static_dir, _) = create_test_static_files_dir();
-        let sf_rw: StaticFileProvider<EthPrimitives> =
-            StaticFileProviderBuilder::read_write(&static_dir)
-                .build()
-                .expect("Failed to build static file provider");
+        let sf_rw: StaticFileProvider<EthPrimitives> = StaticFileProvider::read_write(&static_dir)
+            .expect("Failed to build static file provider");
         let hash = |num: u64| B256::with_last_byte(num as u8 + 1);
 
         let mut header_writer = sf_rw.latest_writer(StaticFileSegment::Headers).unwrap();
         let mut header = Header::default();
         for num in 0..=2 {
             header.number = num;
-            header_writer.append_header(&header, &hash(num)).unwrap();
+            header_writer.append_header(&header, U256::ZERO, &hash(num)).unwrap();
         }
         header_writer.commit().unwrap();
 
         // Writes the next header to disk without committing it, as persistence does before the
         // database commit.
         header.number = 3;
-        header_writer.append_header(&header, &hash(3)).unwrap();
+        header_writer.append_header(&header, U256::ZERO, &hash(3)).unwrap();
         header_writer.sync_all().unwrap();
 
         // Reloads the jar from disk meanwhile, as every static file deletion by the pruner does.
         sf_rw.initialize_index().unwrap();
 
         assert_eq!(sf_rw.block_hash(2).unwrap(), Some(hash(2)));
-        assert_eq!(sf_rw.block_hash(3).unwrap(), None);
+        assert!(matches!(
+            sf_rw.block_hash(3),
+            Err(ProviderError::MissingStaticFileBlock(StaticFileSegment::Headers, 3))
+        ));
     }
 
     #[test]
@@ -795,17 +800,23 @@ mod changeset_tests {
             let hash = header.hash_slow();
             {
                 let mut writer = provider.latest_writer(StaticFileSegment::Headers).unwrap();
-                writer.append_header(&header, &hash).unwrap();
+                writer.append_header(&header, U256::ZERO, &hash).unwrap();
                 writer.commit().unwrap();
             }
 
             assert_eq!(provider.header_by_number(0).unwrap(), Some(header));
             assert_eq!(provider.block_hash(0).unwrap(), Some(hash));
-            assert_eq!(provider.header_by_number(1).unwrap(), None);
-            assert_eq!(provider.block_hash(1).unwrap(), None);
+            assert!(matches!(
+                provider.header_by_number(1),
+                Err(ProviderError::MissingStaticFileBlock(StaticFileSegment::Headers, 1))
+            ));
+            assert!(matches!(
+                provider.block_hash(1),
+                Err(ProviderError::MissingStaticFileBlock(StaticFileSegment::Headers, 1))
+            ));
 
             let jar = provider
-                .get_segment_provider_for_block(StaticFileSegment::Headers, 0, None)
+                .get_segment_provider_from_block(StaticFileSegment::Headers, 0, None)
                 .unwrap();
             let path =
                 if corrupt_offsets { jar.offsets_path() } else { jar.data_path().to_path_buf() };
@@ -823,7 +834,8 @@ mod changeset_tests {
             }
             reth_fs_util::write(&path, bytes).unwrap();
 
-            let provider = StaticFileProvider::<EthPrimitives>::read_only(&static_dir).unwrap();
+            let provider =
+                StaticFileProvider::<EthPrimitives>::read_only(&static_dir, false).unwrap();
             for error in [
                 provider.header_by_number(0).unwrap_err(),
                 provider.block_hash(0).unwrap_err(),
@@ -837,8 +849,14 @@ mod changeset_tests {
                     assert_matches!(error, NippyJarError::OutputTooSmall);
                 }
             }
-            assert_eq!(provider.header_by_number(1).unwrap(), None);
-            assert_eq!(provider.block_hash(1).unwrap(), None);
+            assert!(matches!(
+                provider.header_by_number(1),
+                Err(ProviderError::MissingStaticFileBlock(StaticFileSegment::Headers, 1))
+            ));
+            assert!(matches!(
+                provider.block_hash(1),
+                Err(ProviderError::MissingStaticFileBlock(StaticFileSegment::Headers, 1))
+            ));
         }
     }
 }

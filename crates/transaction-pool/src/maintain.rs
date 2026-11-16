@@ -880,7 +880,7 @@ mod tests {
     };
     use alloy_consensus::Header;
     use alloy_eips::{eip1559::ETHEREUM_BLOCK_GAS_LIMIT_30M, eip2718::Decodable2718};
-    use alloy_primitives::{address, hex, B256, U256};
+    use alloy_primitives::{hex, B256, U256};
     use reth_ethereum_primitives::{Block, PooledTransactionVariant};
     use reth_evm_ethereum::EthEvmConfig;
     use reth_execution_types::Chain;
@@ -957,9 +957,12 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn deep_commit_refreshes_validator_head() {
-        // mainnet genesis has a 5,000 gas limit, which the validator picks up from the latest
-        // header
-        let provider = MockEthProvider::default().with_genesis_block();
+        // Start at the mainnet genesis gas limit so validation must observe the later head.
+        let provider = MockEthProvider::default();
+        provider.add_block(
+            provider.chain_spec.genesis_hash(),
+            Block::new(provider.chain_spec.genesis_header().clone(), Default::default()),
+        );
         let transaction = EthPooledTransaction::try_from_consensus(
             TransactionBuilder::default()
                 .gas_limit(21_000)
@@ -974,6 +977,7 @@ mod tests {
         let blob_store = InMemoryBlobStore::default();
         let validator =
             EthTransactionValidatorBuilder::new(provider.clone(), EthEvmConfig::mainnet())
+                .set_block_gas_limit(5_000)
                 .build(blob_store.clone());
         let txpool =
             Pool::new(validator, CoinbaseTipOrdering::default(), blob_store, Default::default());

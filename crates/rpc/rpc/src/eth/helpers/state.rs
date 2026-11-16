@@ -37,7 +37,6 @@ mod tests {
         Address, StorageKey, StorageValue, B256, U256,
     };
     use alloy_serde::JsonStorageKey;
-    use reth_rpc_server_types::constants::DEFAULT_MAX_PROOF_SLOTS;
     use reth_chainspec::ChainSpec;
     use reth_evm_ethereum::EthEvmConfig;
     use reth_network_api::noop::NoopNetwork;
@@ -46,6 +45,7 @@ mod tests {
         ChainSpecProvider,
     };
     use reth_rpc_eth_api::{helpers::EthState, node::RpcNodeCoreAdapter};
+    use reth_rpc_server_types::constants::DEFAULT_MAX_PROOF_SLOTS;
     use reth_transaction_pool::test_utils::{testing_pool, TestPool};
 
     fn noop_eth_api() -> EthApi<
@@ -118,5 +118,4 @@ mod tests {
         };
         assert_eq!(err.to_string(), "storage key count 1025 exceeds limit 1024");
     }
-
 }

@@ -1113,7 +1113,8 @@ mod tests {
         let multiproof = StorageMultiProof {
             root: B256::with_last_byte(0xFF),
             subtree,
-            branch_node_masks: BranchNodeMasksMap::default(),
+            branch_node_hash_masks: HashMap::default(),
+            branch_node_tree_masks: HashMap::default(),
         };
 
         let proof = multiproof.storage_proof(slot).unwrap();
