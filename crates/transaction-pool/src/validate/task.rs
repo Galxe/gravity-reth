@@ -552,5 +552,4 @@ mod tests {
             assert!(matches!(outcome, TransactionValidationOutcome::Valid { .. }));
         }
     }
-
 }
