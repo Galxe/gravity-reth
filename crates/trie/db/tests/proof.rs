@@ -133,19 +133,17 @@ fn empty_state_trie_account_proof() {
     let target = address!("0x1ed9b1dd266b607ee278726d324b855a093394a6");
 
     let provider = factory.provider().unwrap();
-    reth_trie_db::with_adapter!(provider, |A| {
-        let proof = <DbProof<'_, _, A> as DatabaseProof>::from_tx(provider.tx_ref());
-        let account_proof = proof.account_proof(target, &[]).unwrap();
-        assert_eq!(account_proof.info, None, "absent account should have no info");
-        assert_eq!(account_proof.storage_root, EMPTY_ROOT_HASH);
-        assert_eq!(
-            account_proof.proof,
-            vec![Bytes::from([EMPTY_STRING_CODE])],
-            "empty account trie yields the 0x80 sentinel at the proof layer, got {:?}",
-            account_proof.proof
-        );
-        assert_eq!(account_proof.verify(EMPTY_ROOT_HASH), Ok(()));
-    });
+    let proof = Proof::from_tx(provider.tx_ref());
+    let account_proof = proof.account_proof(target, &[]).unwrap();
+    assert_eq!(account_proof.info, None, "absent account should have no info");
+    assert_eq!(account_proof.storage_root, EMPTY_ROOT_HASH);
+    assert_eq!(
+        account_proof.proof,
+        vec![Bytes::from([EMPTY_STRING_CODE])],
+        "empty account trie yields the 0x80 sentinel at the proof layer, got {:?}",
+        account_proof.proof
+    );
+    assert_eq!(account_proof.verify(EMPTY_ROOT_HASH), Ok(()));
 }
 
 #[test]
