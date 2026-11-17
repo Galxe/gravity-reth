@@ -9,6 +9,7 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(not(feature = "std"), no_std)]
 
+#[cfg(any(test, feature = "test-utils", feature = "witness"))]
 extern crate alloc;
 
 /// Cache database that reads from an underlying [`DatabaseRef`].

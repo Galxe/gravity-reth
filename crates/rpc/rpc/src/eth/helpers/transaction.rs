@@ -133,7 +133,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::eth::helpers::types::EthRpcConverter;
+    use crate::eth::{helpers::types::EthRpcConverter, DevSigner};
     use alloy_consensus::{
         BlobTransactionSidecar, Block, Header, SidecarBuilder, SimpleCoder, Transaction,
     };
