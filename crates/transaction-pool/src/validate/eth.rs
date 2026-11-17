@@ -1582,7 +1582,6 @@ mod tests {
         assert!(outcome.is_valid());
     }
 
-
     // <https://github.com/paradigmxyz/reth/issues/8550>
     #[tokio::test]
     async fn invalid_on_gas_limit_too_high() {
