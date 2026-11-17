@@ -1501,9 +1501,8 @@ pub fn ensure_intrinsic_gas<T: EthPoolTransaction>(
 mod tests {
     use super::*;
     use crate::{
-        test_utils::TransactionBuilder,
-        blobstore::InMemoryBlobStore, error::PoolErrorKind, traits::PoolTransaction,
-        CoinbaseTipOrdering, EthPooledTransaction, Pool, TransactionPool,
+        blobstore::InMemoryBlobStore, error::PoolErrorKind, test_utils::TransactionBuilder,
+        traits::PoolTransaction, CoinbaseTipOrdering, EthPooledTransaction, Pool, TransactionPool,
     };
     use alloy_consensus::Transaction;
     use alloy_eips::eip2718::Decodable2718;
