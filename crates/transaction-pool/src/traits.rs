@@ -1532,13 +1532,7 @@ impl<T: SignedTransaction> EthPooledTransaction<T> {
         }
 
         let in_memory_size = transaction.size();
-        Self {
-            transaction,
-            cost,
-            encoded_length,
-            in_memory_size,
-            blob_sidecar,
-        }
+        Self { transaction, cost, encoded_length, in_memory_size, blob_sidecar }
     }
 
     /// Return the reference to the underlying transaction.
