@@ -12,16 +12,20 @@ use reth_execution_types::Chain;
 use reth_primitives_traits::{Block, BlockBody, NodePrimitives, RecoveredBlock};
 use reth_storage_api::{BlockReader, TransactionVariant};
 use reth_tasks::Runtime;
-use schnellru::{ByLength, Limiter, LruMap};
+use schnellru::{ByLength, LruMap};
 use std::{
     future::Future,
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
+    time::Duration,
 };
-use tokio::sync::{
-    mpsc::{unbounded_channel, UnboundedSender},
-    oneshot, Semaphore,
+use tokio::{
+    sync::{
+        mpsc::{unbounded_channel, UnboundedSender},
+        oneshot, Semaphore,
+    },
+    time::{Instant, Interval, MissedTickBehavior},
 };
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
@@ -51,13 +55,12 @@ type CachedParentBlocksResponseSender<B> = oneshot::Sender<Vec<Arc<RecoveredBloc
 /// The type that can send the response for a transaction hash lookup
 type TransactionHashResponseSender<B, R> = oneshot::Sender<Option<CachedTransaction<B, R>>>;
 
-type BlockLruCache<B, L> =
-    MultiConsumerLruCache<B256, Arc<RecoveredBlock<B>>, L, BlockWithSendersResponseSender<B>>;
+type BlockLruCache<B> =
+    MultiConsumerLruCache<B256, Arc<RecoveredBlock<B>>, BlockWithSendersResponseSender<B>>;
 
-type ReceiptsLruCache<R, L> =
-    MultiConsumerLruCache<B256, Arc<Vec<R>>, L, ReceiptsResponseSender<R>>;
+type ReceiptsLruCache<R> = MultiConsumerLruCache<B256, Arc<Vec<R>>, ReceiptsResponseSender<R>>;
 
-type HeaderLruCache<H, L> = MultiConsumerLruCache<B256, H, L, HeaderResponseSender<H>>;
+type HeaderLruCache<H> = MultiConsumerLruCache<B256, H, HeaderResponseSender<H>>;
 
 /// Provides async access to cached eth data
 ///
@@ -86,19 +89,32 @@ impl<N: NodePrimitives> EthStateCache<N> {
     {
         let EthStateCacheConfig {
             max_blocks,
+            max_blocks_bytes,
+            max_receipts_bytes,
+            idle_timeout,
             max_receipts,
             max_headers,
             max_bals: _,
             max_concurrent_db_requests,
             max_cached_tx_hashes,
         } = config;
+        let eviction_interval = {
+            let _guard = action_task_spawner.handle().enter();
+            let period = (idle_timeout / 4).clamp(Duration::from_secs(1), Duration::from_secs(60));
+            let mut interval = tokio::time::interval_at(Instant::now() + period, period);
+            interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+            interval
+        };
         let (to_service, rx) = unbounded_channel();
 
         let service = EthStateCacheService {
             provider,
-            full_block_cache: BlockLruCache::new(max_blocks, "blocks"),
-            receipts_cache: ReceiptsLruCache::new(max_receipts, "receipts"),
-            headers_cache: HeaderLruCache::new(max_headers, "headers"),
+            idle_timeout,
+            eviction_interval,
+            eviction_pending: false,
+            full_block_cache: BlockLruCache::new(max_blocks, max_blocks_bytes, "blocks"),
+            receipts_cache: ReceiptsLruCache::new(max_receipts, max_receipts_bytes, "receipts"),
+            headers_cache: HeaderLruCache::new(max_headers, usize::MAX, "headers"),
             action_tx: to_service.clone(),
             action_rx: UnboundedReceiverStream::new(rx),
             action_task_spawner,
@@ -283,29 +299,27 @@ impl From<CacheServiceUnavailable> for ProviderError {
 /// `reth_rpc::EthApi` which is typically invoked by the RPC server, which already uses
 /// permits to limit concurrent requests.
 #[must_use = "Type does nothing unless spawned"]
-pub(crate) struct EthStateCacheService<
-    Provider,
-    Tasks,
-    LimitBlocks = ByLength,
-    LimitReceipts = ByLength,
-    LimitHeaders = ByLength,
-> where
+pub(crate) struct EthStateCacheService<Provider, Tasks>
+where
     Provider: BlockReader,
-    LimitBlocks: Limiter<B256, Arc<RecoveredBlock<Provider::Block>>>,
-    LimitReceipts: Limiter<B256, Arc<Vec<Provider::Receipt>>>,
-    LimitHeaders: Limiter<B256, Provider::Header>,
 {
+    /// Timeout for unused cached payloads.
+    idle_timeout: Duration,
+    /// Periodic bounded eviction trigger.
+    eviction_interval: Interval,
+    /// Whether another bounded eviction batch remains.
+    eviction_pending: bool,
     /// The type used to lookup data from disk
     provider: Provider,
     /// The LRU cache for full blocks grouped by their block hash.
-    full_block_cache: BlockLruCache<Provider::Block, LimitBlocks>,
+    full_block_cache: BlockLruCache<Provider::Block>,
     /// The LRU cache for block receipts grouped by the block hash.
-    receipts_cache: ReceiptsLruCache<Provider::Receipt, LimitReceipts>,
+    receipts_cache: ReceiptsLruCache<Provider::Receipt>,
     /// The LRU cache for headers.
     ///
     /// Headers are cached because they are required to populate the environment for execution
     /// (evm).
-    headers_cache: HeaderLruCache<Provider::Header, LimitHeaders>,
+    headers_cache: HeaderLruCache<Provider::Header>,
     /// Sender half of the action channel.
     action_tx: UnboundedSender<CacheAction<Provider::Block, Provider::Receipt>>,
     /// Receiver half of the action channel.
@@ -433,6 +447,19 @@ where
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
+        if !this.idle_timeout.is_zero() &&
+            (this.eviction_pending || this.eviction_interval.poll_tick(cx).is_ready())
+        {
+            let now = Instant::now();
+            let blocks = this.full_block_cache.evict_expired(now, this.idle_timeout);
+            let receipts = this.receipts_cache.evict_expired(now, this.idle_timeout);
+            let headers = this.headers_cache.evict_expired(now, this.idle_timeout);
+            this.eviction_pending = blocks || receipts || headers;
+            this.update_cached_metrics();
+            if this.eviction_pending {
+                cx.waker().wake_by_ref();
+            }
+        }
 
         loop {
             let Poll::Ready(action) = this.action_rx.poll_next_unpin(cx) else {
@@ -844,6 +871,7 @@ mod tests {
                 max_bals: 4,
                 max_concurrent_db_requests: 1,
                 max_cached_tx_hashes: 16,
+                ..Default::default()
             },
         );
         service
@@ -863,6 +891,25 @@ mod tests {
             },
             vec![Address::ZERO],
         )
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn periodic_eviction_runs_without_requests() {
+        let mut service = test_service();
+        service.idle_timeout = Duration::from_secs(2);
+        service.eviction_interval = tokio::time::interval_at(
+            Instant::now() + Duration::from_secs(1),
+            Duration::from_secs(1),
+        );
+        let hash = B256::repeat_byte(0x44);
+        service.on_new_block(hash, Ok(Some(Arc::new(test_block()))));
+        service.on_new_receipts(hash, Ok(Some(Arc::new(Vec::new()))));
+        tokio::time::advance(Duration::from_secs(3)).await;
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(Pin::new(&mut service).poll(&mut cx).is_pending());
+        assert!(service.full_block_cache.get(&hash).is_none());
+        assert!(service.receipts_cache.get(&hash).is_none());
     }
 
     #[test]
