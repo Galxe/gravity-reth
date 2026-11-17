@@ -1626,7 +1626,7 @@ mod tests {
 
     #[test]
     fn validates_nonce_bound() {
-        let provider = MockEthProvider::default().with_genesis_block();
+        let provider = provider_with_genesis_block();
         let validator = EthTransactionValidatorBuilder::new(provider, test_evm_config())
             .build(InMemoryBlobStore::default());
         let transaction = |nonce| {

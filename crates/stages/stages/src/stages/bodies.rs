@@ -502,13 +502,20 @@ mod tests {
             };
 
             let provider = factory.database_provider_rw().unwrap();
-            provider.append_block_bodies(vec![(0, None), (1, Some(&body(0)))]).unwrap();
+            provider
+                .append_block_bodies(vec![(0, None), (1, Some(body(0)))], StorageLocation::Both)
+                .unwrap();
             provider.commit().unwrap();
 
             // The static files commit block 2, the database does not.
             let interrupted_body = if empty { BlockBody::default() } else { body(1) };
             let provider = factory.database_provider_rw().unwrap();
-            provider.append_block_bodies(vec![(2, Some(&interrupted_body))]).unwrap();
+            provider
+                .append_block_bodies(
+                    vec![(2, Some(interrupted_body.clone()))],
+                    StorageLocation::Both,
+                )
+                .unwrap();
             static_files.commit().unwrap();
             drop(provider);
 
@@ -521,7 +528,12 @@ mod tests {
                 Some(1)
             );
             let provider = factory.database_provider_rw().unwrap();
-            provider.append_block_bodies(vec![(2, Some(&interrupted_body))]).unwrap();
+            provider
+                .append_block_bodies(
+                    vec![(2, Some(interrupted_body.clone()))],
+                    StorageLocation::Both,
+                )
+                .unwrap();
         }
     }
 
@@ -545,16 +557,23 @@ mod tests {
             };
 
             // The transaction files start after the checkpoint, no body is stored up to it.
-            static_files
-                .latest_writer(StaticFileSegment::Transactions)
-                .unwrap()
-                .ensure_at_block(CHECKPOINT)
-                .unwrap();
+            {
+                let mut writer =
+                    static_files.latest_writer(StaticFileSegment::Transactions).unwrap();
+                for block in 0..=CHECKPOINT {
+                    writer.increment_block(block).unwrap();
+                }
+            }
             static_files.commit().unwrap();
 
             // The static files commit the next block, the database does not.
             let provider = factory.database_provider_rw().unwrap();
-            provider.append_block_bodies(vec![(CHECKPOINT + 1, Some(&body))]).unwrap();
+            provider
+                .append_block_bodies(
+                    vec![(CHECKPOINT + 1, Some(body.clone()))],
+                    StorageLocation::Both,
+                )
+                .unwrap();
             static_files.commit().unwrap();
             drop(provider);
 
@@ -564,7 +583,12 @@ mod tests {
                 static_files.get_highest_static_file_block(StaticFileSegment::Transactions),
                 Some(CHECKPOINT)
             );
-            provider.append_block_bodies(vec![(CHECKPOINT + 1, Some(&body))]).unwrap();
+            provider
+                .append_block_bodies(
+                    vec![(CHECKPOINT + 1, Some(body.clone()))],
+                    StorageLocation::Both,
+                )
+                .unwrap();
         }
     }
 
