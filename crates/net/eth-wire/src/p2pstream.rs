@@ -510,7 +510,9 @@ where
                 })))
             }
 
-            if id == P2PMessageID::Disconnect as u8 && decompressed_len > MAX_DISCONNECT_PAYLOAD_SIZE {
+            if id == P2PMessageID::Disconnect as u8 &&
+                decompressed_len > MAX_DISCONNECT_PAYLOAD_SIZE
+            {
                 return Poll::Ready(Some(Err(P2PStreamError::MessageTooBig {
                     message_size: decompressed_len,
                     max_size: MAX_DISCONNECT_PAYLOAD_SIZE,

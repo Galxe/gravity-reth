@@ -2640,7 +2640,7 @@ mod tests {
     #[tokio::test]
     async fn test_duplicate_packet_rejected_without_decoding() {
         let secret_key = SecretKey::new(&mut rand_08::thread_rng());
-        let local_id = pk2id(&secret_key.public_key(SECP256K1));
+        let local_id = pk2id(&secret_key.public_key(&secp256k1::Secp256k1::new()));
         let (tx, mut rx) = mpsc::channel(16);
         let mut handler = IngressHandler::new(tx, local_id);
 
@@ -2668,7 +2668,7 @@ mod tests {
     #[tokio::test]
     async fn test_undecodable_packet_does_not_poison_cache() {
         let secret_key = SecretKey::new(&mut rand_08::thread_rng());
-        let local_id = pk2id(&secret_key.public_key(SECP256K1));
+        let local_id = pk2id(&secret_key.public_key(&secp256k1::Secp256k1::new()));
         let (tx, mut rx) = mpsc::channel(16);
         let mut handler = IngressHandler::new(tx, local_id);
 

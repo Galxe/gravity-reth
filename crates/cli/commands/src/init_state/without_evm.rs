@@ -7,8 +7,8 @@ use reth_fs_util::FsPathError;
 use reth_node_builder::NodePrimitives;
 use reth_primitives_traits::{SealedBlock, SealedHeader, SealedHeaderFor};
 use reth_provider::{
-    providers::StaticFileProvider, BlockWriter, ProviderError, ProviderResult, StageCheckpointWriter,
-    StaticFileProviderFactory, StaticFileWriter, StorageLocation,
+    providers::StaticFileProvider, BlockWriter, ProviderError, ProviderResult,
+    StageCheckpointWriter, StaticFileProviderFactory, StaticFileWriter, StorageLocation,
 };
 use reth_stages::{StageCheckpoint, StageId};
 use reth_static_file_types::StaticFileSegment;

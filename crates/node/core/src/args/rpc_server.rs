@@ -1041,7 +1041,6 @@ mod tests {
         assert_eq!(args.rpc_proof_permits, 3);
     }
 
-
     fn rpc_server_args_default_sanity_test() {
         let default_args = RpcServerArgs::default();
         let args = CommandParser::<RpcServerArgs>::parse_from(["reth"]).args;

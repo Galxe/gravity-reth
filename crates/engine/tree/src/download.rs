@@ -120,10 +120,11 @@ where
         if count == 1 {
             self.download_full_block(hash);
         } else {
-            if self.inflight_block_range_requests.iter().any(|request| {
-                request.start_hash() == hash &&
-                    request.count() == count
-            }) {
+            if self
+                .inflight_block_range_requests
+                .iter()
+                .any(|request| request.start_hash() == hash && request.count() == count)
+            {
                 return
             }
 

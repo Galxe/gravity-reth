@@ -133,7 +133,10 @@ where
                     msg = %hex::encode(log_prefix(&their_msg)),
                     "decode error in eth handshake"
                 );
-                unauth.disconnect(DisconnectReason::ProtocolBreach).await.map_err(EthStreamError::from)?;
+                unauth
+                    .disconnect(DisconnectReason::ProtocolBreach)
+                    .await
+                    .map_err(EthStreamError::from)?;
                 return Err(EthStreamError::InvalidMessage(err));
             }
         };
