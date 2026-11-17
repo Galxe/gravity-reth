@@ -21,10 +21,7 @@ use alloy_consensus::{
     },
     BlockHeader,
 };
-use alloy_eips::{
-    eip4844::env_settings::EnvKzgSettings,
-    eip7840::BlobParams, BlockId,
-};
+use alloy_eips::{eip4844::env_settings::EnvKzgSettings, eip7840::BlobParams, BlockId};
 use reth_chainspec::{ChainSpecProvider, EthChainSpec, EthereumHardforks};
 use reth_evm::ConfigureEvm;
 use reth_primitives_traits::{
@@ -1506,8 +1503,8 @@ mod tests {
     };
     use alloy_consensus::Transaction;
     use alloy_eips::{eip1559::ETHEREUM_BLOCK_GAS_LIMIT_30M, eip2718::Decodable2718};
-    use reth_chainspec::{ChainSpecBuilder, MAINNET};
     use alloy_primitives::{hex, Address, Bytes, U256};
+    use reth_chainspec::{ChainSpecBuilder, MAINNET};
     use reth_ethereum_primitives::PooledTransactionVariant;
     use reth_evm_ethereum::EthEvmConfig;
     use reth_primitives_traits::SignedTransaction;
@@ -1527,8 +1524,13 @@ mod tests {
         genesis.gas_limit = gas_limit;
         let provider = MockEthProvider::default()
             .with_chain_spec(ChainSpecBuilder::mainnet().genesis(genesis).build());
-        provider.add_block(provider.chain_spec.genesis_hash(),
-            reth_ethereum_primitives::Block::new(provider.chain_spec.genesis_header().clone(), Default::default()));
+        provider.add_block(
+            provider.chain_spec.genesis_hash(),
+            reth_ethereum_primitives::Block::new(
+                provider.chain_spec.genesis_header().clone(),
+                Default::default(),
+            ),
+        );
         provider
     }
 
