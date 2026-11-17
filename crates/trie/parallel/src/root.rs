@@ -162,6 +162,7 @@ where
             trie_cursor_factory.account_trie_cursor().map_err(ProviderError::Database)?,
             prefix_sets.account_prefix_set,
         )
+        .map_err(ProviderError::Database)?
         .with_deletions_retained(retain_updates);
         let mut account_node_iter = TrieNodeIter::state_trie(
             walker,
