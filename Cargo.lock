@@ -2474,7 +2474,9 @@ dependencies = [
  "codspeed",
  "codspeed-criterion-compat-walltime",
  "colored",
+ "futures",
  "regex",
+ "tokio",
 ]
 
 [[package]]
@@ -2489,6 +2491,7 @@ dependencies = [
  "clap",
  "codspeed",
  "criterion-plot",
+ "futures",
  "is-terminal",
  "itertools 0.10.5",
  "num-traits",
@@ -2501,6 +2504,7 @@ dependencies = [
  "serde_derive",
  "serde_json",
  "tinytemplate",
+ "tokio",
  "walkdir",
 ]
 
@@ -9448,6 +9452,7 @@ dependencies = [
  "alloy-rlp",
  "aquamarine",
  "auto_impl",
+ "codspeed-criterion-compat",
  "derive_more",
  "discv5",
  "enr",
@@ -10728,6 +10733,7 @@ dependencies = [
  "alloy-primitives",
  "alloy-rlp",
  "assert_matches",
+ "codspeed-criterion-compat",
  "eyre",
  "futures-util",
  "itertools 0.14.0",
