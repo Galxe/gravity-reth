@@ -628,7 +628,9 @@ mod tests {
     use reth_primitives_traits::{Block as _, SealedHeader};
     use reth_provider::{
         providers::BlockchainProvider,
-        test_utils::{create_test_provider_factory, ExtendedAccount, MockEthProvider, NoopProvider},
+        test_utils::{
+            create_test_provider_factory, ExtendedAccount, MockEthProvider, NoopProvider,
+        },
         PruneCheckpointReader, StageCheckpointReader,
     };
     use reth_rpc_eth_api::{helpers::SpawnBlocking, node::RpcNodeCoreAdapter, EthApiServer};
@@ -1185,5 +1187,4 @@ mod tests {
         assert_eq!(transaction.transaction_index, Some(0));
         assert_eq!(transaction.inner.signer(), sender);
     }
-
 }

@@ -617,12 +617,9 @@ impl<N: ProviderNodeTypes> Pipeline<N> {
             }
 
             // We unwind because of a detached head.
-            let unwind_to = local_head
-                .block
-                .number
-                .saturating_sub(
-                    BEACON_CONSENSUS_REORG_UNWIND_DEPTH.saturating_mul(self.detached_head_attempts),
-                );
+            let unwind_to = local_head.block.number.saturating_sub(
+                BEACON_CONSENSUS_REORG_UNWIND_DEPTH.saturating_mul(self.detached_head_attempts),
+            );
 
             self.last_detached_head_unwind_target = self.provider_factory.block_hash(unwind_to)?;
             Ok(Some(ControlFlow::Unwind { target: unwind_to, bad_block: local_head }))
@@ -725,10 +722,7 @@ mod tests {
     use assert_matches::assert_matches;
     use reth_consensus::ConsensusError;
     use reth_errors::ProviderError;
-    use reth_provider::test_utils::{
-        create_test_provider_factory,
-        MockNodeTypesWithDB,
-    };
+    use reth_provider::test_utils::{create_test_provider_factory, MockNodeTypesWithDB};
     use reth_prune::PruneModes;
     use reth_testing_utils::generators::{self, random_block_with_parent};
     use tokio_stream::StreamExt;

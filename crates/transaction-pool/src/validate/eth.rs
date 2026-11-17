@@ -1521,7 +1521,9 @@ mod tests {
         traits::PoolTransaction, CoinbaseTipOrdering, EthPooledTransaction, Pool, TransactionPool,
     };
     use alloy_consensus::Transaction;
-    use alloy_eips::{eip1559::ETHEREUM_BLOCK_GAS_LIMIT_30M, eip2718::Decodable2718, eip7702::Authorization};
+    use alloy_eips::{
+        eip1559::ETHEREUM_BLOCK_GAS_LIMIT_30M, eip2718::Decodable2718, eip7702::Authorization,
+    };
     use alloy_primitives::{hex, Address, Bytes, Signature, U256};
     use reth_chainspec::{ChainSpecBuilder, MAINNET};
     use reth_ethereum_primitives::PooledTransactionVariant;
@@ -1682,8 +1684,9 @@ mod tests {
 
     #[test]
     fn only_recovers_authorities_for_matching_chain_id() {
-        let validator = EthTransactionValidatorBuilder::new(provider_with_genesis_block(), test_evm_config())
-            .build(InMemoryBlobStore::default());
+        let validator =
+            EthTransactionValidatorBuilder::new(provider_with_genesis_block(), test_evm_config())
+                .build(InMemoryBlobStore::default());
         let auth = |chain_id, address| {
             Authorization { chain_id, address, nonce: 0 }.into_signed(Signature::test_signature())
         };

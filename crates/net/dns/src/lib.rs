@@ -870,5 +870,4 @@ mod tests {
         let tree = service.trees.get(&link).unwrap();
         assert_eq!(tree.root().clone(), root);
     }
-
 }

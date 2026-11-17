@@ -29,7 +29,7 @@ pub type TraceBlockOpCodeGasResult = Result<(BlockOpcodeGas, BlockId), (RpcError
 
 /// Type alias representing the result of replaying a transaction.
 pub type ReplayTransactionResult =
-    Result<(TraceResultsWithTransactionHash, TxHash), (RpcError, TxHash)>;
+    Result<(Option<TraceResultsWithTransactionHash>, TxHash), (RpcError, TxHash)>;
 
 /// A type representing the result of calling `trace_call_many` method.
 pub type CallManyTraceResult = Result<
