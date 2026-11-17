@@ -374,7 +374,9 @@ RPC:
       --ipc.permissions <IPC_SOCKET_PERMISSIONS>
           Set the permissions for the IPC socket file, in octal format.
 
-          If not specified, the permissions will be set by the system's umask.
+          Accepts modes up to `0o7777`, with an optional `0o` prefix. If not specified, the permissions will be set by the system's umask.
+
+          Startup fails if the mode is invalid or the platform cannot apply it before binding the socket, which includes macOS.
 
       --authrpc.addr <AUTH_ADDR>
           Auth server address to listen on
@@ -477,7 +479,7 @@ RPC:
       --rpc.txfeecap <TX_FEE_CAP>
           Maximum eth transaction fee (in ether) that can be sent via the RPC APIs (0 = no cap)
 
-          [default: 1.0]
+          [default: 1]
 
       --rpc.max-simulate-blocks <BLOCKS_COUNT>
           Maximum number of blocks for `eth_simulateV1` call
@@ -513,6 +515,21 @@ RPC:
           Path to file containing disallowed addresses, json-encoded list of strings. Block validation API will reject blocks containing transactions from these addresses
 
 RPC State Cache:
+      --rpc-cache.max-blocks-bytes <MAX_BLOCKS_BYTES>
+          Maximum estimated block payload bytes. Zero disables caching
+
+          [default: 2147483648]
+
+      --rpc-cache.max-receipts-bytes <MAX_RECEIPTS_BYTES>
+          Maximum estimated receipt payload bytes. Zero disables caching
+
+          [default: 1073741824]
+
+      --rpc-cache.idle-timeout <IDLE_TIMEOUT>
+          Evict unused payloads after this duration. Zero disables expiration
+
+          [default: 1h]
+
       --rpc-cache.max-blocks <MAX_BLOCKS>
           Max number of blocks in cache
 

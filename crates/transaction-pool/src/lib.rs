@@ -297,8 +297,9 @@ pub use crate::{
     },
     traits::*,
     validate::{
-        EthTransactionValidator, TransactionValidationOutcome, TransactionValidationTaskExecutor,
-        TransactionValidator, ValidPoolTransaction,
+        EthTransactionValidator, StatefulValidationFn, StatelessValidationFn,
+        TransactionValidationOutcome, TransactionValidationTaskExecutor, TransactionValidator,
+        ValidPoolTransaction,
     },
 };
 use crate::{identifier::TransactionId, pool::PoolInner};
@@ -509,11 +510,8 @@ where
         if transactions.is_empty() {
             return Vec::new()
         }
-        let validated = self
-            .pool
-            .validator()
-            .validate_transactions(transactions.into_iter().map(|tx| (origin, tx)))
-            .await;
+        let validated =
+            self.pool.validator().validate_transactions_with_origin(origin, transactions).await;
         self.pool.add_transactions(origin, validated)
     }
 

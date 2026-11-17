@@ -139,7 +139,8 @@ fn calculate_root_from_leaves_repeated(c: &mut Criterion) {
                                         &trie_updates_sorted.storage_nodes,
                                     ),
                                     prefix_set,
-                                );
+                                )
+                                .unwrap();
                                 let mut node_iter = TrieNodeIter::storage_trie(
                                     walker,
                                     HashedPostStateStorageCursor::new(

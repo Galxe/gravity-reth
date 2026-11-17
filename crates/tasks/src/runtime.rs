@@ -14,7 +14,10 @@ use crate::{
     worker_map::WorkerMap,
     PanickedTaskError, TaskEvent, TaskManager,
 };
-use futures_util::{future::select, Future, FutureExt, TryFutureExt};
+use futures_util::{
+    future::{select, BoxFuture},
+    Future, FutureExt, TryFutureExt,
+};
 #[cfg(feature = "rayon")]
 use std::{num::NonZeroUsize, thread::available_parallelism};
 use std::{
@@ -256,8 +259,8 @@ pub enum RuntimeBuildError {
 // ── RuntimeInner ──────────────────────────────────────────────────────
 
 struct RuntimeInner {
-    /// Owned tokio runtime, if we built one. Kept alive via the `Arc<RuntimeInner>`.
-    _tokio_runtime: Option<TokioRuntime>,
+    /// Owned tokio runtime, taken during shutdown even while other handles remain alive.
+    tokio_runtime: Mutex<Option<TokioRuntime>>,
     /// Handle to the tokio runtime.
     handle: Handle,
     /// Receiver of the shutdown signal.
@@ -306,19 +309,12 @@ struct RuntimeInner {
 
 impl Drop for RuntimeInner {
     fn drop(&mut self) {
-        // The owned tokio runtime blocks on its blocking-pool teardown when dropped, which
-        // tokio forbids from within an async context (it panics with "Cannot drop a runtime
-        // in a context where blocking is not allowed"). Since `Runtime` is a cheaply cloned
-        // `Arc<RuntimeInner>` handed out as `TaskExecutor`, the last clone can be released by a
-        // spawned task that finishes on a tokio worker thread — i.e. inside an async context.
-        // When that happens, hand the runtime off to a non-blocking background shutdown instead
-        // of the blocking drop. Outside an async context (e.g. the dedicated `rt-shutdown`
-        // thread `CliRunner` uses) keep the blocking drop so callers can wait for full teardown.
-        let Some(tokio_runtime) = self._tokio_runtime.take() else { return };
-        if Handle::try_current().is_ok() {
-            tokio_runtime.shutdown_background();
-        } else {
-            drop(tokio_runtime);
+        // The last handle can belong to an async task, including one running on this runtime.
+        // Without explicit shutdown, let blocking tasks finish in the background in that case.
+        if Handle::try_current().is_ok() &&
+            let Some(runtime) = self.tokio_runtime.get_mut().unwrap().take()
+        {
+            runtime.shutdown_background();
         }
     }
 }
@@ -482,10 +478,7 @@ impl Runtime {
     }
 
     /// Spawns a regular task depending on the given [`TaskKind`].
-    fn spawn_task_as<F>(&self, fut: F, task_kind: TaskKind) -> JoinHandle<()>
-    where
-        F: Future<Output = ()> + Send + 'static,
-    {
+    fn spawn_task_as(&self, fut: BoxFuture<'static, ()>, task_kind: TaskKind) -> JoinHandle<()> {
         match task_kind {
             TaskKind::Default => self.0.metrics.inc_regular_tasks(),
             TaskKind::Blocking => self.0.metrics.inc_regular_blocking_tasks(),
@@ -500,7 +493,6 @@ impl Runtime {
         let task = {
             async move {
                 let _inc_counter_on_drop = IncCounterOnDrop::new(finished_counter);
-                let fut = pin!(fut);
                 let _ = select(on_shutdown, fut).await;
             }
         }
@@ -517,7 +509,7 @@ impl Runtime {
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        self.spawn_task_as(fut, TaskKind::Default)
+        self.spawn_task_as(fut.boxed(), TaskKind::Default)
     }
 
     /// Spawns a blocking task onto the runtime.
@@ -528,7 +520,7 @@ impl Runtime {
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        self.spawn_task_as(fut, TaskKind::Blocking)
+        self.spawn_task_as(fut.boxed(), TaskKind::Blocking)
     }
 
     /// Spawns a blocking closure directly on the tokio runtime, bypassing shutdown
@@ -538,7 +530,9 @@ impl Runtime {
         F: FnOnce() -> R + Send + 'static,
         R: Send + 'static,
     {
-        self.0.handle.spawn_blocking(func)
+        // Erases the closure type so tokio's blocking task machinery is instantiated once per `R`
+        // instead of once per closure.
+        self.0.handle.spawn_blocking(Box::new(func) as Box<dyn FnOnce() -> R + Send>)
     }
 
     /// Moves the given value to a dedicated background thread for deallocation.
@@ -623,20 +617,16 @@ impl Runtime {
     {
         let on_shutdown = self.0.on_shutdown.clone();
         let fut = f(on_shutdown);
-        let task = fut.in_current_span();
-        self.0.handle.spawn(task)
+        self.0.handle.spawn(fut.boxed().in_current_span())
     }
 
     /// Spawns a critical task depending on the given [`TaskKind`].
-    fn spawn_critical_as<F>(
+    fn spawn_critical_as(
         &self,
         name: &'static str,
-        fut: F,
+        fut: BoxFuture<'static, ()>,
         task_kind: TaskKind,
-    ) -> JoinHandle<()>
-    where
-        F: Future<Output = ()> + Send + 'static,
-    {
+    ) -> JoinHandle<()> {
         self.0.metrics.inc_critical_tasks();
         let panicked_tasks_tx = self.0.task_events_tx.clone();
         let on_shutdown = self.0.on_shutdown.clone();
@@ -670,7 +660,7 @@ impl Runtime {
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        self.spawn_critical_as(name, fut, TaskKind::Default)
+        self.spawn_critical_as(name, fut.boxed(), TaskKind::Default)
     }
 
     /// This spawns a critical blocking task onto the runtime.
@@ -681,7 +671,7 @@ impl Runtime {
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        self.spawn_critical_as(name, fut, TaskKind::Blocking)
+        self.spawn_critical_as(name, fut.boxed(), TaskKind::Blocking)
     }
 
     /// This spawns a critical task onto a dedicated named OS thread.
@@ -697,6 +687,15 @@ impl Runtime {
     where
         F: Future<Output = ()> + Send + 'static,
     {
+        self.spawn_critical_os_thread_boxed(thread_name, task_name, fut.boxed())
+    }
+
+    fn spawn_critical_os_thread_boxed(
+        &self,
+        thread_name: &'static str,
+        task_name: &'static str,
+        fut: BoxFuture<'static, ()>,
+    ) -> thread::JoinHandle<()> {
         self.0.metrics.inc_critical_tasks();
         let handle = self.0.handle.clone();
         let panicked_tasks_tx = self.0.task_events_tx.clone();
@@ -756,12 +755,19 @@ impl Runtime {
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        let panicked_tasks_tx = self.0.task_events_tx.clone();
         let on_shutdown = GracefulShutdown::new(
             self.0.on_shutdown.clone(),
             GracefulShutdownGuard::new(Arc::clone(&self.0.graceful_tasks)),
         );
-        let fut = f(on_shutdown);
+        self.spawn_critical_graceful_boxed(name, f(on_shutdown).boxed())
+    }
+
+    fn spawn_critical_graceful_boxed(
+        &self,
+        name: &'static str,
+        fut: BoxFuture<'static, ()>,
+    ) -> JoinHandle<()> {
+        let panicked_tasks_tx = self.0.task_events_tx.clone();
 
         // wrap the task in catch unwind
         let task = std::panic::AssertUnwindSafe(fut)
@@ -807,9 +813,7 @@ impl Runtime {
             self.0.on_shutdown.clone(),
             GracefulShutdownGuard::new(Arc::clone(&self.0.graceful_tasks)),
         );
-        let fut = f(on_shutdown);
-
-        self.0.handle.spawn(fut)
+        self.0.handle.spawn(f(on_shutdown).boxed())
     }
 
     /// Sends a request to the `TaskManager` to initiate a graceful shutdown.
@@ -840,6 +844,17 @@ impl Runtime {
     /// Returns `true` if all tasks completed before the timeout.
     pub fn graceful_shutdown_with_timeout(&self, timeout: Duration) -> bool {
         self.do_graceful_shutdown(Some(timeout))
+    }
+
+    /// Shuts down the owned tokio runtime for all clones, waiting at most `timeout` for blocking
+    /// tasks. Externally supplied runtimes are left running.
+    ///
+    /// Panics if called from an async context while an owned runtime remains.
+    pub fn shutdown_timeout(self, timeout: Duration) {
+        let runtime = self.0.tokio_runtime.lock().unwrap().take();
+        if let Some(runtime) = runtime {
+            runtime.shutdown_timeout(timeout);
+        }
     }
 
     fn do_graceful_shutdown(&self, timeout: Option<Duration>) -> bool {
@@ -1000,7 +1015,7 @@ impl RuntimeBuilder {
         });
 
         let inner = RuntimeInner {
-            _tokio_runtime: owned_runtime,
+            tokio_runtime: Mutex::new(owned_runtime),
             handle,
             on_shutdown,
             task_events_tx,
@@ -1065,6 +1080,55 @@ mod tests {
             Runtime::test_config().with_tokio(TokioConfig::existing_handle(rt.handle().clone()));
         let runtime = RuntimeBuilder::new(config).build().unwrap();
         let _ = runtime.handle();
+    }
+
+    #[tokio::test]
+    async fn last_runtime_clone_can_drop_on_its_worker() {
+        let runtime = RuntimeBuilder::new(Runtime::test_config()).build().unwrap();
+        let task_runtime = runtime.clone();
+        let (release, wait) = tokio::sync::oneshot::channel();
+        let task = runtime.handle().spawn(async move {
+            wait.await.unwrap();
+            drop(task_runtime);
+        });
+
+        thread::spawn(move || drop(runtime)).join().unwrap();
+        release.send(()).unwrap();
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_with_live_runtime_clones() {
+        let runtime = RuntimeBuilder::new(Runtime::test_config()).build().unwrap();
+        let retained = runtime.clone();
+        let task_runtime = runtime.clone();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let task = runtime.handle().spawn(async move {
+            let _runtime = task_runtime;
+            started.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        ready.await.unwrap();
+
+        thread::spawn(move || runtime.shutdown_timeout(Duration::from_secs(5))).join().unwrap();
+
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(retained.handle().spawn(async {}).await.unwrap_err().is_cancelled());
+        retained.shutdown_timeout(Duration::from_secs(5));
+    }
+
+    #[tokio::test]
+    async fn shutdown_preserves_external_runtime() {
+        let runtime = RuntimeBuilder::new(
+            Runtime::test_config().with_tokio(TokioConfig::existing_handle(Handle::current())),
+        )
+        .build()
+        .unwrap();
+        let retained = runtime.clone();
+
+        runtime.shutdown_timeout(Duration::from_secs(5));
+
+        assert_eq!(retained.handle().spawn(async { 42 }).await.unwrap(), 42);
     }
 
     #[test]

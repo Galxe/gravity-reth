@@ -133,7 +133,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::eth::helpers::types::EthRpcConverter;
+    use crate::eth::{helpers::types::EthRpcConverter, DevSigner};
     use alloy_consensus::{
         BlobTransactionSidecar, Block, Header, SidecarBuilder, SimpleCoder, Transaction,
     };
@@ -212,6 +212,40 @@ mod tests {
 
         assert!(pool.get(&tx_1_result).is_some(), "tx1 not found in the pool");
         assert!(pool.get(&tx_2_result).is_some(), "tx2 not found in the pool");
+    }
+
+    #[tokio::test]
+    async fn send_transaction_assigns_distinct_nonces_to_concurrent_requests() {
+        let signers = DevSigner::random_signers(1);
+        let address = signers[0].accounts()[0];
+        let accounts = AddressMap::from_iter([(
+            address,
+            ExtendedAccount::new(0, U256::from(10_000_000_000_000_000_000u64)),
+        )]);
+        let eth_api = mock_eth_api(accounts);
+        eth_api.signers().write().extend(signers);
+
+        let tx_req = TransactionRequest {
+            from: Some(address),
+            to: Some(address.into()),
+            gas: Some(21_000),
+            gas_price: Some(1_000_000_000),
+            ..Default::default()
+        };
+
+        let hashes = futures::future::try_join_all(
+            (0..5).map(|_| eth_api.send_transaction_request(tx_req.clone())),
+        )
+        .await
+        .expect("concurrent requests should each get their own nonce");
+        let mut nonces = hashes
+            .iter()
+            .map(|hash| {
+                eth_api.pool().get(hash).expect("transaction should be in the pool").nonce()
+            })
+            .collect::<Vec<_>>();
+        nonces.sort_unstable();
+        assert_eq!(nonces, [0, 1, 2, 3, 4]);
     }
 
     #[tokio::test]

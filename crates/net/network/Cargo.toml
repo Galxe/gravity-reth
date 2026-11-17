@@ -78,6 +78,7 @@ itertools.workspace = true
 smallvec.workspace = true
 
 [dev-dependencies]
+criterion = { workspace = true, features = ["async_tokio"] }
 # reth
 reth-discv4 = { workspace = true, features = ["test-utils"] }
 

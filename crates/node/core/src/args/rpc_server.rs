@@ -4,7 +4,7 @@ use crate::args::{
     types::{MaxU32, ZeroAsNoneU64},
     GasPriceOracleArgs, RpcStateCacheArgs,
 };
-use alloy_primitives::map::AddressSet;
+use alloy_primitives::{map::AddressSet, utils::format_ether};
 use alloy_rpc_types_engine::JwtSecret;
 use clap::{
     builder::{PossibleValue, RangedU64ValueParser, Resettable, TypedValueParser},
@@ -92,7 +92,7 @@ pub struct DefaultRpcServerArgs {
     rpc_forwarder: Option<Url>,
     builder_disallow: Option<AddressSet>,
     rpc_state_cache: RpcStateCacheArgs,
-    gas_price_oracle: GasPriceOracleArgs,
+    pub(super) gas_price_oracle: GasPriceOracleArgs,
     rpc_send_raw_transaction_sync_timeout: Duration,
 }
 
@@ -484,7 +484,11 @@ pub struct RpcServerArgs {
 
     /// Set the permissions for the IPC socket file, in octal format.
     ///
-    /// If not specified, the permissions will be set by the system's umask.
+    /// Accepts modes up to `0o7777`, with an optional `0o` prefix. If not specified, the
+    /// permissions will be set by the system's umask.
+    ///
+    /// Startup fails if the mode is invalid or the platform cannot apply it before binding the
+    /// socket, which includes macOS.
     #[arg(long = "ipc.permissions", default_value = Resettable::from(DefaultRpcServerArgs::get_global().ipc_socket_permissions.as_ref().map(|v| v.to_string().into())))]
     pub ipc_socket_permissions: Option<String>,
 
@@ -555,7 +559,7 @@ pub struct RpcServerArgs {
     /// Tracing requests are generally CPU bound.
     /// Choosing a value that is higher than the available CPU cores can have a negative impact on
     /// the performance of the node and affect the node's ability to maintain sync.
-    #[arg(long = "rpc.max-tracing-requests", alias = "rpc-max-tracing-requests", value_name = "COUNT", default_value_t = DefaultRpcServerArgs::get_global().rpc_max_tracing_requests)]
+    #[arg(long = "rpc.max-tracing-requests", alias = "rpc-max-tracing-requests", value_name = "COUNT", value_parser = RangedU64ValueParser::<usize>::new().range(1..), default_value_t = DefaultRpcServerArgs::get_global().rpc_max_tracing_requests)]
     pub rpc_max_tracing_requests: usize,
 
     /// Maximum number of concurrent blocking IO requests.
@@ -563,7 +567,7 @@ pub struct RpcServerArgs {
     /// Blocking IO requests include `eth_call`, `eth_estimateGas`, and similar methods that
     /// require EVM execution. These are spawned as blocking tasks to avoid blocking the async
     /// runtime.
-    #[arg(long = "rpc.max-blocking-io-requests", alias = "rpc-max-blocking-io-requests", value_name = "COUNT", default_value_t = DefaultRpcServerArgs::get_global().rpc_max_blocking_io_requests)]
+    #[arg(long = "rpc.max-blocking-io-requests", alias = "rpc-max-blocking-io-requests", value_name = "COUNT", value_parser = RangedU64ValueParser::<usize>::new().range(1..), default_value_t = DefaultRpcServerArgs::get_global().rpc_max_blocking_io_requests)]
     pub rpc_max_blocking_io_requests: usize,
 
     /// Maximum number of blocks for `trace_filter` requests.
@@ -604,7 +608,7 @@ pub struct RpcServerArgs {
         alias = "rpc-txfeecap",
         value_name = "TX_FEE_CAP",
         value_parser = parse_ether_value,
-        default_value = "1.0"
+        default_value = format_tx_fee_cap(DefaultRpcServerArgs::get_global().rpc_tx_fee_cap)
     )]
     pub rpc_tx_fee_cap: u128,
 
@@ -635,7 +639,7 @@ pub struct RpcServerArgs {
     pub rpc_eth_proof_window: u64,
 
     /// Maximum number of concurrent getproof requests.
-    #[arg(long = "rpc.proof-permits", alias = "rpc-proof-permits", value_name = "COUNT", default_value_t = DefaultRpcServerArgs::get_global().rpc_proof_permits)]
+    #[arg(long = "rpc.proof-permits", alias = "rpc-proof-permits", value_name = "COUNT", value_parser = RangedU64ValueParser::<usize>::new().range(1..), default_value_t = DefaultRpcServerArgs::get_global().rpc_proof_permits)]
     pub rpc_proof_permits: usize,
 
     /// Configures the pending block behavior for RPC responses.
@@ -817,14 +821,15 @@ impl RpcServerArgs {
 
     /// Returns `true` if the given RPC namespace is enabled on any transport.
     pub fn is_namespace_enabled(&self, ns: RethRpcModule) -> bool {
-        if self.http && self.http_api.as_ref().is_some_and(|api| api.contains(&ns)) {
+        if self.http &&
+            self.http_api.as_ref().unwrap_or(&RpcModuleSelection::Standard).contains(&ns)
+        {
             return true;
         }
-        if self.ws && self.ws_api.as_ref().is_some_and(|api| api.contains(&ns)) {
+        if self.ws && self.ws_api.as_ref().unwrap_or(&RpcModuleSelection::Standard).contains(&ns) {
             return true;
         }
-        // IPC exposes all modules when enabled
-        !self.ipcdisable
+        !self.ipcdisable && RpcModuleSelection::default_ipc_modules().contains(&ns)
     }
 
     /// Enables forced blob sidecar upcasting from EIP-4844 to EIP-7594 format.
@@ -934,6 +939,11 @@ impl Default for RpcServerArgs {
     }
 }
 
+/// Formats a wei amount as the ether string `--rpc.txfeecap` parses, without trailing zeros.
+fn format_tx_fee_cap(wei: u128) -> String {
+    format_ether(wei).trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
 /// clap value parser for [`RpcModuleSelection`] with configurable validation.
 #[derive(Clone, Debug, Default)]
 #[non_exhaustive]
@@ -1008,6 +1018,29 @@ mod tests {
     }
 
     #[test]
+    fn rpc_concurrency_limits_reject_zero() {
+        for flag in
+            ["--rpc.max-tracing-requests", "--rpc.max-blocking-io-requests", "--rpc.proof-permits"]
+        {
+            let result = CommandParser::<RpcServerArgs>::try_parse_from(["reth", flag, "0"]);
+            assert!(result.is_err(), "{flag} should reject zero");
+        }
+
+        let args = CommandParser::<RpcServerArgs>::parse_from([
+            "reth",
+            "--rpc.max-tracing-requests",
+            "1",
+            "--rpc.max-blocking-io-requests",
+            "2",
+            "--rpc.proof-permits",
+            "3",
+        ])
+        .args;
+        assert_eq!(args.rpc_max_tracing_requests, 1);
+        assert_eq!(args.rpc_max_blocking_io_requests, 2);
+        assert_eq!(args.rpc_proof_permits, 3);
+    }
+
     fn rpc_server_args_default_sanity_test() {
         let default_args = RpcServerArgs::default();
         let args = CommandParser::<RpcServerArgs>::parse_from(["reth"]).args;
@@ -1109,6 +1142,7 @@ mod tests {
                 max_bals: 1000,
                 max_concurrent_db_requests: 512,
                 max_cached_tx_hashes: 30_000,
+                ..Default::default()
             },
             gas_price_oracle: GasPriceOracleArgs {
                 blocks: 20,

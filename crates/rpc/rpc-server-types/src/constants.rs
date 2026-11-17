@@ -58,6 +58,13 @@ pub const DEFAULT_MAX_SIMULATE_BLOCKS: u64 = 256;
 /// The default maximum number of total storage slots for `eth_getStorageValues`.
 pub const DEFAULT_MAX_STORAGE_VALUES_SLOTS: usize = 1024;
 
+/// The default maximum number of storage slots (and, for multi-proofs, targets) accepted by a
+/// single `eth_getProof` or multi-proof request.
+///
+/// Bounds the work a request holds a proof permit for, since proof node selection scales with
+/// the number of requested slots.
+pub const DEFAULT_MAX_PROOF_SLOTS: usize = 1024;
+
 /// The default eth historical proof window.
 pub const DEFAULT_ETH_PROOF_WINDOW: u64 = 0;
 
@@ -114,6 +121,14 @@ pub mod gas_oracle {
 
 /// Cache specific constants
 pub mod cache {
+    /// Default estimated block payload budget: 2 GiB, excluding map and queue overhead.
+    pub const DEFAULT_BLOCK_CACHE_MAX_BYTES: usize = 2 * 1024 * 1024 * 1024;
+    /// Default estimated receipt payload budget: 1 GiB.
+    pub const DEFAULT_RECEIPT_CACHE_MAX_BYTES: usize = 1024 * 1024 * 1024;
+    /// Default idle expiration for RPC payloads. Shared payloads may outlive cache eviction.
+    pub const DEFAULT_CACHE_IDLE_TIMEOUT: std::time::Duration =
+        std::time::Duration::from_secs(3600);
+
     /// Default cache size for the block cache: 5000 blocks.
     pub const DEFAULT_BLOCK_CACHE_MAX_LEN: u32 = 5000;
 

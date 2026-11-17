@@ -409,32 +409,33 @@ pub trait EthTransactions: LoadTransaction<Provider: BlockReaderIdExt> {
             .await?;
 
             let block_id = num.into();
-            self.recovered_block(block_id)
-                .await?
-                .and_then(|block| {
-                    let block_hash = block.hash();
-                    let block_number = block.number();
-                    let block_timestamp = block.timestamp();
-                    let base_fee_per_gas = block.base_fee_per_gas();
+            let Some(block) = self.recovered_block(block_id).await? else {
+                return Err(EthApiError::HeaderNotFound(block_id).into())
+            };
 
-                    block
-                        .transactions_with_sender()
-                        .enumerate()
-                        .find(|(_, (signer, tx))| **signer == sender && (*tx).nonce() == nonce)
-                        .map(|(index, (signer, tx))| {
-                            let tx_info = TransactionInfo {
-                                hash: Some(*tx.tx_hash()),
-                                block_hash: Some(block_hash),
-                                block_number: Some(block_number),
-                                block_timestamp: Some(block_timestamp),
-                                base_fee: base_fee_per_gas,
-                                index: Some(index as u64),
-                            };
-                            Ok(self.converter().fill(tx.clone().with_signer(*signer), tx_info)?)
-                        })
+            let block_hash = block.hash();
+            let block_number = block.number();
+            let block_timestamp = block.timestamp();
+            let base_fee_per_gas = block.base_fee_per_gas();
+
+            // EIP-7702 authorizations can consume the account's nonce without a transaction
+            // from that sender, so an existing block may contain no matching transaction.
+            block
+                .transactions_with_sender()
+                .enumerate()
+                .find(|(_, (signer, tx))| **signer == sender && (*tx).nonce() == nonce)
+                .map(|(index, (signer, tx))| {
+                    let tx_info = TransactionInfo {
+                        hash: Some(*tx.tx_hash()),
+                        block_hash: Some(block_hash),
+                        block_number: Some(block_number),
+                        block_timestamp: Some(block_timestamp),
+                        base_fee: base_fee_per_gas,
+                        index: Some(index as u64),
+                    };
+                    Ok(self.converter().fill(tx.clone().with_signer(*signer), tx_info)?)
                 })
-                .ok_or(EthApiError::HeaderNotFound(block_id))?
-                .map(Some)
+                .transpose()
         }
     }
 
@@ -475,9 +476,14 @@ pub trait EthTransactions: LoadTransaction<Provider: BlockReaderIdExt> {
                 None => return Err(SignError::NoAccount.into_eth_err()),
             };
 
-            if self.find_signer(&from).is_err() {
-                return Err(SignError::NoAccount.into_eth_err())
-            }
+            let signer = self.find_signer(&from)?;
+
+            // Held until the pool insert below, so a concurrent request from this account reads
+            // the pool only after this transaction is in it.
+            let _nonce_guard = match signer.nonce_lock() {
+                Some(lock) if request.as_ref().nonce().is_none() => Some(lock.lock_owned().await),
+                _ => None,
+            };
 
             // set nonce if not already set before
             if request.as_ref().nonce().is_none() {

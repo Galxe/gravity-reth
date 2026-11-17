@@ -124,6 +124,9 @@ impl RethRpcServerConfig for RpcServerArgs {
     fn state_cache_config(&self) -> EthStateCacheConfig {
         EthStateCacheConfig {
             max_blocks: self.rpc_state_cache.max_blocks,
+            max_blocks_bytes: self.rpc_state_cache.max_blocks_bytes,
+            max_receipts_bytes: self.rpc_state_cache.max_receipts_bytes,
+            idle_timeout: self.rpc_state_cache.idle_timeout,
             max_receipts: self.rpc_state_cache.max_receipts,
             max_headers: self.rpc_state_cache.max_headers,
             max_bals: self.rpc_state_cache.max_bals,
@@ -279,6 +282,24 @@ mod tests {
     struct CommandParser<T: Args> {
         #[command(flatten)]
         args: T,
+    }
+
+    #[test]
+    fn cache_memory_limits_reach_service_config() {
+        let args = CommandParser::<RpcServerArgs>::parse_from([
+            "reth",
+            "--rpc-cache.max-blocks-bytes",
+            "1MB",
+            "--rpc-cache.max-receipts-bytes",
+            "0",
+            "--rpc-cache.idle-timeout",
+            "500ms",
+        ])
+        .args;
+        let cache = args.state_cache_config();
+        assert_eq!(cache.max_blocks_bytes, 1024 * 1024);
+        assert_eq!(cache.max_receipts_bytes, 0);
+        assert_eq!(cache.idle_timeout, std::time::Duration::from_millis(500));
     }
 
     #[test]

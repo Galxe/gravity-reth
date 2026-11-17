@@ -1889,15 +1889,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "block-padding"
-version = "0.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a8894febbff9f758034a5b8e12d87918f56dfc64a8e1fe757d65e29041538d93"
-dependencies = [
- "generic-array",
-]
-
-[[package]]
 name = "blst"
 version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2483,7 +2474,9 @@ dependencies = [
  "codspeed",
  "codspeed-criterion-compat-walltime",
  "colored",
+ "futures",
  "regex",
+ "tokio",
 ]
 
 [[package]]
@@ -2498,6 +2491,7 @@ dependencies = [
  "clap",
  "codspeed",
  "criterion-plot",
+ "futures",
  "is-terminal",
  "itertools 0.10.5",
  "num-traits",
@@ -2510,6 +2504,7 @@ dependencies = [
  "serde_derive",
  "serde_json",
  "tinytemplate",
+ "tokio",
  "walkdir",
 ]
 
@@ -5371,7 +5366,6 @@ version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "879f10e63c20629ecabbb64a8010319738c66a5cd0c29b02d63d272b03751d01"
 dependencies = [
- "block-padding",
  "generic-array",
 ]
 
@@ -8641,7 +8635,6 @@ dependencies = [
  "aes",
  "alloy-primitives",
  "alloy-rlp",
- "block-padding",
  "byteorder",
  "cipher",
  "concat-kdf",
@@ -9459,6 +9452,7 @@ dependencies = [
  "alloy-rlp",
  "aquamarine",
  "auto_impl",
+ "codspeed-criterion-compat",
  "derive_more",
  "discv5",
  "enr",
@@ -9598,6 +9592,7 @@ dependencies = [
  "rand 0.9.5",
  "reth-fs-util",
  "serde",
+ "smallvec",
  "tempfile",
  "thiserror 2.0.20",
  "tracing",
@@ -10738,6 +10733,7 @@ dependencies = [
  "alloy-primitives",
  "alloy-rlp",
  "assert_matches",
+ "codspeed-criterion-compat",
  "eyre",
  "futures-util",
  "itertools 0.14.0",
@@ -11042,6 +11038,7 @@ dependencies = [
  "assert_matches",
  "auto_impl",
  "bitflags 2.13.1",
+ "codspeed-criterion-compat",
  "futures",
  "futures-util",
  "gravity-primitives",
