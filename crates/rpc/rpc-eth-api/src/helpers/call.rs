@@ -38,7 +38,6 @@ use reth_revm::{
 };
 use reth_rpc_convert::{RpcConvert, RpcTxReq};
 use reth_rpc_eth_types::{
-    cache::db::StateProviderTraitObjWrapper,
     error::{AsEthApiError, FromEthApiError},
     simulate::{self, EthSimulateError},
     utils::CallManyBudget,
@@ -127,7 +126,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
             };
             this.spawn_with_state_at_block(state_block, move |this, db| {
                 let _permit = permit;
-                let state_provider = db.database.0 .0;
+                let state_provider = db.database.into_inner();
                 let mut db = State::builder()
                     .with_database(StateProviderDatabase::new(&state_provider))
                     .with_bundle_update()
@@ -722,9 +721,7 @@ pub trait Call:
         R: Send + 'static,
     {
         self.spawn_blocking_io_with_state(at.into(), move |this, state| {
-            let db = State::builder()
-                .with_database(StateProviderDatabase::new(StateProviderTraitObjWrapper(state)))
-                .build();
+            let db = State::builder().with_database(StateProviderDatabase::new(state)).build();
             f(this, db)
         })
     }
@@ -767,9 +764,8 @@ pub trait Call:
             let this = self.view().await?;
             let (evm_env, at) = this.evm_env_at(at).await?;
             this.spawn_blocking_io_with_state(at, move |this, state| {
-                let mut db = State::builder()
-                    .with_database(StateProviderDatabase::new(StateProviderTraitObjWrapper(state)))
-                    .build();
+                let mut db =
+                    State::builder().with_database(StateProviderDatabase::new(state)).build();
                 let (evm_env, tx_env) =
                     this.prepare_call_env(evm_env, request, &mut db, overrides)?;
                 f(this, &mut db, evm_env, tx_env)

@@ -2,9 +2,7 @@
 
 use alloy_primitives::{Address, StorageKey};
 use reth_execution_cache::{CachedStateProvider, ExecutionCache};
-use reth_provider::{
-    AccountReader, BytecodeReader, ProviderResult, StateProvider, StateProviderBox,
-};
+use reth_provider::{AccountReader, ProviderResult, StateProvider, StateProviderBox};
 use std::{
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -18,10 +16,10 @@ use tracing::trace;
 /// generic over the provider factory; each worker builds its own per block.
 pub type BuildProviderFn = dyn Fn() -> ProviderResult<StateProviderBox> + Send + Sync;
 
-/// A single warm request: a whole account (basic account + its bytecode) or one storage slot.
+/// A warm request for an account and a bounded batch of its storage slots.
 enum PrewarmTarget {
-    Account(Address),
-    Storage(Address, StorageKey),
+    Account(Address, Box<[StorageKey]>),
+    Storage(Address, Box<[StorageKey]>),
 }
 
 /// A message in a worker's queue. The per-block lifecycle is explicit and ordered (the queue is
@@ -75,14 +73,35 @@ impl BalPrewarmPool {
         }
     }
 
-    /// Fire-and-forget: warm an account (basic account + bytecode) on some worker.
+    /// Fire-and-forget: warm an account on some worker. Bytecode is loaded on demand.
     pub fn warm_account(&self, addr: Address) {
-        self.send_warm(PrewarmTarget::Account(addr));
+        self.warm_account_with_storage(addr, core::iter::empty());
+    }
+
+    /// Warms an account and its slots, spreading bounded batches across workers.
+    ///
+    /// Batching amortizes queue sends without serializing a large account's read set on one
+    /// worker. [`end_block`](Self::end_block) waits for every queued batch.
+    pub fn warm_account_with_storage(
+        &self,
+        addr: Address,
+        slots: impl IntoIterator<Item = StorageKey>,
+    ) {
+        let mut slots = slots.into_iter();
+        let batch = slots.by_ref().take(WARM_BATCH_SIZE).collect();
+        self.send_warm(PrewarmTarget::Account(addr, batch));
+        loop {
+            let batch: Box<[StorageKey]> = slots.by_ref().take(WARM_BATCH_SIZE).collect();
+            if batch.is_empty() {
+                break
+            }
+            self.send_warm(PrewarmTarget::Storage(addr, batch));
+        }
     }
 
     /// Fire-and-forget: warm one storage slot on some worker.
     pub fn warm_storage(&self, addr: Address, slot: StorageKey) {
-        self.send_warm(PrewarmTarget::Storage(addr, slot));
+        self.send_warm(PrewarmTarget::Storage(addr, Box::new([slot])));
     }
 
     /// Waits until every worker drains queued warm requests and drops its provider/read view.
@@ -124,6 +143,9 @@ impl BalPrewarmPool {
 /// This should explain why this particular value is picked.
 pub const DEFAULT_BAL_PREWARM_THREADS: usize = 128;
 
+/// Number of slots per queue message, bounded to keep work spread across workers.
+const WARM_BATCH_SIZE: usize = 8;
+
 fn prewarm_loop(rx: crossbeam_channel::Receiver<PrewarmMsg>) {
     // The provider (and its MDBX read txn) held for the current block, between `BeginBlock` and
     // `EndBlock`. `None` while idle, so no read txn is pinned across the inter-block gap.
@@ -144,16 +166,16 @@ fn prewarm_loop(rx: crossbeam_channel::Receiver<PrewarmMsg>) {
             PrewarmMsg::Warm(target) => {
                 let Some(provider) = provider.as_ref() else { continue };
                 match target {
-                    PrewarmTarget::Account(addr) => {
-                        if let Ok(Some(account)) = provider.basic_account(&addr) &&
-                            let Some(code_hash) = account.bytecode_hash &&
-                            code_hash != alloy_consensus::constants::KECCAK_EMPTY
-                        {
-                            let _ = provider.bytecode_by_hash(&code_hash);
+                    PrewarmTarget::Account(addr, slots) => {
+                        let _ = provider.basic_account(&addr);
+                        for &slot in &slots {
+                            let _ = provider.storage(addr, slot);
                         }
                     }
-                    PrewarmTarget::Storage(addr, slot) => {
-                        let _ = provider.storage(addr, slot);
+                    PrewarmTarget::Storage(addr, slots) => {
+                        for &slot in &slots {
+                            let _ = provider.storage(addr, slot);
+                        }
                     }
                 }
             }
@@ -170,6 +192,68 @@ mod tests {
     use super::*;
     use reth_provider::test_utils::MockEthProvider;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn batched_warming_populates_all_slots_without_prefetching_bytecode() {
+        use alloy_primitives::{Bytes, U256};
+        use reth_execution_cache::CachedStatus;
+        use reth_provider::test_utils::ExtendedAccount;
+        for count in [0u64, 1, 8, 9, 17] {
+            let addr = Address::repeat_byte(1);
+            let account = ExtendedAccount::new(7, U256::from(100))
+                .with_bytecode(Bytes::from_static(&[0x00]))
+                .extend_storage(
+                    (0..count)
+                        .map(|i| (StorageKey::from(U256::from(i)), U256::from(i + 1)))
+                        .collect::<Vec<_>>(),
+                );
+            let provider = MockEthProvider::default();
+            provider.extend_accounts(vec![(addr, account)]);
+            let expected_account = provider.basic_account(&addr).unwrap().unwrap();
+            let code_hash = expected_account.bytecode_hash.unwrap();
+            let pool = BalPrewarmPool::new(2);
+            let caches = ExecutionCache::new(1000);
+            pool.begin_block(Arc::new(move || Ok(Box::new(provider.clone()))), caches.clone());
+            pool.warm_account_with_storage(
+                addr,
+                (0..count).map(|i| StorageKey::from(U256::from(i))),
+            );
+            // Keep the old public entry points usable alongside the batch API.
+            pool.warm_account(addr);
+            pool.warm_storage(addr, StorageKey::from(U256::from(99)));
+            pool.end_block();
+            assert_eq!(
+                caches.get_or_try_insert_account_with::<()>(addr, || Err(())).unwrap(),
+                CachedStatus::Cached(Some(expected_account))
+            );
+            for i in 0..count {
+                assert_eq!(
+                    caches
+                        .get_or_try_insert_storage_with::<()>(
+                            addr,
+                            StorageKey::from(U256::from(i)),
+                            || Err(())
+                        )
+                        .unwrap(),
+                    CachedStatus::Cached(U256::from(i + 1))
+                );
+            }
+            assert_eq!(
+                caches
+                    .get_or_try_insert_storage_with::<()>(
+                        addr,
+                        StorageKey::from(U256::from(99)),
+                        || Err(())
+                    )
+                    .unwrap(),
+                CachedStatus::Cached(U256::ZERO)
+            );
+            assert!(
+                caches.get_or_try_insert_code_with::<()>(code_hash, || Err(())).is_err(),
+                "bytecode must remain demand-loaded"
+            );
+        }
+    }
 
     #[test]
     fn end_block_waits_for_all_queued_provider_builds() {

@@ -24,7 +24,7 @@ pub use arena::{ArenaParallelSparseTrie, ArenaParallelismThresholds};
 #[cfg(feature = "std")]
 pub mod arena_traits;
 #[cfg(feature = "std")]
-pub use arena_traits::{LeafUpdate, SparseTrie as ArenaTrieInterface};
+pub use arena_traits::{LeafUpdate, SparseTrie as ArenaTrieInterface, TrieNodeEpoch};
 
 #[cfg(feature = "trie-debug")]
 pub mod debug_recorder;

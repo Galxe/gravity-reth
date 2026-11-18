@@ -1865,7 +1865,16 @@ where
                     }
                     EngineApiRequest::Beacon(request) => {
                         match request {
-                            BeaconEngineMessage::ForkchoiceUpdated { state, payload_attrs, tx } => {
+                            BeaconEngineMessage::ForkchoiceUpdated {
+                                cause,
+                                state,
+                                payload_attrs,
+                                tx,
+                            } => {
+                                let _dispatch = cause.with_subscriber(|(_, dispatch)| {
+                                    tracing::dispatcher::set_default(dispatch)
+                                });
+                                let _cause = cause.enter();
                                 let has_attrs = payload_attrs.is_some();
 
                                 let start = Instant::now();
@@ -1908,7 +1917,11 @@ where
                                     warn!(target: "engine::tree", ?state, elapsed=?start.elapsed(), "Failed to deliver forkchoiceUpdated response, receiver dropped (request cancelled): {err:?}");
                                 }
                             }
-                            BeaconEngineMessage::NewPayload { payload, tx } => {
+                            BeaconEngineMessage::NewPayload { cause, payload, tx } => {
+                                let _dispatch = cause.with_subscriber(|(_, dispatch)| {
+                                    tracing::dispatcher::set_default(dispatch)
+                                });
+                                let _cause = cause.enter();
                                 let start = Instant::now();
                                 let gas_used = payload.gas_used();
                                 let num_hash = payload.num_hash();
@@ -1940,12 +1953,17 @@ where
                                 self.on_maybe_tree_event(maybe_event)?;
                             }
                             BeaconEngineMessage::RethNewPayload {
+                                cause,
                                 payload,
                                 wait_for_persistence,
                                 wait_for_caches: _,
                                 tx,
                                 enqueued_at,
                             } => {
+                                let _dispatch = cause.with_subscriber(|(_, dispatch)| {
+                                    tracing::dispatcher::set_default(dispatch)
+                                });
+                                let _cause = cause.enter();
                                 debug!(
                                     target: "engine::tree",
                                     wait_for_persistence,

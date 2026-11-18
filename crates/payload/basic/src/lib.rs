@@ -38,7 +38,7 @@ use tokio::{
     sync::{oneshot, Semaphore},
     time::{Interval, Sleep},
 };
-use tracing::{debug, trace, warn};
+use tracing::{debug, debug_span, trace, warn, Span};
 
 mod better_payload_emitter;
 mod metrics;
@@ -418,10 +418,15 @@ where
         let trie_handle = self.trie_handle.take();
         let builder = self.builder.clone();
         let executor = self.executor.clone();
+        let span = Span::current();
+        let dispatch = tracing::dispatcher::get_default(Clone::clone);
         self.executor.spawn_task(async move {
             // acquire the permit for executing the task
             let permit = guard.acquire_owned().await;
             executor.spawn_blocking_named_or_tokio(PAYLOAD_BUILDER_THREAD_NAME, move || {
+                let _dispatch = tracing::dispatcher::set_default(&dispatch);
+                let _parent = span.enter();
+                let _span = debug_span!(target: "payload_builder", "build_payload").entered();
                 let _permit = permit;
                 let args = BuildArguments {
                     cached_reads,
@@ -581,9 +586,16 @@ where
                     let (tx, rx) = oneshot::channel();
                     let config = self.config.clone();
                     let builder = self.builder.clone();
+                    let span = Span::current();
+                    let dispatch = tracing::dispatcher::get_default(Clone::clone);
                     self.executor.spawn_blocking_named_or_tokio(
                         PAYLOAD_BUILDER_THREAD_NAME,
                         move || {
+                            let _dispatch = tracing::dispatcher::set_default(&dispatch);
+                            let _parent = span.enter();
+                            let _span =
+                                debug_span!(target: "payload_builder", "build_empty_payload")
+                                    .entered();
                             let res = builder.build_empty_payload(config);
                             let _ = tx.send(res);
                         },
@@ -595,9 +607,16 @@ where
                     debug!(target: "payload_builder", id=%self.config.payload_id(), "racing fallback payload");
                     // race the in progress job with this job
                     let (tx, rx) = oneshot::channel();
+                    let span = Span::current();
+                    let dispatch = tracing::dispatcher::get_default(Clone::clone);
                     self.executor.spawn_blocking_named_or_tokio(
                         PAYLOAD_BUILDER_THREAD_NAME,
                         move || {
+                            let _dispatch = tracing::dispatcher::set_default(&dispatch);
+                            let _parent = span.enter();
+                            let _span =
+                                debug_span!(target: "payload_builder", "build_fallback_payload")
+                                    .entered();
                             let _ = tx.send(job());
                         },
                     );

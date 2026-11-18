@@ -132,7 +132,6 @@ impl RethRpcServerConfig for RpcServerArgs {
             max_receipts_bytes: self.rpc_state_cache.max_receipts_bytes,
             idle_timeout: self.rpc_state_cache.idle_timeout,
             max_receipts: self.rpc_state_cache.max_receipts,
-            max_headers: self.rpc_state_cache.max_headers,
             max_bals: self.rpc_state_cache.max_bals,
             max_concurrent_db_requests: self.rpc_state_cache.max_concurrent_db_requests,
             max_cached_tx_hashes: self.rpc_state_cache.max_cached_tx_hashes,
@@ -255,7 +254,7 @@ impl RethRpcServerConfig for RpcServerArgs {
         let mut builder = AuthServerConfig::builder(jwt_secret).socket_addr(address);
         if self.auth_ipc {
             builder = builder
-                .ipc_endpoint(self.auth_ipc_path.clone())
+                .ipc_endpoint(self.auth_ipc_path().to_string())
                 .with_ipc_config(self.ipc_server_builder());
         }
         Ok(builder.build())

@@ -47,7 +47,7 @@ use reth_db_api::{
     transaction::{DbTx, DbTxMut},
     BlockNumberList, DatabaseError, PlainAccountState, PlainStorageState,
 };
-use reth_execution_types::{Chain, ExecutionOutcome};
+use reth_execution_types::{Chain, ExecutionOutcome, RecoveredBlockAndExecutionOutput};
 use reth_node_types::{BlockTy, BodyTy, HeaderTy, NodeTypes, ReceiptTy, TxTy};
 use reth_primitives_traits::{
     Account, Block as _, BlockBody as _, Bytecode, GotExpected, NodePrimitives, RecoveredBlock,
@@ -1436,13 +1436,13 @@ impl<TX: DbTx + 'static, N: NodeTypesForProvider> BlockReader for DatabaseProvid
 
         Ok(None)
     }
-    fn pending_block(&self) -> ProviderResult<Option<RecoveredBlock<Self::Block>>> {
+    fn pending_block(&self) -> ProviderResult<Option<Arc<RecoveredBlock<Self::Block>>>> {
         Ok(None)
     }
 
     fn pending_block_and_receipts(
         &self,
-    ) -> ProviderResult<Option<(RecoveredBlock<Self::Block>, Vec<Self::Receipt>)>> {
+    ) -> ProviderResult<Option<RecoveredBlockAndExecutionOutput<Self::Block, Self::Receipt>>> {
         Ok(None)
     }
 

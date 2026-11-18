@@ -111,7 +111,7 @@ pub mod gas_oracle {
     pub const DEFAULT_MAX_GAS_PRICE: U256 = U256::from_limbs([500_000_000_000u64, 0, 0, 0]);
 
     /// The default minimum gas price, under which the sample will be ignored
-    pub const DEFAULT_IGNORE_GAS_PRICE: U256 = U256::ZERO;
+    pub const DEFAULT_IGNORE_GAS_PRICE: U256 = U256::from_limbs([2, 0, 0, 0]);
 
     /// The default gas limit for `eth_call` and adjacent calls.
     ///
@@ -138,13 +138,13 @@ pub mod cache {
     pub const DEFAULT_CACHE_IDLE_TIMEOUT: std::time::Duration =
         std::time::Duration::from_secs(3600);
 
-    /// Default cache size for the block cache: 5000 blocks.
-    pub const DEFAULT_BLOCK_CACHE_MAX_LEN: u32 = 5000;
+    /// Default cache size for the block cache: 1000 blocks.
+    pub const DEFAULT_BLOCK_CACHE_MAX_LEN: u32 = 1000;
 
-    /// Default cache size for the receipts cache: 2000 receipts.
-    pub const DEFAULT_RECEIPT_CACHE_MAX_LEN: u32 = 2000;
+    /// Default cache size for the receipts cache: 500 blocks' receipts.
+    pub const DEFAULT_RECEIPT_CACHE_MAX_LEN: u32 = 500;
 
-    /// Default cache size for the header cache: 1000 headers.
+    /// Legacy no-op RPC header cache option: 1000 headers.
     pub const DEFAULT_HEADER_CACHE_MAX_LEN: u32 = 1000;
 
     /// Default cache size for the revm BAL cache: 1000 block access lists.

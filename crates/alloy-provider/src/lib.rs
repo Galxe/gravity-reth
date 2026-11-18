@@ -20,6 +20,7 @@
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 
+use reth_execution_types::RecoveredBlockAndExecutionOutput;
 use alloy_consensus::BlockHeader;
 use alloy_eips::BlockHashOrNumber;
 use alloy_network::{primitives::HeaderResponse, BlockResponse};
@@ -35,7 +36,7 @@ use reth_db_api::{
 use reth_errors::{ProviderError, ProviderResult};
 use reth_node_types::{BlockTy, HeaderTy, NodeTypes, PrimitivesTy, ReceiptTy, TxTy};
 use reth_primitives::{
-    Account, Bytecode, RecoveredBlock, SealedBlock, SealedHeader, TransactionMeta,
+    Account, Bytecode, RecoveredBlock, SealedHeader, TransactionMeta,
 };
 use reth_provider::{
     AccountReader, BlockHashReader, BlockIdReader, BlockNumReader, BlockReader, BytecodeReader,
@@ -360,13 +361,13 @@ where
         Err(ProviderError::UnsupportedProvider)
     }
 
-    fn pending_block(&self) -> ProviderResult<Option<RecoveredBlock<Self::Block>>> {
+    fn pending_block(&self) -> ProviderResult<Option<Arc<RecoveredBlock<Self::Block>>>> {
         Err(ProviderError::UnsupportedProvider)
     }
 
     fn pending_block_and_receipts(
         &self,
-    ) -> ProviderResult<Option<(SealedBlock<Self::Block>, Vec<Self::Receipt>)>> {
+    ) -> ProviderResult<Option<RecoveredBlockAndExecutionOutput<Self::Block, Self::Receipt>>> {
         Err(ProviderError::UnsupportedProvider)
     }
 
@@ -1229,13 +1230,13 @@ where
         Err(ProviderError::UnsupportedProvider)
     }
 
-    fn pending_block(&self) -> Result<Option<RecoveredBlock<Self::Block>>, ProviderError> {
+    fn pending_block(&self) -> Result<Option<Arc<RecoveredBlock<Self::Block>>>, ProviderError> {
         Err(ProviderError::UnsupportedProvider)
     }
 
     fn pending_block_and_receipts(
         &self,
-    ) -> Result<Option<(SealedBlock<Self::Block>, Vec<Self::Receipt>)>, ProviderError> {
+    ) -> Result<Option<RecoveredBlockAndExecutionOutput<Self::Block, Self::Receipt>>, ProviderError> {
         Err(ProviderError::UnsupportedProvider)
     }
 

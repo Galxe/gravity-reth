@@ -87,7 +87,7 @@ impl DatabaseArguments {
     pub const DEFAULT_WRITE_BUFFER_SIZE: usize = 128 * 1024 * 1024;
     /// Default max background jobs: 14
     pub const DEFAULT_MAX_BACKGROUND_JOBS: i32 = 14;
-    /// Default max open files: 10000
+    /// Upper bound for the automatically selected finite SST file cache: 10000
     pub const DEFAULT_MAX_OPEN_FILES: i32 = 10000;
     /// Default max write buffer number: 6
     pub const DEFAULT_MAX_WRITE_BUFFER_NUMBER: i32 = 6;
@@ -204,9 +204,14 @@ impl DatabaseArguments {
         self.max_background_jobs.unwrap_or(Self::DEFAULT_MAX_BACKGROUND_JOBS)
     }
 
-    /// Get the max open files, using default if not set.
+    /// Get the max open files for the default three-shard layout, unless explicitly configured.
     pub fn max_open_files(&self) -> i32 {
-        self.max_open_files.unwrap_or(Self::DEFAULT_MAX_OPEN_FILES)
+        self.max_open_files_for_shards(3)
+    }
+
+    fn max_open_files_for_shards(&self, shards: usize) -> i32 {
+        self.max_open_files
+            .unwrap_or_else(|| max_open_files_for_limit(current_file_descriptor_limit(), shards))
     }
 
     /// Get the max write buffer number, using default if not set.
@@ -340,7 +345,7 @@ impl DatabaseEnv {
     /// (memtables, compaction, compression, block cache) must go through
     /// [`Self::create_cf_options`]: `RocksDB` silently ignores CF-level fields on the
     /// database `Options` for named column families.
-    fn create_db_options(args: &DatabaseArguments) -> Options {
+    fn create_db_options(args: &DatabaseArguments, shards: usize) -> Options {
         let mut opts = Options::default();
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
@@ -349,7 +354,7 @@ impl DatabaseEnv {
         opts.set_max_background_jobs(args.max_background_jobs());
         let parallelism = (args.max_background_jobs() + 2).max(4);
         opts.increase_parallelism(parallelism);
-        opts.set_max_open_files(args.max_open_files());
+        opts.set_max_open_files(args.max_open_files_for_shards(shards));
 
         // === Memory Configuration (DB-wide cap) ===
         // Hard ceiling across all column families of one instance: forces memtable
@@ -454,7 +459,7 @@ impl DatabaseEnv {
         args: &DatabaseArguments,
         tables_by_path: HashMap<PathBuf, Vec<String>>,
     ) -> Result<HashMap<PathBuf, Arc<DB>>, DatabaseError> {
-        let opts = Self::create_db_options(args);
+        let opts = Self::create_db_options(args, tables_by_path.len());
         // One cache for every CF of every instance: `--db.block-cache-size` is the
         // total budget (see `create_cf_options`).
         let cache = Cache::new_lru_cache(args.block_cache_size());
@@ -765,6 +770,33 @@ fn get_cf_handle<T: Table>(db: &DB) -> Result<&rocksdb::ColumnFamily, DatabaseEr
     })
 }
 
+/// Bound finite SST caches to half the process descriptor limit, leaving room for other I/O.
+/// Only hosts provisioned with at least 128K descriptors per `RocksDB` instance use the
+/// unlimited SST cache. Count actual instances, since custom shard paths can coincide.
+fn max_open_files_for_limit(limit: Option<u64>, shards: usize) -> i32 {
+    let shards = shards.max(1) as u64;
+    if limit.is_some_and(|limit| limit / shards >= 128 * 1024) {
+        return -1
+    }
+    let budget = limit.map_or(512, |limit| limit / 2) / shards;
+    // RocksDB itself clamps finite values to at least 20.
+    budget.clamp(20, DatabaseArguments::DEFAULT_MAX_OPEN_FILES as u64) as i32
+}
+
+#[cfg(unix)]
+#[allow(clippy::useless_conversion, reason = "rlim_t has different widths across Unix targets")]
+fn current_file_descriptor_limit() -> Option<u64> {
+    let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    // SAFETY: limit points to initialized writable memory for the kernel to populate.
+    let result = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut limit) };
+    (result == 0).then(|| limit.rlim_cur.into())
+}
+
+#[cfg(not(unix))]
+const fn current_file_descriptor_limit() -> Option<u64> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -777,6 +809,29 @@ mod tests {
         transaction::{DbTx, DbTxMut},
     };
     use reth_primitives_traits::StorageEntry;
+
+    #[test]
+    fn max_open_files_respects_shard_budget_and_explicit_overrides() {
+        for shards in 1..=3 {
+            let threshold = 128 * 1024 * shards as u64;
+            assert_eq!(max_open_files_for_limit(Some(threshold), shards), -1);
+            assert!(max_open_files_for_limit(Some(threshold - 1), shards) > 0);
+            for limit in [256, 1024, 65_536] {
+                let files = max_open_files_for_limit(Some(limit), shards);
+                assert!(files >= 20);
+                assert!(files as u64 * shards as u64 <= limit / 2);
+            }
+            assert!(max_open_files_for_limit(None, shards) > 0);
+            for explicit in [-1, 1000] {
+                assert_eq!(
+                    DatabaseArguments::default()
+                        .with_max_open_files(Some(explicit))
+                        .max_open_files_for_shards(shards),
+                    explicit,
+                );
+            }
+        }
+    }
 
     #[test]
     fn state_snapshot_survives_updates_compaction_and_database_drop() {

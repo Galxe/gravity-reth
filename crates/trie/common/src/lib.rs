@@ -83,7 +83,9 @@ pub use updates::{StorageTrieUpdatesV2, TrieUpdatesV2};
 
 /// EIP-7864 v2 multiproof target types.
 pub mod target_v2;
-pub use target_v2::{ChunkedMultiProofTargetsV2, MultiProofTargetsV2, ProofV2Target};
+pub use target_v2::{
+    ChunkedMultiProofTargetsV2, MultiProofTargetsV2, ProofV2Target, ProofV2TargetParent,
+};
 
 /// Nested trie for merklization
 pub mod nested_trie;
