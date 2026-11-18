@@ -117,7 +117,11 @@ impl RethRpcServerConfig for RpcServerArgs {
     fn flashbots_config(&self) -> ValidationApiConfig {
         ValidationApiConfig {
             disallow: self.builder_disallow.clone().unwrap_or_default(),
-            validation_window: self.rpc_eth_proof_window,
+            // the proof window defaults to 0, which would reject any submission whose parent is
+            // behind the tip, so it can only widen the default window
+            validation_window: self
+                .rpc_eth_proof_window
+                .max(ValidationApiConfig::DEFAULT_VALIDATION_WINDOW),
         }
     }
 
@@ -216,7 +220,12 @@ impl RethRpcServerConfig for RpcServerArgs {
                 .with_http_address(socket_address)
                 .with_http(self.http_ws_server_builder())
                 .with_http_cors(self.http_corsdomain.clone())
-                .with_http_disable_compression(self.http_disable_compression);
+                .with_http_disable_compression(self.http_disable_compression)
+                .with_http_compression_algorithms(self.http_compression_algorithms.clone())
+                .with_http_decompression(
+                    self.http_decompression_algorithms.clone(),
+                    self.rpc_max_request_size_bytes(),
+                );
         }
 
         if self.ws {
@@ -276,6 +285,7 @@ impl RethRpcServerConfig for RpcServerArgs {
 mod tests {
     use clap::{Args, Parser};
     use reth_node_core::args::RpcServerArgs;
+    use reth_rpc::ValidationApiConfig;
     use reth_rpc_eth_types::RPC_DEFAULT_GAS_CAP;
     use reth_rpc_layer::JwtSecret;
     use reth_rpc_server_types::{constants, RethRpcModule, RpcModuleSelection};
@@ -491,5 +501,26 @@ mod tests {
 
         let secret = args.auth_jwt_secret(std::env::temp_dir().join("unused.jwt")).unwrap();
         assert_eq!(secret, JwtSecret::from_hex(hex).unwrap());
+    }
+    #[test]
+    fn flashbots_validation_window() {
+        let args = CommandParser::<RpcServerArgs>::parse_from(["reth"]).args;
+        assert_eq!(
+            args.flashbots_config().validation_window,
+            ValidationApiConfig::DEFAULT_VALIDATION_WINDOW
+        );
+
+        let args =
+            CommandParser::<RpcServerArgs>::parse_from(["reth", "--rpc.eth-proof-window", "1"])
+                .args;
+        assert_eq!(
+            args.flashbots_config().validation_window,
+            ValidationApiConfig::DEFAULT_VALIDATION_WINDOW
+        );
+
+        let args =
+            CommandParser::<RpcServerArgs>::parse_from(["reth", "--rpc.eth-proof-window", "100"])
+                .args;
+        assert_eq!(args.flashbots_config().validation_window, 100);
     }
 }

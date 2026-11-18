@@ -8,7 +8,7 @@ use crate::{
     RpcTransaction,
 };
 use alloy_consensus::{
-    transaction::{SignerRecoverable, TransactionMeta, TxHashRef},
+    transaction::{TransactionMeta, TxHashRef},
     BlockHeader, Transaction,
 };
 use alloy_dyn_abi::TypedData;
@@ -24,9 +24,9 @@ use reth_primitives_traits::{
 use reth_rpc_convert::{transaction::RpcConvert, RpcTxReq, TransactionConversionError};
 use reth_rpc_eth_types::{
     block::convert_transaction_receipt,
-    utils::binary_search,
+    utils::{binary_search, decode_raw_transaction},
     EthApiError::{self, TransactionConfirmationTimeout},
-    FillTransaction, SignError, TransactionSource,
+    EthResult, FillTransaction, SignError, TransactionSource,
 };
 use reth_storage_api::{
     BlockNumReader, BlockReaderIdExt, ProviderBlock, ProviderReceipt, ProviderTx, ReceiptProvider,
@@ -76,7 +76,9 @@ pub trait EthTransactions: LoadTransaction<Provider: BlockReaderIdExt> {
     }
 
     /// Returns the timeout duration for `send_raw_transaction_sync` RPC method.
-    fn send_raw_transaction_sync_timeout(&self) -> Duration;
+    fn send_raw_transaction_sync_timeout(&self) -> Duration {
+        self.eth_api_settings().send_raw_transaction_sync_timeout
+    }
 
     /// Decodes and recovers the transaction and submits it to the pool.
     ///
@@ -86,9 +88,7 @@ pub trait EthTransactions: LoadTransaction<Provider: BlockReaderIdExt> {
         tx: Bytes,
     ) -> impl Future<Output = Result<B256, Self::Error>> + Send {
         async move {
-            let pool_transaction =
-                <PoolTx<Self::Pool> as PoolTransaction>::recover_raw_transaction(&tx)
-                    .map_err(Self::Error::from_eth_err)?;
+            let pool_transaction = self.recover_raw_pool_transaction(&tx)?;
             // RPC submissions use the local-origin pool policy.
             self.send_pool_transaction(
                 TransactionOrigin::Local,
@@ -96,6 +96,19 @@ pub trait EthTransactions: LoadTransaction<Provider: BlockReaderIdExt> {
             )
             .await
         }
+    }
+
+    /// Decodes and recovers a raw pool transaction, sharing sender recovery when configured.
+    fn recover_raw_pool_transaction(&self, tx: &[u8]) -> Result<PoolTx<Self::Pool>, Self::Error> {
+        match self.eth_api_settings().sender_recovery_cache.as_ref() {
+            Some(cache) => {
+                <PoolTx<Self::Pool> as PoolTransaction>::recover_raw_transaction_with_cache(
+                    tx, cache,
+                )
+            }
+            None => <PoolTx<Self::Pool> as PoolTransaction>::recover_raw_transaction(tx),
+        }
+        .map_err(Self::Error::from_eth_err)
     }
 
     /// Submits the transaction to the pool with the given [`TransactionOrigin`].
@@ -276,9 +289,10 @@ pub trait EthTransactions: LoadTransaction<Provider: BlockReaderIdExt> {
     {
         async move {
             match self.load_transaction_and_receipt(hash).await? {
-                Some((tx, meta, receipt, all_receipts)) => {
-                    self.build_transaction_receipt(tx, meta, receipt, all_receipts).await.map(Some)
-                }
+                Some((tx, meta, receipt, all_receipts, block)) => self
+                    .build_transaction_receipt_with_block(tx, meta, receipt, all_receipts, block)
+                    .await
+                    .map(Some),
                 None => Ok(None),
             }
         }
@@ -298,6 +312,7 @@ pub trait EthTransactions: LoadTransaction<Provider: BlockReaderIdExt> {
                 TransactionMeta,
                 ProviderReceipt<Self::Provider>,
                 Option<Arc<Vec<ProviderReceipt<Self::Provider>>>>,
+                Option<Arc<RecoveredBlock<ProviderBlock<Self::Provider>>>>,
             )>,
             Self::Error,
         >,
@@ -315,7 +330,7 @@ pub trait EthTransactions: LoadTransaction<Provider: BlockReaderIdExt> {
                 if let Some(all_receipts) = cached.receipts.clone() &&
                     let Some(receipt) = all_receipts.get(cached.tx_index).cloned()
                 {
-                    return Ok(Some((tx, meta, receipt, Some(all_receipts))));
+                    return Ok(Some((tx, meta, receipt, Some(all_receipts), Some(cached.block))));
                 }
 
                 // Block still cached but receipts evicted — fetch via cache since
@@ -328,7 +343,7 @@ pub trait EthTransactions: LoadTransaction<Provider: BlockReaderIdExt> {
                     .map_err(Self::Error::from_eth_err)? &&
                     let Some(receipt) = receipts.get(cached.tx_index).cloned()
                 {
-                    return Ok(Some((tx, meta, receipt, Some(receipts))));
+                    return Ok(Some((tx, meta, receipt, Some(receipts), Some(cached.block))));
                 }
             }
 
@@ -343,12 +358,11 @@ pub trait EthTransactions: LoadTransaction<Provider: BlockReaderIdExt> {
                 };
 
                 // Committed Gravity system transactions have no recoverable signature.
-                let signer = tx.recover_signer_unchecked().unwrap_or(SYSTEM_CALLER);
-                let tx = Recovered::new_unchecked(tx, signer);
+                let tx = this.recover_mined_transaction(tx).map_err(Self::Error::from_eth_err)?;
 
                 let receipt = provider.receipt_by_hash(hash).map_err(Self::Error::from_eth_err)?;
 
-                Ok(receipt.map(|receipt| (tx, meta, receipt, None)))
+                Ok(receipt.map(|receipt| (tx, meta, receipt, None, None)))
             })
             .await
         }
@@ -748,6 +762,46 @@ pub trait EthTransactions: LoadTransaction<Provider: BlockReaderIdExt> {
 /// Behaviour shared by several `eth_` RPC methods, not exclusive to `eth_` transactions RPC
 /// methods.
 pub trait LoadTransaction: SpawnBlocking + FullEthApiTypes + RpcNodeCoreExt {
+    /// Decodes and recovers a raw transaction, sharing sender recovery when configured.
+    fn recover_raw_transaction<T: SignedTransaction>(&self, tx: &[u8]) -> EthResult<Recovered<T>> {
+        let transaction = decode_raw_transaction::<T>(tx)?;
+        let signer = match self.eth_api_settings().sender_recovery_cache.as_ref() {
+            Some(cache) => cache.recover(&transaction),
+            None => transaction.try_recover(),
+        }
+        .map_err(|_| EthApiError::InvalidTransactionSignature)?;
+        Ok(Recovered::new_unchecked(transaction, signer))
+    }
+
+    /// Decodes and recovers raw transactions in order, stopping at the first error.
+    ///
+    /// Uses [`Self::recover_raw_transaction`] to share sender recovery when configured.
+    fn recover_raw_transactions<T: SignedTransaction>(
+        &self,
+        txs: impl IntoIterator<Item = impl AsRef<[u8]>>,
+    ) -> EthResult<Vec<Recovered<T>>> {
+        txs.into_iter().map(|tx| self.recover_raw_transaction(tx.as_ref())).collect()
+    }
+
+    /// Recovers the sender of a mined transaction, reusing a cached sender when configured.
+    ///
+    /// Mined transactions can predate EIP-2, so recovery does not reject high-s signatures. A
+    /// sender recovered on a cache miss is not cached: lookups of mined transactions rarely
+    /// repeat, and caching them would evict senders that ingress and payload execution still need.
+    fn recover_mined_transaction<T: SignedTransaction>(&self, tx: T) -> EthResult<Recovered<T>> {
+        let cached = self
+            .eth_api_settings()
+            .sender_recovery_cache
+            .as_ref()
+            .and_then(|cache| cache.get(tx.tx_hash()));
+        let signer = match cached {
+            Some(signer) => signer,
+            // Persisted Gravity system transactions carry an empty signature.
+            None => tx.recover_signer_unchecked().unwrap_or(SYSTEM_CALLER),
+        };
+        Ok(Recovered::new_unchecked(tx, signer))
+    }
+
     /// Returns the transaction by hash.
     ///
     /// Checks the pool and state.
@@ -781,8 +835,8 @@ pub trait LoadTransaction: SpawnBlocking + FullEthApiTypes + RpcNodeCoreExt {
                 // part of pending block) and already. We don't need to
                 // check for pre EIP-2 because this transaction could be pre-EIP-2.
                 // FIXME: Hardcoded for meta txns with empty signature
-                let signer = tx.recover_signer_unchecked().unwrap_or(SYSTEM_CALLER);
-                let transaction = Recovered::new_unchecked(tx, signer);
+                let transaction =
+                    self.recover_mined_transaction(tx).map_err(Self::Error::from_eth_err)?;
 
                 return Ok(Some(TransactionSource::Block {
                     transaction,

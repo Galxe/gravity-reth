@@ -122,7 +122,7 @@ impl PayloadAttributes for EthPayloadAttributes {
     }
 
     fn target_gas_limit(&self) -> Option<u64> {
-        None
+        self.target_gas_limit
     }
 }
 
@@ -346,11 +346,56 @@ mod tests {
             withdrawals: Some(vec![]),
             parent_beacon_block_root: Some(B256::from_slice(&[2; 32])),
             slot_number: Some(1),
+            ..Default::default()
         };
 
         let first = payload_id(&parent, &attributes);
         attributes.slot_number = Some(2);
 
         assert_ne!(first, payload_id(&parent, &attributes));
+    }
+    #[test]
+    fn test_payload_id_with_target_gas_limit() {
+        let parent =
+            B256::from_str("0x9876543210abcdef9876543210abcdef9876543210abcdef9876543210abcdef")
+                .unwrap();
+        let mut attributes = EthPayloadAttributes {
+            timestamp: 1622553200,
+            prev_randao: B256::from_slice(&[1; 32]),
+            suggested_fee_recipient: Address::from_str(
+                "0xb94f5374fce5edbc8e2a8697c15331677e6ebf0b",
+            )
+            .unwrap(),
+            withdrawals: Some(vec![]),
+            parent_beacon_block_root: Some(B256::from_slice(&[2; 32])),
+            slot_number: Some(1),
+            target_gas_limit: Some(30_000_000),
+        };
+
+        assert_eq!(attributes.target_gas_limit(), Some(30_000_000));
+        let first = payload_id(&parent, &attributes);
+        attributes.target_gas_limit = Some(60_000_000);
+
+        assert_ne!(first, payload_id(&parent, &attributes));
+    }
+
+    #[test]
+    fn test_target_gas_limit_wire_default_and_quantity() {
+        let mut attributes = EthPayloadAttributes::default();
+        assert_eq!(attributes.target_gas_limit(), None);
+        let wire = serde_json::to_value(&attributes).unwrap();
+        assert!(wire.get("targetGasLimit").is_none());
+        assert_eq!(
+            serde_json::from_value::<EthPayloadAttributes>(wire).unwrap().target_gas_limit(),
+            None
+        );
+
+        attributes.target_gas_limit = Some(30_000_000);
+        let wire = serde_json::to_value(&attributes).unwrap();
+        assert_eq!(wire["targetGasLimit"], "0x1c9c380");
+        assert_eq!(
+            serde_json::from_value::<EthPayloadAttributes>(wire).unwrap().target_gas_limit(),
+            Some(30_000_000)
+        );
     }
 }

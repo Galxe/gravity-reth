@@ -306,6 +306,8 @@ where
     T: PayloadTypes,
     C: ConfigureEvm<Primitives = N> + 'static,
 {
+    /// Acknowledged only after this handler and its owned resources have been dropped.
+    termination_ack: Option<oneshot::Sender<()>>,
     provider: P,
     consensus: Arc<dyn FullConsensus<N>>,
     payload_validator: V,
@@ -429,6 +431,7 @@ where
         let (incoming_tx, incoming) = crossbeam_channel::unbounded();
 
         Self {
+            termination_ack: None,
             provider,
             consensus,
             payload_validator,
@@ -660,11 +663,16 @@ where
     /// Run the engine API handler.
     ///
     /// This will block the current thread and process incoming messages.
-    pub fn run(self) {
+    pub fn run(mut self) {
         if get_gravity_config().disable_pipe_execution {
             self.run_inner();
         } else {
             self.pipe_run_inner();
+        }
+        let termination_ack = self.termination_ack.take();
+        drop(self);
+        if let Some(tx) = termination_ack {
+            let _ = tx.send(());
         }
     }
 
@@ -675,7 +683,7 @@ where
     /// between `insert_executed` and `on_new_head` within the same
     /// `make_executed_block_canonical` call — the two steps are atomic with
     /// respect to pruning.
-    fn pipe_run_inner(mut self) {
+    fn pipe_run_inner(&mut self) {
         let pipe_event_rx = N::pipe_exec_layer_event_bus().event_rx.lock().unwrap().take().unwrap();
         loop {
             match self.try_recv_pipe_exec_event(&pipe_event_rx) {
@@ -724,7 +732,7 @@ where
         }
     }
 
-    fn run_inner(mut self) {
+    fn run_inner(&mut self) {
         loop {
             // Each iteration has three phases:
             //
@@ -1700,17 +1708,15 @@ where
         Ok(())
     }
 
-    /// Finishes termination by persisting all remaining blocks and signaling completion.
-    ///
-    /// This blocks until all persistence is complete. Always signals completion,
-    /// even if an error occurs.
+    /// Drains persistence and defers the completion signal until the handler is dropped.
+    /// The signal is also retained when draining fails, so shutdown cannot hang waiting for it.
     fn finish_termination(
         &mut self,
         pending_termination: oneshot::Sender<()>,
     ) -> Result<(), AdvancePersistenceError> {
         trace!(target: "engine::tree", "finishing termination, persisting remaining blocks");
         let result = self.persist_and_wait_idle();
-        let _ = pending_termination.send(());
+        self.termination_ack = Some(pending_termination);
         result
     }
 

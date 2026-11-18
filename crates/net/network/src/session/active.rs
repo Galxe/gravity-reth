@@ -29,7 +29,8 @@ use metrics::{Counter, Gauge};
 use reth_eth_wire::{
     errors::{EthHandshakeError, EthStreamError},
     message::{EthBroadcastMessage, MessageError},
-    Capabilities, DisconnectP2P, DisconnectReason, EthMessage, NetworkPrimitives, NewBlockPayload,
+    Capabilities, DisconnectP2P, DisconnectReason, EthMessage, EthSnapMessage, NetworkPrimitives,
+    NewBlockPayload,
 };
 use reth_eth_wire_types::{message::RequestPair, NewPooledTransactionHashes, RawCapabilityMessage};
 use reth_metrics::common::mpsc::MeteredPollSender;
@@ -232,9 +233,13 @@ impl<N: NetworkPrimitives> ActiveSession<N> {
     /// poll.
     ///
     /// Returns `true` if at least one message was handed to the connection.
+    ///
+    /// A readiness error closes the session: a satellite connection reports messages it already
+    /// accepted but the wire rejected through its readiness.
     fn poll_send_queued(&mut self, cx: &mut Context<'_>) -> Result<bool, EthStreamError> {
         let mut progress = false;
-        while self.conn.poll_ready_unpin(cx).is_ready() {
+        while let Poll::Ready(ready) = self.conn.poll_ready_unpin(cx) {
+            ready?;
             let Some(msg) = self.queued_outgoing.pop_front() else { break };
             progress = true;
             let res = match msg {
@@ -860,9 +865,21 @@ impl<N: NetworkPrimitives> Future for ActiveSession<N> {
                     Poll::Ready(Some(res)) => {
                         match res {
                             Ok(msg) => {
-                                trace!(target: "net::session", msg_id=?msg.message_id(), remote_peer_id=?this.remote_peer_id, "received eth message");
-                                // decode and handle message
-                                match this.on_incoming_message(msg) {
+                                let outcome = match msg {
+                                    EthSnapMessage::Eth(msg) => {
+                                        trace!(target: "net::session", msg_id=?msg.message_id(), remote_peer_id=?this.remote_peer_id, "received eth message");
+                                        // decode and handle message
+                                        this.on_incoming_message(msg)
+                                    }
+                                    // TODO: snap/2 is negotiated but not consumed yet;
+                                    // request/response handling
+                                    // lands with the snap client.
+                                    EthSnapMessage::Snap(_msg) => {
+                                        trace!(target: "net::session", remote_peer_id=?this.remote_peer_id, "ignoring inbound snap/2 message");
+                                        OnIncomingMessageOutcome::Ok
+                                    }
+                                };
+                                match outcome {
                                     OnIncomingMessageOutcome::Ok => {
                                         // handled successfully
                                         progress = true;
@@ -1254,9 +1271,9 @@ mod tests {
     use reth_chainspec::MAINNET;
     use reth_ecies::stream::ECIESStream;
     use reth_eth_wire::{
-        handshake::EthHandshake, EthNetworkPrimitives, EthStream, GetBlockAccessLists,
-        GetBlockBodies, HelloMessageWithProtocols, P2PStream, StatusBuilder, UnauthedEthStream,
-        UnauthedP2PStream, UnifiedStatus,
+        handshake::EthHandshake, BlockAccessLists, EthNetworkPrimitives, EthStream,
+        GetBlockAccessLists, GetBlockBodies, HelloMessageWithProtocols, P2PStream, StatusBuilder,
+        UnauthedEthStream, UnauthedP2PStream, UnifiedStatus,
     };
     use reth_eth_wire_types::{
         message::MAX_MESSAGE_SIZE, EthMessageID, NewPooledTransactionHashes72, RawCapabilityMessage,
@@ -1478,6 +1495,43 @@ mod tests {
                 ))
                 .unwrap();
             client_stream.flush().await.unwrap();
+
+            let msg = client_stream.next().await.unwrap().unwrap_err();
+            assert_eq!(msg.as_disconnected(), Some(DisconnectReason::ProtocolBreach));
+        });
+
+        let (tx, rx) = oneshot::channel();
+
+        tokio::task::spawn(async move {
+            let (incoming, _) = listener.accept().await.unwrap();
+            let session = builder.connect_incoming(incoming).await;
+            session.await;
+
+            tx.send(()).unwrap();
+        });
+
+        fut.await;
+        rx.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_unsolicited_response_disconnects_with_protocol_breach() {
+        let mut builder = SessionBuilder::default();
+        // BAL responses require eth/71.
+        builder.hello.protocols = vec![EthVersion::Eth71.into()];
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let local_addr = listener.local_addr().unwrap();
+
+        let fut = builder.with_client_stream(local_addr, async move |mut client_stream| {
+            assert_eq!(client_stream.version(), EthVersion::Eth71);
+            client_stream
+                .send(EthMessage::BlockAccessLists(RequestPair {
+                    request_id: 7,
+                    message: BlockAccessLists(vec![None; 1024]),
+                }))
+                .await
+                .unwrap();
 
             let msg = client_stream.next().await.unwrap().unwrap_err();
             assert_eq!(msg.as_disconnected(), Some(DisconnectReason::ProtocolBreach));

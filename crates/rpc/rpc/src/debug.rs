@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use futures::Stream;
 use jsonrpsee::core::RpcResult;
 use parking_lot::RwLock;
-use reth_chainspec::{ChainSpecProvider, EthChainSpec, EthereumHardforks};
+use reth_chainspec::{ChainSpecProvider, EthereumHardforks};
 use reth_engine_primitives::ConsensusEngineEvent;
 use reth_errors::RethError;
 use reth_evm::{block::BlockExecutor, ConfigureEvm, EvmEnvFor};
@@ -1032,7 +1032,7 @@ where
     }
 
     async fn debug_chain_config(&self) -> RpcResult<ChainConfig> {
-        Ok(self.provider().chain_spec().genesis().config.clone())
+        Ok(crate::chain_config::chain_config(&*self.provider().chain_spec()))
     }
 
     async fn debug_chaindb_property(&self, _property: String) -> RpcResult<()> {

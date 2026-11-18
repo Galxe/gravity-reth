@@ -611,21 +611,38 @@ impl AccountProof {
         self,
         slots: Vec<alloy_serde::JsonStorageKey>,
     ) -> alloy_rpc_types_eth::EIP1186AccountProofResponse {
+        self.into_eip1186_response_with(slots, false)
+    }
+
+    /// Builds the response with optional zero hashes for a non-existent account.
+    /// Existing accounts and proof nodes retain their original values.
+    pub fn into_eip1186_response_with(
+        self,
+        slots: Vec<alloy_serde::JsonStorageKey>,
+        zero_empty_account: bool,
+    ) -> alloy_rpc_types_eth::EIP1186AccountProofResponse {
+        let is_non_existent = self.info.is_none();
         let info = self.info.unwrap_or_default();
         alloy_rpc_types_eth::EIP1186AccountProofResponse {
             address: self.address,
             balance: info.balance,
-            code_hash: info.get_bytecode_hash(),
+            code_hash: if is_non_existent && zero_empty_account {
+                B256::ZERO
+            } else {
+                info.get_bytecode_hash()
+            },
             nonce: info.nonce,
-            storage_hash: self.storage_root,
+            storage_hash: if is_non_existent && zero_empty_account {
+                B256::ZERO
+            } else {
+                self.storage_root
+            },
             account_proof: normalize_eip1186_empty_trie_proof(self.proof),
             storage_proof: self
                 .storage_proofs
                 .into_iter()
-                .filter_map(|proof| {
-                    let input_slot = slots.iter().find(|s| s.as_b256() == proof.key)?;
-                    Some(proof.into_eip1186_proof(*input_slot))
-                })
+                .zip(slots)
+                .map(|(proof, slot)| proof.into_eip1186_proof(slot))
                 .collect(),
         }
     }
@@ -1141,7 +1158,17 @@ mod tests {
             storage_proofs: vec![StorageProof::new(slot).with_proof(sentinel())],
         };
 
+        let rpc_response = account
+            .clone()
+            .into_eip1186_response_with(vec![alloy_serde::JsonStorageKey::from(slot)], true);
+        assert_eq!(rpc_response.code_hash, B256::ZERO);
+        assert_eq!(rpc_response.storage_hash, B256::ZERO);
+
         let resp = account.into_eip1186_response(vec![alloy_serde::JsonStorageKey::from(slot)]);
+        assert_eq!(resp.code_hash, KECCAK_EMPTY);
+        assert_eq!(resp.storage_hash, EMPTY_ROOT_HASH);
+        assert_eq!(rpc_response.account_proof, resp.account_proof);
+        assert_eq!(rpc_response.storage_proof, resp.storage_proof);
 
         assert!(
             resp.account_proof.is_empty(),
@@ -1180,5 +1207,20 @@ mod tests {
 
         assert_eq!(resp.account_proof, multi);
         assert_eq!(resp.storage_proof[0].proof, single_non_sentinel);
+    }
+    #[cfg(feature = "eip1186")]
+    #[test]
+    fn eip1186_response_keeps_key_of_each_requested_slot() {
+        let slot = B256::with_last_byte(1);
+        let keys = vec![
+            alloy_serde::JsonStorageKey::Number(U256::from(1)),
+            alloy_serde::JsonStorageKey::Hash(slot),
+        ];
+        let mut account = AccountProof::new(Address::ZERO);
+        account.storage_proofs = vec![StorageProof::new(slot); 2];
+
+        let resp = account.into_eip1186_response(keys.clone());
+
+        assert_eq!(resp.storage_proof.iter().map(|p| p.key).collect::<Vec<_>>(), keys);
     }
 }

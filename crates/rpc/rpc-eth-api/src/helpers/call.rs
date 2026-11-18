@@ -555,16 +555,24 @@ pub trait Call:
     /// Returns default gas limit to use for `eth_call` and tracing RPC methods.
     ///
     /// Data access in default trait method implementations.
-    fn call_gas_limit(&self) -> u64;
+    fn call_gas_limit(&self) -> u64 {
+        self.eth_api_settings().gas_cap
+    }
 
     /// Returns the maximum number of blocks accepted for `eth_simulateV1`.
-    fn max_simulate_blocks(&self) -> u64;
+    fn max_simulate_blocks(&self) -> u64 {
+        self.eth_api_settings().max_simulate_blocks
+    }
 
     /// Returns whether `eth_simulateV1` should compute state roots.
-    fn compute_state_root_for_eth_simulate(&self) -> bool;
+    fn compute_state_root_for_eth_simulate(&self) -> bool {
+        self.eth_api_settings().compute_state_root_for_eth_simulate
+    }
 
     /// Returns the maximum memory the EVM can allocate per RPC request.
-    fn evm_memory_limit(&self) -> u64;
+    fn evm_memory_limit(&self) -> u64 {
+        self.eth_api_settings().evm_memory_limit
+    }
 
     /// Returns the max gas limit that the caller can afford given a transaction environment.
     fn caller_gas_allowance(
@@ -611,11 +619,7 @@ pub trait Call:
         R: Send + 'static,
         F: FnOnce(Self, StateProviderBox) -> Result<R, Self::Error> + Send + 'static,
     {
-        self.spawn_blocking_io_fut(async move |this| {
-            let this = this.with_view()?;
-            let state = this.state_at_block_id(at).await?;
-            f(this, state)
-        })
+        self.spawn_blocking_io_with_state(at, f)
     }
 
     /// Executes the `TxEnv` against the given [Database] without committing state
@@ -701,10 +705,7 @@ pub trait Call:
         F: FnOnce(Self, StateCacheDb) -> Result<R, Self::Error> + Send + 'static,
         R: Send + 'static,
     {
-        let at = at.into();
-        self.spawn_blocking_io_fut(async move |this| {
-            let this = this.with_view()?;
-            let state = this.state_at_block_id(at).await?;
+        self.spawn_blocking_io_with_state(at.into(), move |this, state| {
             let db = State::builder()
                 .with_database(StateProviderDatabase::new(StateProviderTraitObjWrapper(state)))
                 .build();
@@ -746,16 +747,19 @@ pub trait Call:
             + 'static,
         R: Send + 'static,
     {
-        self.spawn_blocking_io_fut(async move |this| {
-            let this = this.with_view()?;
+        async move {
+            let this = self.view().await?;
             let (evm_env, at) = this.evm_env_at(at).await?;
-            let state = this.state_at_block_id(at).await?;
-            let mut db = State::builder()
-                .with_database(StateProviderDatabase::new(StateProviderTraitObjWrapper(state)))
-                .build();
-            let (evm_env, tx_env) = this.prepare_call_env(evm_env, request, &mut db, overrides)?;
-            f(this, &mut db, evm_env, tx_env)
-        })
+            this.spawn_blocking_io_with_state(at, move |this, state| {
+                let mut db = State::builder()
+                    .with_database(StateProviderDatabase::new(StateProviderTraitObjWrapper(state)))
+                    .build();
+                let (evm_env, tx_env) =
+                    this.prepare_call_env(evm_env, request, &mut db, overrides)?;
+                f(this, &mut db, evm_env, tx_env)
+            })
+            .await
+        }
     }
 
     /// Retrieves the transaction if it exists and executes it.

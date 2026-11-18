@@ -55,6 +55,7 @@ pub(crate) fn eth_payload_attributes_amsterdam(timestamp: u64) -> PayloadAttribu
         withdrawals: Some(vec![]),
         parent_beacon_block_root: Some(B256::ZERO),
         slot_number: Some(timestamp),
+        ..Default::default()
     }
 }
 
