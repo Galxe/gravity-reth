@@ -66,3 +66,10 @@ pub mod mock;
 
 /// Verification of existing stored trie nodes against state data.
 pub mod verify;
+
+// Keep the retained upstream target-grouping regressions runnable without enabling its proof
+// backend.
+#[cfg(test)]
+#[path = "proof_v2/target.rs"]
+#[allow(dead_code)]
+mod proof_v2_target_tests;
