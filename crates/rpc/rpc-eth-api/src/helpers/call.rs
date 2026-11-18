@@ -106,8 +106,10 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                 .await
                 .map_err(|_| EthApiError::InternalEthError)?;
 
-            let base_block =
-                this.recovered_block(block).await?.ok_or(EthApiError::HeaderNotFound(block))?;
+            let base_block = this
+                .recovered_block(block)
+                .await?
+                .ok_or_else(|| EthApiError::other(EthSimulateError::BlockNotFound { block }))?;
             let parent = base_block.sealed_header().clone();
             let max_simulate_blocks = this.max_simulate_blocks();
 

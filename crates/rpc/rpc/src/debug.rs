@@ -37,6 +37,7 @@ use reth_storage_api::{
     TransactionVariant,
 };
 use reth_tasks::{cancel::is_cancelled, pool::BlockingTaskGuard, Runtime};
+use reth_transaction_pool::TransactionPool;
 use reth_trie_common::{updates::TrieUpdates, HashedPostState, HashedStorage};
 use revm::{database::states::bundle_state::BundleRetention, Database, DatabaseCommit};
 use revm_inspectors::tracing::{DebugInspector, TransactionContext};
@@ -867,6 +868,13 @@ where
         }
 
         Ok(bad_blocks)
+    }
+
+    /// Handler for `debug_clearTxpool`
+    async fn debug_clear_txpool(&self) -> RpcResult<()> {
+        let pool = self.eth_api().pool();
+        let _ = pool.remove_transactions(pool.all_transaction_hashes());
+        Ok(())
     }
 
     /// Handler for `debug_traceChain`
