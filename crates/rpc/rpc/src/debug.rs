@@ -2,7 +2,7 @@ use alloy_consensus::{constants::KECCAK_EMPTY, transaction::TxHashRef, BlockHead
 use alloy_eips::{eip2718::Encodable2718, BlockId, BlockNumberOrTag};
 use alloy_evm::{block::BlockExecutionError, env::BlockEnvironment, Evm};
 use alloy_genesis::ChainConfig;
-use alloy_primitives::{hex::decode, uint, Address, Bytes, B256, U64};
+use alloy_primitives::{hex::decode, uint, Address, Bytes, B256, U256, U64};
 use alloy_rlp::{Decodable, Encodable};
 use alloy_rpc_types::BlockTransactionsKind;
 use alloy_rpc_types_debug::ExecutionWitness;
@@ -10,11 +10,12 @@ use alloy_rpc_types_eth::{
     state::EvmOverrides, Account, AccountInfo, BlockError, Bundle, Index, StateContext,
 };
 use alloy_rpc_types_trace::geth::{
-    BlockTraceResult, GethDebugTracingCallOptions, GethDebugTracingOptions, GethTrace, TraceResult,
+    BlockTraceResult, ChainBlockTraceResult, GethDebugTracingCallOptions, GethDebugTracingOptions,
+    GethTrace, TraceResult,
 };
 use async_trait::async_trait;
 use futures::Stream;
-use jsonrpsee::core::RpcResult;
+use jsonrpsee::{core::RpcResult, PendingSubscriptionSink, SubscriptionMessage};
 use parking_lot::RwLock;
 use reth_chainspec::{ChainSpecProvider, EthereumHardforks};
 use reth_engine_primitives::ConsensusEngineEvent;
@@ -71,6 +72,7 @@ where
         let inner = Arc::new(DebugApiInner {
             eth_api,
             blocking_task_guard,
+            task_spawner: executor.clone(),
             bad_block_store: bad_block_store.clone(),
         });
 
@@ -179,6 +181,98 @@ where
                     }
                 }
 
+                Ok(results)
+            })
+            .await
+    }
+
+    /// Traces one committed block, retaining a transaction error followed by null entries.
+    async fn trace_chain_block(
+        &self,
+        eth_api: Eth,
+        block: Arc<RecoveredBlock<ProviderBlock<Eth::Provider>>>,
+        opts: GethDebugTracingOptions,
+    ) -> Result<Vec<Option<TraceResult>>, Eth::Error> {
+        let evm_env = eth_api.evm_env_for_header(block.sealed_block().sealed_header())?;
+        eth_api
+            .spawn_with_state_at_block(block.parent_hash(), move |eth_api, mut db| {
+                let count = block.body().transactions().len();
+                let mut results = Vec::with_capacity(count);
+                let mut transactions = block.transactions_recovered().enumerate().peekable();
+                let inspector = match DebugInspector::new(opts) {
+                    Ok(inspector) => inspector,
+                    Err(error) => {
+                        if let Some((_, tx)) = transactions.peek() {
+                            results.push(Some(TraceResult::Error {
+                                error: error.to_string(),
+                                tx_hash: Some(*tx.tx_hash()),
+                            }));
+                        }
+                        results.resize(count, None);
+                        return Ok(results)
+                    }
+                };
+                let config = eth_api.evm_config().chain_block_mode();
+                let ctx = config
+                    .context_for_block(block.sealed_block())
+                    .map_err(RethError::other)
+                    .map_err(Eth::Error::from_eth_err)?;
+                let block_env = evm_env.block_env.clone();
+                let mut evm = config.evm_with_env_and_inspector(&mut db, evm_env, inspector);
+                evm.disable_inspector();
+                let mut executor = config.create_executor_with_state(evm, ctx);
+                executor.apply_pre_execution_changes().map_err(Eth::Error::from_eth_err)?;
+                executor.evm_mut().enable_inspector();
+                while let Some((index, tx)) = transactions.next() {
+                    if is_cancelled() {
+                        return Err(EthApiError::InternalEthError.into())
+                    }
+                    let hash = *tx.tx_hash();
+                    let tx_env = config.tx_env(tx);
+                    let output = match executor.execute_transaction_without_commit(tx) {
+                        Ok(output) => output,
+                        Err(error) => {
+                            results.push(Some(TraceResult::Error {
+                                error: error.to_string(),
+                                tx_hash: Some(hash),
+                            }));
+                            break
+                        }
+                    };
+                    let (db, inspector, _) = executor.evm_mut().components_mut();
+                    let result = match inspector.get_result(
+                        Some(TransactionContext {
+                            block_hash: Some(block.hash()),
+                            tx_hash: Some(hash),
+                            tx_index: Some(index),
+                        }),
+                        &tx_env,
+                        &block_env,
+                        output.result(),
+                        db,
+                    ) {
+                        Ok(result) => result,
+                        Err(error) => {
+                            results.push(Some(TraceResult::Error {
+                                error: error.to_string(),
+                                tx_hash: Some(hash),
+                            }));
+                            break
+                        }
+                    };
+                    results.push(Some(TraceResult::Success { result, tx_hash: Some(hash) }));
+                    if let Some((_, next_tx)) = transactions.peek() {
+                        if let Err(error) = inspector.fuse() {
+                            results.push(Some(TraceResult::Error {
+                                error: error.to_string(),
+                                tx_hash: Some(*next_tx.tx_hash()),
+                            }));
+                            break
+                        }
+                        executor.commit_transaction(output);
+                    }
+                }
+                results.resize(count, None);
                 Ok(results)
             })
             .await
@@ -903,6 +997,94 @@ where
         Ok(())
     }
 
+    /// Handles the finite `debug_subscribe("traceChain", ...)` stream.
+    async fn debug_subscribe(
+        &self,
+        pending: PendingSubscriptionSink,
+        subscription: String,
+        start_exclusive: BlockNumberOrTag,
+        end_inclusive: BlockNumberOrTag,
+        opts: Option<GethDebugTracingOptions>,
+    ) -> jsonrpsee::core::SubscriptionResult {
+        if subscription != "traceChain" {
+            pending
+                .reject(EthApiError::InvalidParams(format!(
+                    "unsupported debug subscription: {subscription}"
+                )))
+                .await;
+            return Ok(())
+        }
+        let eth_api = match self.eth_api().consistent_view().await {
+            Ok(api) => api,
+            Err(error) => {
+                pending.reject(error).await;
+                return Ok(())
+            }
+        };
+        let mut endpoints = Vec::with_capacity(2);
+        for id in [BlockId::Number(start_exclusive), BlockId::Number(end_inclusive)] {
+            match eth_api.recovered_block(id).await {
+                Ok(Some(block)) => endpoints.push(block),
+                Ok(None) => {
+                    pending.reject(EthApiError::TracingBlockNotFound(id)).await;
+                    return Ok(())
+                }
+                Err(error) => {
+                    pending.reject(error).await;
+                    return Ok(())
+                }
+            }
+        }
+        let start = endpoints[0].number();
+        let end = endpoints[1].number();
+        if start >= end {
+            pending
+                .reject(EthApiError::InvalidParams(format!(
+                    "end block (#{end}) needs to come after start block (#{start})"
+                )))
+                .await;
+            return Ok(())
+        }
+        let sink = pending.accept().await?;
+        let this = self.clone();
+        self.inner.task_spawner.spawn_task(async move {
+            let opts = opts.unwrap_or_default();
+            for number in (start + 1)..=end {
+                if sink.is_closed() { break }
+                let block = match eth_api.recovered_block(BlockId::number(number)).await {
+                    Ok(Some(block)) => block,
+                    Ok(None) => { tracing::warn!(target: "rpc::debug", number, "Chain tracing block not found"); break }
+                    Err(error) => { tracing::warn!(target: "rpc::debug", number, %error, "Failed to load chain tracing block"); break }
+                };
+                let permit = tokio::select! {
+                    _ = sink.closed() => break,
+                    result = this.acquire_trace_permit() => match result {
+                        Ok(permit) => permit,
+                        Err(_) => break,
+                    },
+                };
+                let traces = tokio::select! {
+                    _ = sink.closed() => break,
+                    result = this.trace_chain_block(eth_api.clone(), block.clone(), opts.clone()) => match result {
+                        Ok(traces) => traces,
+                        Err(error) => { tracing::warn!(target: "rpc::debug", number, %error, "Failed to trace chain block"); break }
+                    },
+                };
+                drop(permit);
+                if traces.is_empty() && number != end { continue }
+                let result = ChainBlockTraceResult { block: U256::from(number), hash: block.hash(), traces };
+                let message = match SubscriptionMessage::new(sink.method_name(), sink.subscription_id(), &result) {
+                    Ok(message) => message,
+                    Err(error) => { tracing::warn!(target: "rpc::debug", %error, "Failed to serialize chain trace"); break }
+                };
+                if sink.send(message).await.is_err() { break }
+            }
+            // Keep a finite subscription explicitly unsubscribable after its terminal result.
+            sink.closed().await;
+        });
+        Ok(())
+    }
+
     /// Handler for `debug_traceChain`
     async fn debug_trace_chain(
         &self,
@@ -1263,6 +1445,8 @@ struct DebugApiInner<Eth: RpcNodeCore> {
     eth_api: Eth,
     // restrict the number of concurrent calls to blocking calls
     blocking_task_guard: BlockingTaskGuard,
+    /// Runtime for finite trace subscriptions.
+    task_spawner: Runtime,
     /// Cache for bad blocks.
     bad_block_store: BadBlockStore<BlockTy<Eth::Primitives>>,
 }

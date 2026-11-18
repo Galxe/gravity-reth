@@ -31,7 +31,10 @@ use reth_node_api::BlockBody;
 use reth_primitives_traits::{Recovered, RecoveredBlock};
 use reth_revm::{
     database::StateProviderDatabase,
-    db::{bal::EvmDatabaseError, State},
+    db::{
+        bal::{BalState, EvmDatabaseError},
+        State,
+    },
 };
 use reth_rpc_convert::{RpcConvert, RpcTxReq};
 use reth_rpc_eth_types::{
@@ -213,6 +216,11 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                     }
 
                     let chain_id = evm_env.cfg_env.chain_id;
+                    if this.provider().chain_spec().is_amsterdam_active_at_timestamp(
+                        evm_env.block_env.timestamp().saturating_to(),
+                    ) {
+                        db.bal_state = BalState::new().with_bal_builder();
+                    }
 
                     let ctx = this
                         .evm_config()

@@ -24,6 +24,7 @@ use alloy_consensus::{
 use alloy_eips::{
     eip4844::env_settings::EnvKzgSettings, eip7840::BlobParams, merge::SLOT_DURATION_SECS, BlockId,
 };
+use alloy_rlp::Encodable;
 use reth_chainspec::{ChainSpecProvider, EthChainSpec, EthereumHardforks};
 use reth_evm::ConfigureEvm;
 use reth_primitives_traits::{
@@ -494,13 +495,15 @@ where
         if transaction.is_eip4844() {
             // Since blob transactions are pulled instead of pushed, and only the consensus data is
             // kept in memory while the sidecar is cached on disk, there is no critical limit that
-            // should be enforced. Still, enforcing some cap on the input bytes. blob txs also must
+            // should be enforced. Still, enforcing some cap on the dynamic data. Blob txs must
             // be executable right away when they enter the pool.
-            let tx_input_len = transaction.input().len();
-            if tx_input_len > self.max_tx_input_bytes {
+            let tx_size = transaction.input().len().saturating_add(
+                transaction.access_list().map(|list| list.length()).unwrap_or_default(),
+            );
+            if tx_size > self.max_tx_input_bytes {
                 self.validation_metrics.rejected_oversized_data.increment(1);
                 return Err(InvalidPoolTransactionError::OversizedData {
-                    size: tx_input_len,
+                    size: tx_size,
                     limit: self.max_tx_input_bytes,
                 })
             }
@@ -2234,6 +2237,48 @@ mod tests {
             ),
             other => panic!("expected Invalid outcome, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn reject_blob_tx_with_oversized_access_list() {
+        use alloy_eips::{
+            eip2718::Encodable2718,
+            eip2930::{AccessList, AccessListItem},
+        };
+        use alloy_primitives::B256;
+        let max_tx_input_bytes = 512;
+        let provider = provider_with_genesis_block();
+        let validator = EthTransactionValidatorBuilder::new(provider, test_evm_config())
+            .with_max_tx_input_bytes(max_tx_input_bytes)
+            .build(InMemoryBlobStore::default());
+
+        let blob_tx_with_access_list = |storage_keys: usize| {
+            let access_list = AccessList(vec![AccessListItem {
+                address: Address::random(),
+                storage_keys: (0..storage_keys).map(|_| B256::random()).collect(),
+            }]);
+            let tx = TransactionBuilder::default()
+                .access_list(access_list)
+                .into_eip4844()
+                .try_into_recovered()
+                .unwrap();
+            let encoded_length = tx.encode_2718_len();
+            EthPooledTransaction::new(tx, encoded_length)
+        };
+
+        let is_oversized = |tx: &EthPooledTransaction| {
+            matches!(
+                validator.validate_stateless(TransactionOrigin::External, tx),
+                Err(InvalidPoolTransactionError::OversizedData { .. })
+            )
+        };
+
+        let small = blob_tx_with_access_list(1);
+        assert!(!is_oversized(&small));
+
+        let large = blob_tx_with_access_list(64);
+        assert!(large.input().is_empty());
+        assert!(is_oversized(&large));
     }
 
     /// Gravity disables EIP-4844 at the pool validator (`.no_eip4844()` in `EthereumPoolBuilder`).

@@ -417,6 +417,14 @@ pub trait EthApi<
         block_number: Option<BlockId>,
     ) -> RpcResult<EIP1186AccountProofResponse>;
 
+    /// Returns account and storage proofs for multiple targets in request order.
+    #[method(name = "getMultiProof")]
+    async fn get_multi_proof(
+        &self,
+        targets: Vec<(Address, Vec<B256>)>,
+        block_number: Option<BlockId>,
+    ) -> RpcResult<Vec<EIP1186AccountProofResponse>>;
+
     /// Returns the account's balance, nonce, and code.
     ///
     /// This is similar to `eth_getAccount` but does not return the storage root.
@@ -935,6 +943,15 @@ where
     ) -> RpcResult<EIP1186AccountProofResponse> {
         trace!(target: "rpc::eth", ?address, ?keys, ?block_number, "Serving eth_getProof");
         Ok(EthState::get_proof(self, address, keys, block_number)?.await?)
+    }
+
+    /// Handler for `eth_getMultiProof`.
+    async fn get_multi_proof(
+        &self,
+        targets: Vec<(Address, Vec<B256>)>,
+        block_number: Option<BlockId>,
+    ) -> RpcResult<Vec<EIP1186AccountProofResponse>> {
+        Ok(EthState::get_multi_proof(self, targets, block_number)?.await?)
     }
 
     /// Handler for: `eth_getAccountInfo`

@@ -143,3 +143,8 @@ test-utils = [
     "reth-tasks/test-utils",
     "reth-evm/test-utils",
 ]
+
+[[bench]]
+name = "tx_fetcher"
+harness = false
+required-features = ["test-utils"]

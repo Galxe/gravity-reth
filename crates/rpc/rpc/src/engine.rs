@@ -171,4 +171,12 @@ where
     ) -> Result<EIP1186AccountProofResponse> {
         self.eth.get_proof(address, keys, block_number).instrument(engine_span!()).await
     }
+
+    async fn get_multi_proof(
+        &self,
+        targets: Vec<(Address, Vec<B256>)>,
+        block_number: Option<BlockId>,
+    ) -> Result<Vec<EIP1186AccountProofResponse>> {
+        self.eth.get_multi_proof(targets, block_number).instrument(engine_span!()).await
+    }
 }

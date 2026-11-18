@@ -211,6 +211,8 @@ where
                 }
                 PrewarmTaskEvent::Terminate { block_output } => {
                     trace!(target: "engine::tree::prewarm", "Received termination signal");
+                    // A dropped handle may send teardown without first sending a stop event.
+                    self.ctx.terminate_execution.store(true, Ordering::Relaxed);
                     final_block_output = Some(block_output);
 
                     if finished_execution {
@@ -420,10 +422,10 @@ fn multiproof_targets_from_state(state: EvmState) -> (MultiProofTargets, usize) 
 
 /// The events the pre-warm task can handle.
 pub(super) enum PrewarmTaskEvent {
-    /// Forcefully terminate all remaining transaction execution.
+    /// Stops further worker transaction execution while allowing the task to save its cache.
     TerminateTransactionExecution,
-    /// Forcefully terminate the task on demand and update the shared cache with the given output
-    /// before exiting.
+    /// Stops workers, optionally saves the final cache, and exits. This also handles teardown
+    /// without a preceding `TerminateTransactionExecution`.
     Terminate {
         /// The final block state output.
         block_output: Option<BundleState>,

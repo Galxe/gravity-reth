@@ -320,3 +320,57 @@ async fn commit_condition_can_observe_executor_state_without_committing() {
     .await
     .unwrap();
 }
+
+#[tokio::test]
+async fn trace_chain_subscription_emits_traces_and_empty_terminal_block() {
+    use reth_chainspec::ChainSpecProvider;
+    use reth_rpc_api::DebugApiServer;
+    use serde_json::{json, Value};
+    use std::time::Duration;
+    let (provider, block, _) = fixture();
+    let header = Header {
+        number: 2,
+        parent_hash: block.hash(),
+        timestamp: 24,
+        gas_limit: 1_000_000,
+        base_fee_per_gas: Some(0),
+        excess_blob_gas: Some(0),
+        parent_beacon_block_root: Some(B256::ZERO),
+        ..Default::default()
+    };
+    provider.add_block(header.hash_slow(), Block { header, body: BlockBody::default() });
+    let config = EthEvmConfig::new(provider.chain_spec());
+    let api = EthApiBuilder::new(provider, testing_pool(), NoopNetwork::default(), config).build();
+    let runtime = Runtime::test();
+    let debug = DebugApi::new(api, BlockingTaskGuard::new(1), &runtime, futures::stream::empty());
+    let expected =
+        debug.debug_trace_block(alloy_eips::BlockId::number(1), Default::default()).await.unwrap();
+    let module = DebugApiServer::into_rpc(debug);
+    let invalid = json!({"jsonrpc":"2.0","id":1,"method":"debug_subscribe","params":["traceChain","0x1","0x1"]});
+    let (response, _) = module.raw_json_request(&invalid.to_string(), 4).await.unwrap();
+    let response: Value = serde_json::from_str(response.get()).unwrap();
+    assert!(response.get("error").is_some());
+    let request = json!({"jsonrpc":"2.0","id":2,"method":"debug_subscribe","params":["traceChain","0x0","0x2"]});
+    let (response, mut notifications) =
+        module.raw_json_request(&request.to_string(), 4).await.unwrap();
+    let response: Value = serde_json::from_str(response.get()).unwrap();
+    assert!(response.get("error").is_none(), "{response}");
+    let first =
+        tokio::time::timeout(Duration::from_secs(5), notifications.recv()).await.unwrap().unwrap();
+    let first: Value = serde_json::from_str(first.get()).unwrap();
+    assert_eq!(first["params"]["result"]["block"], "0x1");
+    assert_eq!(
+        first["params"]["result"]["traces"],
+        serde_json::to_value(expected.into_iter().map(Some).collect::<Vec<_>>()).unwrap()
+    );
+    let terminal =
+        tokio::time::timeout(Duration::from_secs(5), notifications.recv()).await.unwrap().unwrap();
+    let terminal: Value = serde_json::from_str(terminal.get()).unwrap();
+    assert_eq!(terminal["params"]["result"]["block"], "0x2");
+    assert!(terminal["params"]["result"]["traces"].as_array().unwrap().is_empty());
+    let unsubscribe =
+        json!({"jsonrpc":"2.0","id":3,"method":"debug_unsubscribe","params":[response["result"]]});
+    let (response, _) = module.raw_json_request(&unsubscribe.to_string(), 1).await.unwrap();
+    let response: Value = serde_json::from_str(response.get()).unwrap();
+    assert_eq!(response["result"], true);
+}
