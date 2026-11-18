@@ -131,9 +131,11 @@ Allows for re-execution of a block with the purpose of generating an execution w
 | ------ | ------------------------------------------------------------ |
 | RPC    | `{"method": "debug_executionWitness", "params": [block]}` |
 
+The `block` parameter accepts a block number, tag, hash, or EIP-1898 block object.
+
 ## `debug_executionWitnessByBlockHash`
 
-Similar to [`debug_executionWitness`](#debug_executionwitness), but accepts a block hash instead of a block number or tag.
+Similar to [`debug_executionWitness`](#debug_executionwitness), but retains a dedicated block-hash method for compatibility.
 
 | Client | Method invocation                                                      |
 | ------ | ---------------------------------------------------------------------- |
@@ -141,7 +143,7 @@ Similar to [`debug_executionWitness`](#debug_executionwitness), but accepts a bl
 
 ## `debug_intermediateRoots`
 
-Executes a block and returns a list of intermediate state roots: the state root after each transaction within the block. Accepts both canonical and non-canonical (bad or side) blocks by hash.
+Executes a block and returns a list of intermediate state roots: the state root after each transaction within the block. Accepts canonical blocks and bad blocks cached by the engine by hash. Execution stops at the first invalid transaction.
 
 | Client | Method invocation                                                   |
 | ------ | ------------------------------------------------------------------- |

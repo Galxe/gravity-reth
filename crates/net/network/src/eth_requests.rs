@@ -84,10 +84,6 @@ pub struct EthRequestHandler<C, N: NetworkPrimitives = EthNetworkPrimitives> {
     client: C,
     /// Blob store used for serving blob cell requests.
     blob_store: Box<dyn BlobStore>,
-    /// Used for reporting peers.
-    // TODO use to report spammers
-    #[expect(dead_code)]
-    peers: PeersHandle,
     /// Incoming request from the [`NetworkManager`](crate::NetworkManager).
     incoming_requests: ReceiverStream<IncomingEthRequest<N>>,
     /// Metrics for the eth request handler.
@@ -97,11 +93,10 @@ pub struct EthRequestHandler<C, N: NetworkPrimitives = EthNetworkPrimitives> {
 // === impl EthRequestHandler ===
 impl<C, N: NetworkPrimitives> EthRequestHandler<C, N> {
     /// Create a new instance
-    pub fn new(client: C, peers: PeersHandle, incoming: Receiver<IncomingEthRequest<N>>) -> Self {
+    pub fn new(client: C, _peers: PeersHandle, incoming: Receiver<IncomingEthRequest<N>>) -> Self {
         Self {
             client,
             blob_store: Box::<NoopBlobStore>::default(),
-            peers,
             incoming_requests: ReceiverStream::new(incoming),
             metrics: Default::default(),
         }

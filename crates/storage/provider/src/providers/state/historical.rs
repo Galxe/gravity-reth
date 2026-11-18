@@ -4,6 +4,7 @@ use crate::{
 };
 use alloy_eips::merge::EPOCH_SLOTS;
 use alloy_primitives::{keccak256, Address, BlockNumber, Bytes, StorageKey, StorageValue, B256};
+use parking_lot::Mutex;
 use reth_db_api::{
     cursor::{DbCursorRO, DbDupCursorRO},
     models::{storage_sharded_key::StorageShardedKey, ShardedKey},
@@ -37,13 +38,15 @@ use std::{fmt::Debug, ops::RangeInclusive};
 /// - [`tables::AccountChangeSets`]
 /// - [`tables::StorageChangeSets`]
 #[derive(Debug)]
-pub struct HistoricalStateProviderRef<'b, Provider> {
+pub struct HistoricalStateProviderRef<'b, Provider: DBProvider> {
     /// Database provider
     provider: &'b Provider,
     /// Block number is main index for the history state of accounts and storages.
     block_number: BlockNumber,
     /// Lowest blocks at which different parts of the state are available.
     lowest_available_blocks: LowestAvailableBlocks,
+    /// History cursors stay attached to this provider's transaction snapshot.
+    history_cursors: HistoryCursorsRef<'b, Provider::Tx>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -57,7 +60,12 @@ pub enum HistoryInfo {
 impl<'b, Provider: DBProvider + BlockNumReader> HistoricalStateProviderRef<'b, Provider> {
     /// Create new `StateProvider` for historical block number
     pub fn new(provider: &'b Provider, block_number: BlockNumber) -> Self {
-        Self { provider, block_number, lowest_available_blocks: Default::default() }
+        Self {
+            provider,
+            block_number,
+            lowest_available_blocks: Default::default(),
+            history_cursors: HistoryCursorsRef::Owned(HistoryCursors::new()),
+        }
     }
 
     /// Create new `StateProvider` for historical block number and lowest block numbers at which
@@ -67,7 +75,12 @@ impl<'b, Provider: DBProvider + BlockNumReader> HistoricalStateProviderRef<'b, P
         block_number: BlockNumber,
         lowest_available_blocks: LowestAvailableBlocks,
     ) -> Self {
-        Self { provider, block_number, lowest_available_blocks }
+        Self {
+            provider,
+            block_number,
+            lowest_available_blocks,
+            history_cursors: HistoryCursorsRef::Owned(HistoryCursors::new()),
+        }
     }
 
     /// Lookup an account in the `AccountsHistory` table
@@ -78,7 +91,20 @@ impl<'b, Provider: DBProvider + BlockNumReader> HistoricalStateProviderRef<'b, P
 
         // history key to search IntegerList of block number changesets.
         let history_key = ShardedKey::new(address, self.block_number);
+        if !self.tx().is_fixed_snapshot::<tables::AccountsHistory>() {
+            return self.history_info::<tables::AccountsHistory, _>(
+                &mut self.tx().cursor_read::<tables::AccountsHistory>()?,
+                history_key,
+                |key| key.key == address,
+                self.lowest_available_blocks.account_history_block_number,
+            )
+        }
+        let mut cached = self.history_cursors.get().accounts.lock();
+        if cached.is_none() {
+            *cached = Some(self.tx().cursor_read::<tables::AccountsHistory>()?);
+        }
         self.history_info::<tables::AccountsHistory, _>(
+            cached.as_mut().expect("history cursor initialized"),
             history_key,
             |key| key.key == address,
             self.lowest_available_blocks.account_history_block_number,
@@ -97,7 +123,20 @@ impl<'b, Provider: DBProvider + BlockNumReader> HistoricalStateProviderRef<'b, P
 
         // history key to search IntegerList of block number changesets.
         let history_key = StorageShardedKey::new(address, storage_key, self.block_number);
+        if !self.tx().is_fixed_snapshot::<tables::StoragesHistory>() {
+            return self.history_info::<tables::StoragesHistory, _>(
+                &mut self.tx().cursor_read::<tables::StoragesHistory>()?,
+                history_key,
+                |key| key.address == address && key.sharded_key.key == storage_key,
+                self.lowest_available_blocks.storage_history_block_number,
+            )
+        }
+        let mut cached = self.history_cursors.get().storages.lock();
+        if cached.is_none() {
+            *cached = Some(self.tx().cursor_read::<tables::StoragesHistory>()?);
+        }
         self.history_info::<tables::StoragesHistory, _>(
+            cached.as_mut().expect("history cursor initialized"),
             history_key,
             |key| key.address == address && key.sharded_key.key == storage_key,
             self.lowest_available_blocks.storage_history_block_number,
@@ -186,6 +225,7 @@ impl<'b, Provider: DBProvider + BlockNumReader> HistoricalStateProviderRef<'b, P
 
     fn history_info<T, K>(
         &self,
+        cursor: &mut impl DbCursorRO<T>,
         key: K,
         key_filter: impl Fn(&K) -> bool,
         lowest_available_block_number: Option<BlockNumber>,
@@ -193,8 +233,6 @@ impl<'b, Provider: DBProvider + BlockNumReader> HistoricalStateProviderRef<'b, P
     where
         T: Table<Key = K, Value = BlockNumberList>,
     {
-        let mut cursor = self.tx().cursor_read::<T>()?;
-
         // Lookup the history chunk in the history index. If they key does not appear in the
         // index, the first chunk for the next key will be returned so we filter out chunks that
         // have a different key.
@@ -431,7 +469,9 @@ impl<Provider: DBProvider + BlockNumReader + ChangesetRangeReader> StateProofPro
     }
 }
 
-impl<Provider: Sync> HashedPostStateProvider for HistoricalStateProviderRef<'_, Provider> {
+impl<Provider: DBProvider + Sync> HashedPostStateProvider
+    for HistoricalStateProviderRef<'_, Provider>
+{
     fn hashed_post_state(&self, bundle_state: &revm_database::BundleState) -> HashedPostState {
         HashedPostState::from_bundle_state::<KeccakKeyHasher>(bundle_state.state())
     }
@@ -507,7 +547,9 @@ impl<Provider: DBProvider + BlockNumReader> BytecodeReader
 /// State provider for a given block number.
 /// For more detailed description, see [`HistoricalStateProviderRef`].
 #[derive(Debug)]
-pub struct HistoricalStateProvider<Provider> {
+pub struct HistoricalStateProvider<Provider: DBProvider> {
+    /// Cursors must be dropped before the provider that owns their transaction.
+    history_cursors: HistoryCursors<Provider::Tx>,
     /// Database provider.
     provider: Provider,
     /// State at the block number is the main indexer of the state.
@@ -519,7 +561,12 @@ pub struct HistoricalStateProvider<Provider> {
 impl<Provider: DBProvider + BlockNumReader> HistoricalStateProvider<Provider> {
     /// Create new `StateProvider` for historical block number
     pub fn new(provider: Provider, block_number: BlockNumber) -> Self {
-        Self { provider, block_number, lowest_available_blocks: Default::default() }
+        Self {
+            provider,
+            block_number,
+            lowest_available_blocks: Default::default(),
+            history_cursors: HistoryCursors::new(),
+        }
     }
 
     /// Set the lowest block number at which the account history is available.
@@ -543,16 +590,51 @@ impl<Provider: DBProvider + BlockNumReader> HistoricalStateProvider<Provider> {
     /// Returns a new provider that takes the `TX` as reference
     #[inline(always)]
     const fn as_ref(&self) -> HistoricalStateProviderRef<'_, Provider> {
-        HistoricalStateProviderRef::new_with_lowest_available_blocks(
-            &self.provider,
-            self.block_number,
-            self.lowest_available_blocks,
-        )
+        HistoricalStateProviderRef {
+            provider: &self.provider,
+            block_number: self.block_number,
+            lowest_available_blocks: self.lowest_available_blocks,
+            history_cursors: HistoryCursorsRef::Borrowed(&self.history_cursors),
+        }
     }
 }
 
 // Delegates all provider impls to [HistoricalStateProviderRef]
 delegate_provider_impls!(HistoricalStateProvider<Provider> where [Provider: DBProvider + BlockNumReader + BlockHashReader + StorageSettingsCache + ChangeSetReader + StorageChangeSetReader + ChangesetRangeReader ]);
+
+/// Reuses one iterator per history table without extending the lifetime of its transaction.
+/// Separate locks allow account and storage queries to proceed independently.
+struct HistoryCursors<TX: DbTx> {
+    accounts: Mutex<Option<TX::Cursor<tables::AccountsHistory>>>,
+    storages: Mutex<Option<TX::Cursor<tables::StoragesHistory>>>,
+}
+
+impl<TX: DbTx> HistoryCursors<TX> {
+    const fn new() -> Self {
+        Self { accounts: Mutex::new(None), storages: Mutex::new(None) }
+    }
+}
+
+impl<TX: DbTx> Debug for HistoryCursors<TX> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HistoryCursors").finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug)]
+enum HistoryCursorsRef<'a, TX: DbTx> {
+    Owned(HistoryCursors<TX>),
+    Borrowed(&'a HistoryCursors<TX>),
+}
+
+impl<TX: DbTx> HistoryCursorsRef<'_, TX> {
+    const fn get(&self) -> &HistoryCursors<TX> {
+        match self {
+            Self::Owned(cursors) => cursors,
+            Self::Borrowed(cursors) => cursors,
+        }
+    }
+}
 
 /// Lowest blocks at which different parts of the state are available.
 /// They may be [Some] if pruning is enabled.
@@ -631,6 +713,100 @@ mod tests {
             + reth_storage_api::ChangesetRangeReader,
     >() {
         assert_state_provider::<HistoricalStateProvider<T>>();
+    }
+
+    #[test]
+    fn cached_history_cursors_reseek_after_backward_and_exhausted_queries() -> eyre::Result<()> {
+        let factory = create_test_provider_factory();
+        let provider = factory.provider_rw()?;
+        for (address, blocks) in [(ADDRESS, vec![3, 7]), (HIGHER_ADDRESS, vec![5, 9])] {
+            let history = BlockNumberList::new(blocks)?;
+            provider.tx_ref().put::<tables::AccountsHistory>(
+                ShardedKey::new(address, u64::MAX),
+                history.clone(),
+            )?;
+            for slot in [STORAGE, B256::repeat_byte(2)] {
+                provider.tx_ref().put::<tables::StoragesHistory>(
+                    StorageShardedKey::new(address, slot, u64::MAX),
+                    history.clone(),
+                )?;
+            }
+        }
+        provider.tx_ref().put::<tables::BlockBodyIndices>(0, Default::default())?;
+        provider.commit()?;
+
+        let view = factory.capture_view(true)?;
+        let history = HistoricalStateProvider::new(view.provider()?, 4);
+        for address in
+            [HIGHER_ADDRESS, ADDRESS, Address::repeat_byte(0xff), ADDRESS, HIGHER_ADDRESS]
+        {
+            let fresh = HistoricalStateProviderRef::new(&history.provider, 4);
+            assert_eq!(
+                history.as_ref().account_history_lookup(address)?,
+                fresh.account_history_lookup(address)?
+            );
+            for slot in [B256::repeat_byte(2), STORAGE, B256::repeat_byte(0xff), STORAGE] {
+                assert_eq!(
+                    history.as_ref().storage_history_lookup(address, slot)?,
+                    fresh.storage_history_lookup(address, slot)?
+                );
+            }
+        }
+        assert!(history.history_cursors.accounts.lock().is_some());
+        assert!(history.history_cursors.storages.lock().is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn cached_history_cursors_keep_the_provider_snapshot() -> eyre::Result<()> {
+        let factory = create_test_provider_factory();
+        let write_history = |last| -> eyre::Result<()> {
+            let provider = factory.provider_rw()?;
+            let blocks = BlockNumberList::new([3, last])?;
+            provider.tx_ref().put::<tables::AccountsHistory>(
+                ShardedKey::new(ADDRESS, u64::MAX),
+                blocks.clone(),
+            )?;
+            provider.tx_ref().put::<tables::StoragesHistory>(
+                StorageShardedKey::new(ADDRESS, STORAGE, u64::MAX),
+                blocks,
+            )?;
+            provider.tx_ref().put::<tables::BlockBodyIndices>(0, Default::default())?;
+            provider.commit()?;
+            Ok(())
+        };
+        write_history(7)?;
+        let view = factory.capture_view(true)?;
+        let history = HistoricalStateProvider::new(view.provider()?, 4);
+        assert_eq!(history.as_ref().account_history_lookup(ADDRESS)?, HistoryInfo::InChangeset(7));
+        write_history(9)?;
+
+        // A cold storage cursor must use the same old snapshot as the already-cached account one.
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                scope.spawn(|| {
+                    assert_eq!(
+                        history.as_ref().account_history_lookup(ADDRESS).unwrap(),
+                        HistoryInfo::InChangeset(7)
+                    );
+                    assert_eq!(
+                        history.as_ref().storage_history_lookup(ADDRESS, STORAGE).unwrap(),
+                        HistoryInfo::InChangeset(7)
+                    );
+                });
+            }
+        });
+        let latest = factory.provider()?;
+        let latest = HistoricalStateProviderRef::new(&latest, 4);
+        assert_eq!(latest.account_history_lookup(ADDRESS)?, HistoryInfo::InChangeset(9));
+        assert_eq!(latest.storage_history_lookup(ADDRESS, STORAGE)?, HistoryInfo::InChangeset(9));
+        // Uncaptured providers keep their live-read semantics instead of pinning an iterator.
+        write_history(11)?;
+        assert_eq!(latest.account_history_lookup(ADDRESS)?, HistoryInfo::InChangeset(11));
+        assert_eq!(latest.storage_history_lookup(ADDRESS, STORAGE)?, HistoryInfo::InChangeset(11));
+        assert!(latest.history_cursors.get().accounts.lock().is_none());
+        assert!(latest.history_cursors.get().storages.lock().is_none());
+        Ok(())
     }
 
     #[test]

@@ -633,7 +633,7 @@ mod tests {
         let intermediate_cap = Capability::new_static("foo", 1);
         let intermediate = Protocol::new(intermediate_cap.clone(), 3);
         let snap = Capability::snap(SnapVersion::V1);
-        let eth = Capability::eth(EthVersion::Eth69);
+        let eth = Capability::eth_69();
         let local_capabilities =
             vec![EthVersion::Eth69.into(), intermediate, Protocol::snap(SnapVersion::V1)];
         let peer_capabilities = vec![eth, intermediate_cap, snap.clone()];
@@ -652,8 +652,7 @@ mod tests {
         let snap = Capability::snap(SnapVersion::V1);
         let local_capabilities =
             vec![EthVersion::Eth69.into(), intermediate, Protocol::snap(SnapVersion::V1)];
-        let peer_capabilities =
-            vec![Capability::eth(EthVersion::Eth69), intermediate_cap.clone(), snap.clone()];
+        let peer_capabilities = vec![Capability::eth_69(), intermediate_cap.clone(), snap.clone()];
 
         let shared = SharedCapabilities::try_new(local_capabilities, peer_capabilities).unwrap();
         let intermediate_id = shared.relative_message_id(&intermediate_cap, 1).unwrap();
