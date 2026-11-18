@@ -63,6 +63,13 @@ pub enum RecordedOp {
         /// Proof targets returned via the callback as `(key, min_len)` pairs.
         proof_targets: Vec<(B256, u8)>,
     },
+    /// Records arena leaf updates with typed parent context.
+    ArenaUpdateLeaves {
+        /// The leaf updates that were applied.
+        updates: Vec<(B256, LeafUpdateRecord)>,
+        /// Proof targets as `(key, optional parent path length)` pairs.
+        proof_targets: Vec<(B256, Option<usize>)>,
+    },
     /// Records an `update_subtrie_hashes` call.
     UpdateSubtrieHashes,
     /// Records a `root()` call.

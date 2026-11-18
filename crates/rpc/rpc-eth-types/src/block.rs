@@ -1,12 +1,13 @@
 //! Block related types for RPC API.
 
-use std::sync::Arc;
+use std::{ops::Deref, sync::Arc};
 
 use alloy_consensus::{
     transaction::{TransactionMeta, TxHashRef},
     BlockHeader, TxReceipt,
 };
 use alloy_primitives::TxHash;
+use reth_execution_types::ExecutionOutcome;
 use reth_primitives_traits::{
     Block, BlockBody, BlockTy, IndexedTx, NodePrimitives, ReceiptTy, Recovered, RecoveredBlock,
     SealedBlock,
@@ -114,7 +115,7 @@ pub struct BlockAndReceipts<N: NodePrimitives> {
     /// The recovered block.
     pub block: Arc<RecoveredBlock<BlockTy<N>>>,
     /// The receipts for the block.
-    pub receipts: Arc<Vec<ReceiptTy<N>>>,
+    pub receipts: SharedReceipts<ReceiptTy<N>>,
 }
 
 impl<N: NodePrimitives> BlockAndReceipts<N> {
@@ -123,7 +124,7 @@ impl<N: NodePrimitives> BlockAndReceipts<N> {
         block: Arc<RecoveredBlock<BlockTy<N>>>,
         receipts: Arc<Vec<ReceiptTy<N>>>,
     ) -> Self {
-        Self { block, receipts }
+        Self { block, receipts: SharedReceipts::Receipts(receipts) }
     }
 
     /// Finds a transaction by hash and returns it along with its corresponding receipt.
@@ -156,13 +157,64 @@ impl<N: NodePrimitives> BlockAndReceipts<N> {
         C: RpcConvert<Primitives = N>,
     {
         let (tx, receipt) = self.find_transaction_and_receipt_by_hash(tx_hash)?;
-        convert_transaction_receipt(
-            self.block.as_ref(),
-            self.receipts.as_ref(),
-            tx,
-            receipt,
-            converter,
-        )
+        convert_transaction_receipt(self.block.as_ref(), &self.receipts, tx, receipt, converter)
+    }
+}
+
+/// Shared receipts, either loaded directly or held by a block's execution output.
+#[derive(Debug, Clone)]
+pub enum SharedReceipts<R> {
+    /// Receipts loaded from storage or a locally built block.
+    Receipts(Arc<Vec<R>>),
+    /// Receipts belonging to an in-memory executed block, with at most one receipt batch.
+    ExecutionOutput(Arc<ExecutionOutcome<R>>),
+}
+
+impl<R> Deref for SharedReceipts<R> {
+    type Target = [R];
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Receipts(receipts) => receipts,
+            Self::ExecutionOutput(output) => {
+                debug_assert!(
+                    output.receipts.len() <= 1,
+                    "an executed block contains at most one receipt batch"
+                );
+                output.receipts.first().map_or(&[], Vec::as_slice)
+            }
+        }
+    }
+}
+
+impl<R: Clone> SharedReceipts<R> {
+    /// Returns owned receipts for consumers that need to move them into a converter.
+    pub fn into_vec(self) -> Vec<R> {
+        match self {
+            Self::Receipts(receipts) => Arc::unwrap_or_clone(receipts),
+            Self::ExecutionOutput(output) => match Arc::try_unwrap(output) {
+                Ok(output) => output.receipts.into_iter().flatten().collect(),
+                Err(output) => output.receipts.iter().flatten().cloned().collect(),
+            },
+        }
+    }
+}
+
+impl<R> From<Arc<Vec<R>>> for SharedReceipts<R> {
+    fn from(receipts: Arc<Vec<R>>) -> Self {
+        Self::Receipts(receipts)
+    }
+}
+
+impl<R: Clone> From<Arc<ExecutionOutcome<R>>> for SharedReceipts<R> {
+    fn from(output: Arc<ExecutionOutcome<R>>) -> Self {
+        if output.receipts.len() <= 1 {
+            Self::ExecutionOutput(output)
+        } else {
+            // Executed blocks have a single batch. Preserve the former flattened result for
+            // callers that construct a local pending block from a multi-block outcome.
+            Self::Receipts(Arc::new(output.receipts.iter().flatten().cloned().collect()))
+        }
     }
 }
 
@@ -195,4 +247,38 @@ where
         )
         .map(|mut receipts| receipts.pop())
         .transpose()
+}
+
+#[cfg(test)]
+mod shared_receipts_tests {
+    use super::*;
+
+    #[test]
+    fn execution_outcome_receipts_share_the_output_and_preserve_values() {
+        let output =
+            Arc::new(ExecutionOutcome { receipts: vec![vec![1u64, 2]], ..Default::default() });
+        let receipts = SharedReceipts::from(Arc::clone(&output));
+        let SharedReceipts::ExecutionOutput(shared_output) = &receipts else { panic!() };
+        assert!(Arc::ptr_eq(shared_output, &output));
+        assert_eq!(&*receipts, &[1, 2]);
+        assert_eq!(receipts.into_vec(), vec![1, 2]);
+        assert_eq!(output.receipts, vec![vec![1, 2]]);
+    }
+
+    #[test]
+    fn empty_execution_outcome_has_no_receipts() {
+        let receipts = SharedReceipts::from(Arc::new(ExecutionOutcome::<u64>::default()));
+        assert!(receipts.is_empty());
+        assert!(receipts.into_vec().is_empty());
+    }
+
+    #[test]
+    fn multi_block_execution_outcome_keeps_the_legacy_flattened_receipts() {
+        let receipts = SharedReceipts::from(Arc::new(ExecutionOutcome {
+            receipts: vec![vec![1u64], vec![2]],
+            ..Default::default()
+        }));
+        assert_eq!(&*receipts, &[1, 2]);
+        assert_eq!(receipts.into_vec(), vec![1, 2]);
+    }
 }

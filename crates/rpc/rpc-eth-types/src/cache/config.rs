@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use reth_rpc_server_types::constants::cache::{
     DEFAULT_BAL_CACHE_MAX_LEN, DEFAULT_BLOCK_CACHE_MAX_BYTES, DEFAULT_BLOCK_CACHE_MAX_LEN,
-    DEFAULT_CACHE_IDLE_TIMEOUT, DEFAULT_CONCURRENT_DB_REQUESTS, DEFAULT_HEADER_CACHE_MAX_LEN,
-    DEFAULT_MAX_CACHED_TX_HASHES, DEFAULT_RECEIPT_CACHE_MAX_BYTES, DEFAULT_RECEIPT_CACHE_MAX_LEN,
+    DEFAULT_CACHE_IDLE_TIMEOUT, DEFAULT_CONCURRENT_DB_REQUESTS, DEFAULT_MAX_CACHED_TX_HASHES,
+    DEFAULT_RECEIPT_CACHE_MAX_BYTES, DEFAULT_RECEIPT_CACHE_MAX_LEN,
 };
 
 /// Settings for the [`EthStateCache`](super::EthStateCache).
@@ -21,16 +21,12 @@ pub struct EthStateCacheConfig {
     pub idle_timeout: Duration,
     /// Max number of blocks in cache.
     ///
-    /// Default is 5000.
-    pub max_blocks: u32,
-    /// Max number receipts in cache.
-    ///
-    /// Default is 2000.
-    pub max_receipts: u32,
-    /// Max number of headers in cache.
-    ///
     /// Default is 1000.
-    pub max_headers: u32,
+    pub max_blocks: u32,
+    /// Max number of blocks' receipts in cache.
+    ///
+    /// Default is 500.
+    pub max_receipts: u32,
     /// Max number of revm BALs in cache.
     ///
     /// Default is 1000.
@@ -51,7 +47,6 @@ impl Default for EthStateCacheConfig {
             idle_timeout: DEFAULT_CACHE_IDLE_TIMEOUT,
             max_blocks: DEFAULT_BLOCK_CACHE_MAX_LEN,
             max_receipts: DEFAULT_RECEIPT_CACHE_MAX_LEN,
-            max_headers: DEFAULT_HEADER_CACHE_MAX_LEN,
             max_bals: DEFAULT_BAL_CACHE_MAX_LEN,
             max_concurrent_db_requests: DEFAULT_CONCURRENT_DB_REQUESTS,
             max_cached_tx_hashes: DEFAULT_MAX_CACHED_TX_HASHES,

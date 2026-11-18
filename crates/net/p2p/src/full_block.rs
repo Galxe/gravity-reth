@@ -3,7 +3,7 @@ use crate::{
     block_access_lists::client::{BalRequirement, BlockAccessListsClient},
     bodies::client::{BodiesClient, SingleBodyRequest},
     download::DownloadClient,
-    error::PeerRequestResult,
+    error::{PeerRequestResult, RequestError},
     headers::client::{HeadersClient, SingleHeaderRequest},
     priority::Priority,
     BlockClient,
@@ -513,6 +513,16 @@ where
     Client: BlockClient<Header: Debug + BlockHeader + Sealable + Clone + Hash + Eq>
         + BlockAccessListsClient,
 {
+    /// Returns the block hash the requested range starts at (inclusive).
+    pub const fn start_hash(&self) -> B256 {
+        self.blocks.start_hash()
+    }
+
+    /// Returns the number of requested blocks.
+    pub const fn count(&self) -> u64 {
+        self.blocks.count()
+    }
+
     fn start_access_lists_request_if_possible(&mut self) {
         let requirement = match &self.access_lists {
             OptionalBlockAccessListsState::WaitingForBlocks { requirement } => *requirement,
@@ -1093,6 +1103,22 @@ where
     Net: NetworkPrimitives,
 {
     type Block = Net::Block;
+}
+
+impl<Net> BlockAccessListsClient for NoopFullBlockClient<Net>
+where
+    Net: NetworkPrimitives,
+{
+    type Output = futures::future::Ready<PeerRequestResult<BlockAccessLists>>;
+
+    fn get_block_access_lists_with_priority_and_requirement(
+        &self,
+        _hashes: Vec<B256>,
+        _priority: Priority,
+        _requirement: BalRequirement,
+    ) -> Self::Output {
+        futures::future::ready(Err(RequestError::UnsupportedCapability))
+    }
 }
 
 impl<Net> Default for NoopFullBlockClient<Net> {

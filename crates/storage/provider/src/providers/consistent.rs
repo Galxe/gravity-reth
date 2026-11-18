@@ -18,7 +18,9 @@ use alloy_primitives::{
 use reth_chain_state::{BlockState, CanonicalInMemoryState, MemoryOverlayStateProviderRef};
 use reth_chainspec::ChainInfo;
 use reth_db_api::models::{AccountBeforeTx, BlockNumberAddress, StoredBlockBodyIndices};
-use reth_execution_types::{BundleStateInit, ExecutionOutcome, RevertsInit};
+use reth_execution_types::{
+    BundleStateInit, ExecutionOutcome, RecoveredBlockAndExecutionOutput, RevertsInit,
+};
 use reth_node_types::{BlockTy, HeaderTy, ReceiptTy, TxTy};
 use reth_primitives_traits::{
     Account, BlockBody, RecoveredBlock, SealedHeader, SealedOrRecoveredBlock, StorageEntry,
@@ -998,15 +1000,18 @@ impl<N: ProviderNodeTypes> BlockReader for ConsistentProvider<N> {
         )
     }
 
-    fn pending_block(&self) -> ProviderResult<Option<RecoveredBlock<Self::Block>>> {
-        Ok(self.pending_state().map(|state| state.block_ref().recovered_block().clone()))
+    fn pending_block(&self) -> ProviderResult<Option<Arc<RecoveredBlock<Self::Block>>>> {
+        Ok(self.pending_state().map(|state| Arc::clone(&state.block_ref().recovered_block)))
     }
 
     fn pending_block_and_receipts(
         &self,
-    ) -> ProviderResult<Option<(RecoveredBlock<Self::Block>, Vec<Self::Receipt>)>> {
+    ) -> ProviderResult<Option<RecoveredBlockAndExecutionOutput<Self::Block, Self::Receipt>>> {
         Ok(self.pending_state().map(|state| {
-            (state.block_ref().recovered_block().clone(), state.executed_block_receipts())
+            RecoveredBlockAndExecutionOutput::new(
+                Arc::clone(&state.block_ref().recovered_block),
+                Arc::clone(&state.block_ref().execution_output),
+            )
         }))
     }
 

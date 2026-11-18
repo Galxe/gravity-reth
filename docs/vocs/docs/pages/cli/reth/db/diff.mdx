@@ -39,7 +39,7 @@ Database:
           Maximum number of background jobs for compaction and flush. Higher values increase parallelism but use more CPU. Default: 14
 
       --db.max-open-files <MAX_OPEN_FILES>
-          Maximum number of open files. Lower values if you hit OS file descriptor limits. Default: 10000
+          Maximum number of open files. Overrides the automatic budget shared across `RocksDB` shards. Without an override, hosts with at least 128K descriptors per instance keep all SST files open; other hosts use a finite cache capped at 10000 files per instance, leaving descriptor headroom
 
       --db.max-write-buffer-number <MAX_WRITE_BUFFER_NUMBER>
           Maximum number of write buffers (memtables). More buffers allow absorbing write spikes but use more memory. Default: 6

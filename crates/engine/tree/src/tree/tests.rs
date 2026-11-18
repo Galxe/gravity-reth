@@ -12,9 +12,12 @@ use alloy_rpc_types_engine::{
     ForkchoiceUpdateError,
 };
 use assert_matches::assert_matches;
+use futures::FutureExt;
 use reth_chain_state::{test_utils::TestBlockBuilder, BlockState};
 use reth_chainspec::{ChainSpec, HOLESKY, MAINNET};
-use reth_engine_primitives::{EngineApiValidator, ForkchoiceStatus, NoopInvalidBlockHook};
+use reth_engine_primitives::{
+    ConsensusEngineHandle, EngineApiValidator, ForkchoiceStatus, NoopInvalidBlockHook,
+};
 use reth_ethereum_consensus::EthBeaconConsensus;
 use reth_ethereum_engine_primitives::EthEngineTypes;
 use reth_ethereum_primitives::{Block, EthPrimitives};
@@ -27,7 +30,15 @@ use std::{
     str::FromStr,
     sync::mpsc::{channel, Receiver, Sender},
 };
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc::unbounded_channel, oneshot};
+use tracing::{
+    span::{Attributes, Id},
+    Subscriber,
+};
+use tracing_subscriber::{
+    layer::{Context, Layer, SubscriberExt},
+    registry::LookupSpan,
+};
 
 /// Mock engine validator for tests
 #[derive(Debug, Clone)]
@@ -291,6 +302,7 @@ impl TestHarness {
             .tree
             .on_engine_message(FromEngine::Request(
                 BeaconEngineMessage::ForkchoiceUpdated {
+                    cause: tracing::Span::none(),
                     state: fcu_state,
                     payload_attrs: None,
                     tx,
@@ -550,6 +562,7 @@ async fn test_engine_request_during_backfill() {
         .tree
         .on_engine_message(FromEngine::Request(
             BeaconEngineMessage::ForkchoiceUpdated {
+                cause: tracing::Span::none(),
                 state: ForkchoiceState {
                     head_block_hash: B256::random(),
                     safe_block_hash: B256::random(),
@@ -627,6 +640,7 @@ async fn test_holesky_payload() {
         .tree
         .on_engine_message(FromEngine::Request(
             BeaconEngineMessage::NewPayload {
+                cause: tracing::Span::none(),
                 payload: ExecutionData {
                     payload: payload.clone().into(),
                     sidecar: ExecutionPayloadSidecar::none(),
@@ -1068,6 +1082,7 @@ async fn test_fcu_with_canonical_ancestor_updates_latest_block() {
         .tree
         .on_engine_message(FromEngine::Request(
             BeaconEngineMessage::ForkchoiceUpdated {
+                cause: tracing::Span::none(),
                 state: ForkchoiceState {
                     head_block_hash: ancestor_block.hash(),
                     safe_block_hash: B256::ZERO,
@@ -1550,4 +1565,69 @@ fn test_exceeds_backfill_run_threshold_uses_configured_value() {
     assert!(!test_harness.tree.exceeds_backfill_run_threshold(10, 110));
     assert!(test_harness.tree.exceeds_backfill_run_threshold(10, 111));
     assert!(!test_harness.tree.exceeds_backfill_run_threshold(10, 9));
+}
+
+proptest::proptest! {
+    // Each case constructs a full engine harness.
+    #![proptest_config(proptest::test_runner::Config::with_cases(32))]
+
+    #[test]
+    fn engine_messages_keep_sender_parent_on_another_thread(
+        requests in proptest::collection::vec((0..2usize, 0..3u8), 1..16),
+    ) {
+        let parents = EngineSpanParents::default();
+        let dispatch = tracing::Dispatch::new(tracing_subscriber::registry().with(parents.clone()));
+        tracing::dispatcher::with_default(&dispatch, || {
+            let (tx, mut rx) = unbounded_channel();
+            let engine = ConsensusEngineHandle::<EthEngineTypes>::new(tx);
+            let callers = [tracing::info_span!("view_a"), tracing::info_span!("view_b")];
+            let payload = || ExecutionData {
+                payload: ExecutionPayloadV1::from_block_slow(&Block::default()).into(),
+                sidecar: ExecutionPayloadSidecar::none(),
+            };
+            for &(caller, kind) in &requests {
+                callers[caller].in_scope(|| match kind {
+                    0 => assert!(engine.new_payload(payload()).now_or_never().is_none()),
+                    1 => assert!(engine
+                        .fork_choice_updated(ForkchoiceState::default(), None)
+                        .now_or_never()
+                        .is_none()),
+                    _ => assert!(engine
+                        .reth_new_payload(payload(), false, false)
+                        .now_or_never()
+                        .is_none()),
+                });
+            }
+            let messages = (0..requests.len()).map(|_| rx.try_recv().unwrap()).collect::<Vec<_>>();
+            let expected = requests.iter().map(|&(caller, _)| callers[caller].id()).collect::<Vec<_>>();
+            std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    let worker_dispatch = tracing::Dispatch::new(tracing_subscriber::registry());
+                    tracing::dispatcher::with_default(&worker_dispatch, || {
+                        let mut harness = TestHarness::new(MAINNET.clone());
+                        let unrelated = tracing::info_span!("worker_background");
+                        let _entered = unrelated.enter();
+                        for message in messages {
+                            let _ = harness.tree.on_engine_message(
+                                FromEngine::Request(EngineApiRequest::Beacon(message)),
+                            ).unwrap();
+                            assert_eq!(tracing::Span::current().id(), unrelated.id());
+                        }
+                    });
+                }).join().unwrap();
+            });
+            assert_eq!(*parents.0.lock().unwrap(), expected);
+        });
+    }
+}
+
+#[derive(Clone, Default)]
+struct EngineSpanParents(Arc<std::sync::Mutex<Vec<Option<Id>>>>);
+
+impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for EngineSpanParents {
+    fn on_new_span(&self, attrs: &Attributes<'_>, id: &Id, ctx: Context<'_, S>) {
+        if matches!(attrs.metadata().name(), "on_new_payload" | "on_forkchoice_updated") {
+            self.0.lock().unwrap().push(ctx.span(id).unwrap().parent().map(|parent| parent.id()));
+        }
+    }
 }

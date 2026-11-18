@@ -34,7 +34,7 @@ pub struct RpcStateCacheArgs {
     )]
     pub max_receipts: u32,
 
-    /// Max number of headers in cache.
+    /// Legacy compatibility option; the RPC header cache is no longer used.
     #[arg(
         long = "rpc-cache.max-headers",
         alias = "rpc-cache.max-envs",

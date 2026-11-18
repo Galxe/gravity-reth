@@ -1,5 +1,6 @@
+use alloc::sync::Arc;
 use alloy_primitives::{Address, B256, U256};
-use reth_primitives_traits::{Account, Bytecode};
+use reth_primitives_traits::{Account, Block, Bytecode, RecoveredBlock};
 use revm::database::{states::BundleState, BundleAccount};
 
 pub use alloy_evm::block::BlockExecutionResult;
@@ -61,5 +62,39 @@ impl<T> Default for BlockExecutionOutput<T> {
             },
             state: Default::default(),
         }
+    }
+}
+
+/// A recovered block and its shared execution output.
+///
+/// The execution output contains the block's receipts.
+#[derive(Debug)]
+pub struct RecoveredBlockAndExecutionOutput<B: Block, R> {
+    block: Arc<RecoveredBlock<B>>,
+    execution_output: Arc<crate::ExecutionOutcome<R>>,
+}
+
+impl<B: Block, R> RecoveredBlockAndExecutionOutput<B, R> {
+    /// Creates a block with its execution output.
+    pub const fn new(
+        block: Arc<RecoveredBlock<B>>,
+        execution_output: Arc<crate::ExecutionOutcome<R>>,
+    ) -> Self {
+        Self { block, execution_output }
+    }
+
+    /// Returns the recovered block.
+    pub const fn block(&self) -> &Arc<RecoveredBlock<B>> {
+        &self.block
+    }
+
+    /// Returns the execution output.
+    pub const fn execution_output(&self) -> &Arc<crate::ExecutionOutcome<R>> {
+        &self.execution_output
+    }
+
+    /// Consumes the container and returns its shared parts.
+    pub fn into_parts(self) -> (Arc<RecoveredBlock<B>>, Arc<crate::ExecutionOutcome<R>>) {
+        (self.block, self.execution_output)
     }
 }

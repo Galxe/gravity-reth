@@ -28,7 +28,7 @@ Options:
 
           Max number of instances is 200. It is chosen in a way so that it's not possible to have port numbers that conflict with each other.
 
-          Changes to the following port numbers: - `DISCOVERY_PORT`: default + `instance` - 1 - `AUTH_PORT`: default + `instance` * 100 - 100 - `HTTP_RPC_PORT`: default - `instance` + 1 - `WS_RPC_PORT`: default + `instance` * 2 - 2 - `IPC_PATH`: default + `-instance`
+          Changes to the following port numbers: - `DISCOVERY_PORT`: default + `instance` - 1 - `AUTH_PORT`: default + `instance` * 100 - 100 - `HTTP_RPC_PORT`: default - `instance` + 1 - `WS_RPC_PORT`: default + `instance` * 2 - 2 - `IPC_PATH`: default + `-instance` - `AUTH_IPC_PATH`: default + `-instance`, unless `--auth-ipc.path` is set
 
       --with-unused-ports
           Sets all ports to unused, allowing the OS to choose random unused ports when sockets are bound.
@@ -420,9 +420,9 @@ RPC:
           Enable auth engine API over IPC
 
       --auth-ipc.path <AUTH_IPC_PATH>
-          Filename for auth IPC socket/pipe within the datadir
+          Path for the auth IPC socket/pipe. Explicit paths are used unchanged.
 
-          [default: <CACHE_DIR>_engine_api.ipc]
+          If omitted, uses `/tmp/reth_engine_api.ipc`, with `-<instance>` appended when `--instance` is set. Applications can override this default via `DefaultRpcServerArgs`.
 
       --disable-auth-server
           Disable the auth/engine API server.
@@ -558,15 +558,15 @@ RPC State Cache:
       --rpc-cache.max-blocks <MAX_BLOCKS>
           Max number of blocks in cache
 
-          [default: 5000]
+          [default: 1000]
 
       --rpc-cache.max-receipts <MAX_RECEIPTS>
           Max number receipts in cache
 
-          [default: 2000]
+          [default: 500]
 
       --rpc-cache.max-headers <MAX_HEADERS>
-          Max number of headers in cache
+          Legacy compatibility option; the RPC header cache is no longer used
 
           [default: 1000]
 
@@ -594,7 +594,7 @@ Gas Price Oracle:
       --gpo.ignoreprice <IGNORE_PRICE>
           Gas Price below which gpo will ignore transactions
 
-          [default: 0]
+          [default: 2]
 
       --gpo.maxprice <MAX_PRICE>
           Maximum transaction priority fee(or gasprice before London Fork) to be recommended by gpo
@@ -872,7 +872,7 @@ Database:
           Maximum number of background jobs for compaction and flush. Higher values increase parallelism but use more CPU. Default: 14
 
       --db.max-open-files <MAX_OPEN_FILES>
-          Maximum number of open files. Lower values if you hit OS file descriptor limits. Default: 10000
+          Maximum number of open files. Overrides the automatic budget shared across `RocksDB` shards. Without an override, hosts with at least 128K descriptors per instance keep all SST files open; other hosts use a finite cache capped at 10000 files per instance, leaving descriptor headroom
 
       --db.max-write-buffer-number <MAX_WRITE_BUFFER_NUMBER>
           Maximum number of write buffers (memtables). More buffers allow absorbing write spikes but use more memory. Default: 6

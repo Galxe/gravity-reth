@@ -16,7 +16,7 @@ use alloy_rpc_types_trace::{
     tracerequest::TraceCallRequest,
 };
 use async_trait::async_trait;
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 use jsonrpsee::core::RpcResult;
 use reth_chainspec::ChainSpecProvider;
 use reth_evm::ConfigureEvm;
@@ -118,6 +118,7 @@ where
                     Ok(trace_res)
                 },
             )
+            .boxed()
             .await
     }
 

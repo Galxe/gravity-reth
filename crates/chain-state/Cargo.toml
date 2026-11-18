@@ -20,7 +20,6 @@ reth-metrics.workspace = true
 reth-ethereum-primitives.workspace = true
 reth-primitives-traits = { workspace = true, features = ["dashmap"] }
 reth-storage-api.workspace = true
-reth-tasks = { workspace = true, features = ["rayon"], optional = true }
 reth-trie.workspace = true
 
 # ethereum
@@ -42,7 +41,6 @@ derive_more.workspace = true
 metrics.workspace = true
 parking_lot.workspace = true
 pin-project.workspace = true
-rayon = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
 
 # optional deps for test-utils
@@ -85,9 +83,9 @@ test-utils = [
     "reth-primitives-traits/test-utils",
     "reth-trie/test-utils",
     "reth-ethereum-primitives/test-utils",
-    "reth-tasks?/test-utils",
 ]
-rayon = ["dep:rayon", "dep:reth-tasks"]
+# Kept for downstream feature compatibility.
+rayon = []
 
 [[bench]]
 name = "canonical_hashes_range"
