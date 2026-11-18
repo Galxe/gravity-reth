@@ -458,4 +458,16 @@ mod tests {
         let enr = Enr::builder().ip4("10.0.0.1".parse().unwrap()).tcp4(30303).build(&sk).unwrap();
         assert!(NodeRecord::try_from(&enr).is_err());
     }
+    #[test]
+    #[cfg(feature = "secp256k1")]
+    fn tcp_less_enr_converts_with_port_zero() {
+        // A discovery-only ENR (no tcp key, e.g. a devp2p bootnode) must convert with tcp port 0.
+        let sk = secp256k1::SecretKey::from_byte_array(&[1u8; 32]).unwrap();
+        let enr = Enr::builder().ip4("1.2.3.4".parse().unwrap()).udp4(30301).build(&sk).unwrap();
+
+        let record = NodeRecord::try_from(&enr).unwrap();
+
+        assert_eq!(record.tcp_port, 0);
+        assert_eq!(record.udp_port, 30301);
+    }
 }

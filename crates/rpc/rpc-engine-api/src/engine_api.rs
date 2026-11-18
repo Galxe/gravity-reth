@@ -5,6 +5,7 @@ use alloy_eips::{
     eip1898::BlockHashOrNumber,
     eip4844::{BlobAndProofV1, BlobAndProofV2, BlobCellsAndProofsV1},
     eip4895::Withdrawals,
+    eip7594::BlobCellMask,
     eip7685::RequestsOrHash,
 };
 use alloy_primitives::{BlockHash, BlockNumber, Sealable, B128, B256, U64};
@@ -390,7 +391,7 @@ where
         custody_columns: Option<B128>,
     ) -> EngineApiResult<ForkchoiceUpdated> {
         if let Some(custody_columns) = custody_columns {
-            self.inner.cell_custody.set(custody_columns);
+            self.inner.cell_custody.set_from_engine_api(custody_columns);
         }
         self.validate_and_execute_forkchoice(EngineApiMessageVersion::V4, state, payload_attrs)
             .await
@@ -1011,6 +1012,8 @@ where
         versioned_hashes: Vec<B256>,
         indices_bitarray: B128,
     ) -> EngineApiResult<Option<Vec<Option<BlobCellsAndProofsV1>>>> {
+        // Engine API bitvectors encode the lowest cell indices in the first byte.
+        let cell_mask = BlobCellMask::from_bits(u128::from_le_bytes(indices_bitarray.into()));
         let current_timestamp =
             SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs();
         if !self.inner.chain_spec.is_amsterdam_active_at_timestamp(current_timestamp) {
@@ -1030,7 +1033,7 @@ where
 
         self.inner
             .tx_pool
-            .get_blobs_for_versioned_hashes_v4(&versioned_hashes, indices_bitarray)
+            .get_blobs_for_versioned_hashes_v4(&versioned_hashes, cell_mask)
             .map(Some)
             .map_err(|err| EngineApiError::Internal(Box::new(err)))
     }
@@ -1815,8 +1818,17 @@ mod tests {
             TestNetworkInfo { syncing: true },
         );
 
-        let res = api.get_blobs_v4_metered(vec![B256::ZERO], B128::from(1u128));
+        let res = api.get_blobs_v4_metered(vec![B256::ZERO], B128::from(1u128.to_le_bytes()));
         assert_matches!(res, Ok(None));
+    }
+
+    #[test]
+    fn engine_bitvector_uses_little_endian_cell_indices() {
+        for index in [0, 7, 8, 63, 64, 127] {
+            let wire_mask = B128::from((1u128 << index).to_le_bytes());
+            let mask = BlobCellMask::from_bits(u128::from_le_bytes(wire_mask.into()));
+            assert_eq!(mask.selected_indices().collect::<Vec<_>>(), vec![index]);
+        }
     }
 
     #[tokio::test]
@@ -1853,7 +1865,8 @@ mod tests {
             safe_block_hash: B256::ZERO,
             finalized_block_hash: B256::ZERO,
         };
-        let custody_columns = B128::from(0b1010u128);
+        let custody_columns = B128::from(0b1010u128.to_le_bytes());
+        let expected_custody_columns = B128::from(0b1010u128);
 
         let api_task = tokio::spawn(async move {
             api.fork_choice_updated_v4(state, None, Some(custody_columns)).await
@@ -1870,7 +1883,7 @@ mod tests {
             }
             other => panic!("unexpected engine message: {other:?}"),
         };
-        assert_eq!(cell_custody.get(), custody_columns);
+        assert_eq!(cell_custody.get(), expected_custody_columns);
 
         response_tx
             .send(Ok(OnForkChoiceUpdated::valid(PayloadStatus::from_status(
@@ -1882,7 +1895,7 @@ mod tests {
             .await
             .expect("api task should not panic")
             .expect("forkchoiceUpdatedV4 should succeed");
-        assert_eq!(cell_custody.get(), custody_columns);
+        assert_eq!(cell_custody.get(), expected_custody_columns);
     }
 
     #[tokio::test]
@@ -1927,7 +1940,8 @@ mod tests {
             parent_beacon_block_root: None,
             ..Default::default()
         };
-        let custody_columns = B128::from(0b1010u128);
+        let custody_columns = B128::from(0b1010u128.to_le_bytes());
+        let expected_custody_columns = B128::from(0b1010u128);
 
         let api_task = tokio::spawn(async move {
             api.fork_choice_updated_v4(state, Some(payload_attributes), Some(custody_columns)).await
@@ -1947,7 +1961,7 @@ mod tests {
             }
             other => panic!("unexpected engine message: {other:?}"),
         };
-        assert_eq!(cell_custody.get(), custody_columns);
+        assert_eq!(cell_custody.get(), expected_custody_columns);
 
         response_tx
             .send(Ok(OnForkChoiceUpdated::valid(PayloadStatus::from_status(

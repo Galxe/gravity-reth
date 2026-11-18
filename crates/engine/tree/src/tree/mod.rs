@@ -6,7 +6,7 @@ use crate::{
     tree::{error::InsertPayloadError, metrics::EngineApiMetrics, payload_validator::TreeCtx},
 };
 use alloy_consensus::BlockHeader;
-use alloy_eips::{eip1898::BlockWithParent, merge::EPOCH_SLOTS, BlockNumHash, NumHash};
+use alloy_eips::{eip1898::BlockWithParent, BlockNumHash, NumHash};
 use alloy_primitives::{map::B256Map, B256};
 use alloy_rpc_types_engine::{
     ForkchoiceState, PayloadStatus, PayloadStatusEnum, PayloadValidationError,
@@ -93,7 +93,9 @@ pub mod state;
 /// E.g.: Local head `block.number` is 100 and the forkchoice head `block.number` is 133 (more than
 /// an epoch has slots), then this exceeds the threshold at which the pipeline should be used to
 /// backfill this gap.
-pub(crate) const MIN_BLOCKS_FOR_PIPELINE_RUN: u64 = EPOCH_SLOTS;
+#[cfg(test)]
+pub(crate) const MIN_BLOCKS_FOR_PIPELINE_RUN: u64 =
+    reth_engine_primitives::DEFAULT_BACKFILL_RUN_THRESHOLD;
 
 /// The max number of blocks to persist in batch.
 /// Memory is released after blocks are persisted in a batch, so limiting the batch size
@@ -2733,7 +2735,7 @@ where
     /// If the `local_tip` is greater than the `block`, then this will return false.
     #[inline]
     const fn exceeds_backfill_run_threshold(&self, local_tip: u64, block: u64) -> bool {
-        block > local_tip && block - local_tip > MIN_BLOCKS_FOR_PIPELINE_RUN
+        block > local_tip && block - local_tip > self.config.backfill_run_threshold()
     }
 
     /// Returns how far the local tip is from the given block. If the local tip is at the same

@@ -130,7 +130,7 @@ where
 
         let mut txs = Vec::with_capacity(block.transaction_count());
         for tx in block.transactions_recovered() {
-            txs.push(self.evm_config.tx_env(tx));
+            txs.push(self.evm_config.tx_env(crate::ParallelTxEnv::new(tx)));
         }
 
         let txs = Arc::new(txs);

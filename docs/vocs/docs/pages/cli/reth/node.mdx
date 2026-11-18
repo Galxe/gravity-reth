@@ -612,7 +612,7 @@ Gas Price Oracle:
       --rpc.send-raw-transaction-sync-timeout <SECONDS>
           Timeout for `send_raw_transaction_sync` RPC method
 
-          [default: 30s]
+          [default: 30]
 
       --testing.skip-invalid-transactions
           Skip invalid transactions in `testing_buildBlockV1` instead of failing.
@@ -911,6 +911,13 @@ Dev testnet:
           Parses strings using [`humantime::parse_duration`]
           --dev.block-time 12s
 
+      --dev.finality-depth <FINALITY_DEPTH>
+          Number of confirmations required before a block is finalized.
+
+          A depth of `1` finalizes the canonical head immediately.
+
+          [default: 64]
+
       --dev.payload-wait-time <PAYLOAD_WAIT_TIME>
           Time to wait after initiating payload building before resolving.
 
@@ -1043,6 +1050,12 @@ Engine:
           Configure the target number of blocks to keep in memory
 
           [default: 0]
+
+      --engine.backfill-threshold <BACKFILL_RUN_THRESHOLD>
+          Largest live block download gap before backfill; values above 1024 are clamped
+
+          [env: RETH_ENGINE_BACKFILL_THRESHOLD=]
+          [default: 32]
 
       --engine.invalid-header-cache-hit-eviction-threshold <INVALID_HEADER_HIT_EVICTION_THRESHOLD>
           Configure how many cache hits an invalid header can accumulate before it is evicted and reprocessed.

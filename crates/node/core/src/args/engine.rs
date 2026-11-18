@@ -6,9 +6,10 @@ use clap::{
 };
 use eyre::ensure;
 use reth_engine_primitives::{
-    TreeConfig, DEFAULT_INVALID_HEADER_HIT_EVICTION_THRESHOLD, DEFAULT_MAX_PROOF_TASK_CONCURRENCY,
-    DEFAULT_MULTIPROOF_TASK_CHUNK_SIZE, DEFAULT_PERSISTENCE_BACKPRESSURE_THRESHOLD,
-    DEFAULT_SPARSE_TRIE_MAX_HOT_ACCOUNTS, DEFAULT_SPARSE_TRIE_MAX_HOT_SLOTS,
+    TreeConfig, DEFAULT_BACKFILL_RUN_THRESHOLD, DEFAULT_INVALID_HEADER_HIT_EVICTION_THRESHOLD,
+    DEFAULT_MAX_PROOF_TASK_CONCURRENCY, DEFAULT_MULTIPROOF_TASK_CHUNK_SIZE,
+    DEFAULT_PERSISTENCE_BACKPRESSURE_THRESHOLD, DEFAULT_SPARSE_TRIE_MAX_HOT_ACCOUNTS,
+    DEFAULT_SPARSE_TRIE_MAX_HOT_SLOTS,
 };
 use std::{num::NonZeroUsize, sync::OnceLock, time::Duration};
 
@@ -28,6 +29,7 @@ pub struct DefaultEngineValues {
     persistence_threshold: u64,
     persistence_backpressure_threshold: u64,
     memory_block_buffer_target: u64,
+    backfill_run_threshold: u64,
     invalid_header_hit_eviction_threshold: u8,
     legacy_state_root_task_enabled: bool,
     state_cache_disabled: bool,
@@ -84,6 +86,12 @@ impl DefaultEngineValues {
     /// Set the default memory block buffer target
     pub const fn with_memory_block_buffer_target(mut self, v: u64) -> Self {
         self.memory_block_buffer_target = v;
+        self
+    }
+
+    /// Set the largest gap closed by live block downloads before backfill.
+    pub const fn with_backfill_run_threshold(mut self, value: u64) -> Self {
+        self.backfill_run_threshold = value;
         self
     }
 
@@ -265,6 +273,7 @@ impl Default for DefaultEngineValues {
             persistence_threshold: DEFAULT_PERSISTENCE_THRESHOLD,
             persistence_backpressure_threshold: DEFAULT_PERSISTENCE_BACKPRESSURE_THRESHOLD,
             memory_block_buffer_target: DEFAULT_MEMORY_BLOCK_BUFFER_TARGET,
+            backfill_run_threshold: DEFAULT_BACKFILL_RUN_THRESHOLD,
             invalid_header_hit_eviction_threshold: DEFAULT_INVALID_HEADER_HIT_EVICTION_THRESHOLD,
             legacy_state_root_task_enabled: false,
             state_cache_disabled: false,
@@ -328,6 +337,10 @@ pub struct EngineArgs {
     /// Configure the target number of blocks to keep in memory.
     #[arg(long = "engine.memory-block-buffer-target", default_value_t = DefaultEngineValues::get_global().memory_block_buffer_target)]
     pub memory_block_buffer_target: u64,
+
+    /// Largest live block download gap before backfill; values above 1024 are clamped.
+    #[arg(long = "engine.backfill-threshold", env = "RETH_ENGINE_BACKFILL_THRESHOLD", default_value_t = DefaultEngineValues::get_global().backfill_run_threshold)]
+    pub backfill_run_threshold: u64,
 
     /// Configure how many cache hits an invalid header can accumulate before it is evicted and
     /// reprocessed.
@@ -480,7 +493,7 @@ pub struct EngineArgs {
     #[arg(
         long = "engine.state-root-task-timeout",
         value_parser = humantime::parse_duration,
-        default_value = DefaultEngineValues::get_global().state_root_task_timeout.as_deref().unwrap_or("4s"),
+        default_value = Resettable::from(DefaultEngineValues::get_global().state_root_task_timeout.as_ref().map(|v| v.as_str().into())),
     )]
     pub state_root_task_timeout: Option<Duration>,
 
@@ -543,6 +556,7 @@ impl Default for EngineArgs {
             persistence_threshold,
             persistence_backpressure_threshold: _,
             memory_block_buffer_target,
+            backfill_run_threshold,
             invalid_header_hit_eviction_threshold,
             legacy_state_root_task_enabled,
             state_cache_disabled,
@@ -576,6 +590,7 @@ impl Default for EngineArgs {
             persistence_threshold,
             persistence_backpressure_threshold: None,
             memory_block_buffer_target,
+            backfill_run_threshold,
             invalid_header_hit_eviction_threshold,
             legacy_state_root_task_enabled,
             state_root_task_compare_updates,
@@ -648,6 +663,7 @@ impl EngineArgs {
             .with_persistence_backpressure_threshold(self.persistence_backpressure_threshold())
             .with_persistence_threshold(self.persistence_threshold)
             .with_memory_block_buffer_target(self.memory_block_buffer_target)
+            .with_backfill_run_threshold(self.backfill_run_threshold)
             .with_invalid_header_hit_eviction_threshold(self.invalid_header_hit_eviction_threshold)
             .with_legacy_state_root(self.legacy_state_root_task_enabled)
             .without_state_cache(self.state_cache_disabled)
@@ -822,6 +838,7 @@ mod tests {
             persistence_threshold: 100,
             persistence_backpressure_threshold: Some(101),
             memory_block_buffer_target: 50,
+            backfill_run_threshold: DEFAULT_BACKFILL_RUN_THRESHOLD,
             invalid_header_hit_eviction_threshold: 7,
             legacy_state_root_task_enabled: true,
             caching_and_prewarming_enabled: true,

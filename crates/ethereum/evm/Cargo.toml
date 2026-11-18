@@ -37,6 +37,7 @@ alloy-rpc-types-engine.workspace = true
 alloy-sol-types.workspace = true
 
 # Misc
+rayon = { workspace = true, optional = true }
 parking_lot = { workspace = true, optional = true }
 derive_more = { workspace = true, optional = true }
 tracing.workspace = true
@@ -51,6 +52,7 @@ alloy-genesis.workspace = true
 config-from-env = ["gravity-primitives/config-from-env"]
 default = ["std"]
 std = [
+    "dep:rayon",
     "alloy-consensus/std",
     "alloy-eips/std",
     "alloy-genesis/std",

@@ -1,6 +1,7 @@
 use crate::Nibbles;
 use alloc::{sync::Arc, vec::Vec};
 use alloy_primitives::map::{B256Map, B256Set};
+use core::ops::Range;
 
 /// Collection of mutable prefix sets.
 #[derive(Clone, Default, Debug)]
@@ -229,6 +230,34 @@ impl PrefixSet {
         false
     }
 
+    /// Returns whether a key lies in the half-open range `[start, end)`.
+    ///
+    /// Like [`Self::contains`], keeps a position hint that can also rewind for earlier ranges.
+    #[inline]
+    pub fn contains_range(&mut self, range: Range<&Nibbles>) -> bool {
+        if range.start >= range.end {
+            return false
+        }
+        if self.all {
+            return true
+        }
+        let keys = self.keys.as_deref().map(Vec::as_slice).unwrap_or_default();
+        while self.index > 0 && &keys[self.index] >= range.end {
+            self.index -= 1;
+        }
+        for (index, key) in keys[self.index..].iter().enumerate() {
+            if key >= range.start && key < range.end {
+                self.index += index;
+                return true
+            }
+            if key >= range.end {
+                self.index += index;
+                return false
+            }
+        }
+        false
+    }
+
     /// Returns an iterator over reference to _all_ nibbles regardless of cursor position.
     pub fn iter(&self) -> core::slice::Iter<'_, Nibbles> {
         self.slice().iter()
@@ -266,6 +295,37 @@ impl<'a> IntoIterator for &'a PrefixSet {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn range_contains_rewinds_and_uses_half_open_bounds() {
+        let keys = [
+            Nibbles::from_nibbles([1, 1]),
+            Nibbles::from_nibbles([2]),
+            Nibbles::from_nibbles([9, 0]),
+            Nibbles::from_nibbles([15, 14]),
+        ];
+        let mut set = PrefixSetMut::default();
+        for key in keys {
+            set.insert(key);
+        }
+        let mut set = set.freeze();
+        for start in (0u8..16).rev() {
+            for end in 0u8..16 {
+                let start = Nibbles::from_nibbles([start]);
+                let end = Nibbles::from_nibbles([end]);
+                set.contains(&Nibbles::from_nibbles([15]));
+                assert_eq!(
+                    set.contains_range(&start..&end),
+                    keys.iter().any(|key| key >= &start && key < &end)
+                );
+            }
+        }
+        let empty = Nibbles::default();
+        assert!(!PrefixSet::default().contains_range(&empty..&Nibbles::from_nibbles([15])));
+        let mut all = PrefixSetMut::all().freeze();
+        assert!(!all.contains_range(&empty..&empty));
+        assert!(all.contains_range(&empty..&Nibbles::from_nibbles([1])));
+    }
 
     #[test]
     fn empty_prefix_sets_do_not_allocate() {

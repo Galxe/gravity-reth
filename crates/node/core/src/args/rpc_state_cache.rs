@@ -1,3 +1,4 @@
+use super::DefaultRpcServerArgs;
 use clap::Args;
 use reth_rpc_server_types::constants::cache::{
     DEFAULT_BAL_CACHE_MAX_LEN, DEFAULT_BLOCK_CACHE_MAX_BYTES, DEFAULT_BLOCK_CACHE_MAX_LEN,
@@ -11,25 +12,25 @@ use std::time::Duration;
 #[command(next_help_heading = "RPC State Cache")]
 pub struct RpcStateCacheArgs {
     /// Maximum estimated block payload bytes. Zero disables caching.
-    #[arg(long = "rpc-cache.max-blocks-bytes", value_parser = parse_cache_bytes, default_value_t = DEFAULT_BLOCK_CACHE_MAX_BYTES)]
+    #[arg(long = "rpc-cache.max-blocks-bytes", value_parser = parse_cache_bytes, default_value_t = DefaultRpcServerArgs::get_global().rpc_state_cache.max_blocks_bytes)]
     pub max_blocks_bytes: usize,
     /// Maximum estimated receipt payload bytes. Zero disables caching.
-    #[arg(long = "rpc-cache.max-receipts-bytes", value_parser = parse_cache_bytes, default_value_t = DEFAULT_RECEIPT_CACHE_MAX_BYTES)]
+    #[arg(long = "rpc-cache.max-receipts-bytes", value_parser = parse_cache_bytes, default_value_t = DefaultRpcServerArgs::get_global().rpc_state_cache.max_receipts_bytes)]
     pub max_receipts_bytes: usize,
     /// Evict unused payloads after this duration. Zero disables expiration.
-    #[arg(long = "rpc-cache.idle-timeout", value_parser = humantime::parse_duration, default_value = "1h")]
+    #[arg(long = "rpc-cache.idle-timeout", value_parser = humantime::parse_duration, default_value = humantime::format_duration(DefaultRpcServerArgs::get_global().rpc_state_cache.idle_timeout).to_string())]
     pub idle_timeout: Duration,
     /// Max number of blocks in cache.
     #[arg(
         long = "rpc-cache.max-blocks",
-        default_value_t = DEFAULT_BLOCK_CACHE_MAX_LEN,
+        default_value_t = DefaultRpcServerArgs::get_global().rpc_state_cache.max_blocks,
     )]
     pub max_blocks: u32,
 
     /// Max number receipts in cache.
     #[arg(
         long = "rpc-cache.max-receipts",
-        default_value_t = DEFAULT_RECEIPT_CACHE_MAX_LEN,
+        default_value_t = DefaultRpcServerArgs::get_global().rpc_state_cache.max_receipts,
     )]
     pub max_receipts: u32,
 
@@ -37,28 +38,28 @@ pub struct RpcStateCacheArgs {
     #[arg(
         long = "rpc-cache.max-headers",
         alias = "rpc-cache.max-envs",
-        default_value_t = DEFAULT_HEADER_CACHE_MAX_LEN,
+        default_value_t = DefaultRpcServerArgs::get_global().rpc_state_cache.max_headers,
     )]
     pub max_headers: u32,
 
     /// Max number of revm block access lists in cache.
     #[arg(
         long = "rpc-cache.max-bals",
-        default_value_t = DEFAULT_BAL_CACHE_MAX_LEN,
+        default_value_t = DefaultRpcServerArgs::get_global().rpc_state_cache.max_bals,
     )]
     pub max_bals: u32,
 
     /// Max number of concurrent database requests.
     #[arg(
         long = "rpc-cache.max-concurrent-db-requests",
-        default_value_t = DEFAULT_CONCURRENT_DB_REQUESTS,
+        default_value_t = DefaultRpcServerArgs::get_global().rpc_state_cache.max_concurrent_db_requests,
     )]
     pub max_concurrent_db_requests: usize,
 
     /// Maximum number of transaction hashes to cache for transaction lookups.
     #[arg(
         long = "rpc-cache.max-cached-tx-hashes",
-        default_value_t = DEFAULT_MAX_CACHED_TX_HASHES,
+        default_value_t = DefaultRpcServerArgs::get_global().rpc_state_cache.max_cached_tx_hashes,
     )]
     pub max_cached_tx_hashes: u32,
 }

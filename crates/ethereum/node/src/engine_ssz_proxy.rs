@@ -7,6 +7,7 @@
 use alloy_consensus::{Transaction, TxEnvelope};
 use alloy_eips::{
     eip2718::Decodable2718,
+    eip7594::BlobCellMask,
     eip7685::{Requests, RequestsOrHash},
 };
 use alloy_primitives::{Bytes, B128, B256};
@@ -469,7 +470,8 @@ where
                     format!("blob request too large: {}", hashes.len()),
                 )
             }
-            match blob_store.get_by_versioned_hashes_v4(&hashes, indices_bitarray) {
+            let cell_mask = BlobCellMask::from_bits(u128::from_le_bytes(indices_bitarray.into()));
+            match blob_store.get_by_versioned_hashes_v4(&hashes, cell_mask) {
                 Ok(response) => ssz_response(response),
                 Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
             }

@@ -163,6 +163,8 @@ pub struct TxPoolValidationMetrics {
     /// Number of stateless validation attempts rejected due to a gas limit below the intrinsic or
     /// floor gas cost.
     pub rejected_intrinsic_gas_too_low: Counter,
+    /// Number of transactions whose intrinsic regular or floor gas exceeds its cap.
+    pub rejected_intrinsic_gas_too_high: Counter,
     /// Number of validation attempts rejected by blob count or blob sidecar checks.
     pub invalid_4844: Counter,
 }
