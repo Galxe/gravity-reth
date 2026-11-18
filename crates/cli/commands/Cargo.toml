@@ -104,6 +104,9 @@ proptest = { workspace = true, optional = true }
 arbitrary = { workspace = true, optional = true }
 proptest-arbitrary-interop = { workspace = true, optional = true }
 
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
 [dev-dependencies]
 alloy-genesis.workspace = true
 reth-ethereum-cli.workspace = true

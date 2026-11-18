@@ -1381,6 +1381,24 @@ impl<N: NodePrimitives> StaticFileProvider<N> {
         self.static_files_min_block.read().get(&segment).map(|range| range.end())
     }
 
+    /// Returns the start of the lowest retained fixed file range for a segment.
+    pub fn get_lowest_range_start(&self, segment: StaticFileSegment) -> Option<BlockNumber> {
+        self.static_files_min_block.read().get(&segment).map(|range| range.start())
+    }
+
+    /// Returns a retained transaction file when its indexed range covers `tx`.
+    pub fn get_maybe_segment_provider(
+        &self,
+        segment: StaticFileSegment,
+        tx: TxNumber,
+    ) -> ProviderResult<Option<StaticFileJarProvider<'_, N>>> {
+        self.get_segment_provider(
+            segment,
+            || self.get_segment_ranges_from_transaction(segment, tx),
+            None,
+        )
+    }
+
     /// Gets the highest static file's block height if it exists for a static file segment.
     ///
     /// If there is nothing on disk for the given segment, this will return [`None`].

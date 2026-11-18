@@ -46,6 +46,7 @@ arbitrary = { workspace = true, features = ["derive"], optional = true }
 rayon = { workspace = true, optional = true }
 parking_lot.workspace = true
 once_cell.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
 reth-primitives-traits = { workspace = true, features = ["serde"] }
@@ -91,6 +92,7 @@ std = [
     "reth-storage-errors/std",
     "once_cell/std",
     "reth-codecs?/std",
+    "thiserror/std",
 ]
 eip1186 = ["alloy-rpc-types-eth/serde", "dep:alloy-serde"]
 serde = [

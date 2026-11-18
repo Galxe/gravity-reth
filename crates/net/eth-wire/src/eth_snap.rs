@@ -254,13 +254,14 @@ where
                     )
                     .into())
                 }
+                let encoded = msg.encode_versioned(SnapVersion::V2)?;
                 if let Some((request_id, response)) = PendingSnapResponse::for_request(&msg) {
                     this.pending_snap_responses.insert(request_id, response);
                 }
                 // Reclaim the freshly-encoded buffer as mutable without copying the payload, then
                 // rebase the snap-relative id into the combined message space.
                 let mut buf =
-                    msg.encode().0.try_into_mut().unwrap_or_else(|b| BytesMut::from(b.as_ref()));
+                    encoded.0.try_into_mut().unwrap_or_else(|b| BytesMut::from(b.as_ref()));
                 mask_snap(&mut buf, this.snap_offset)?;
                 buf.freeze()
             }

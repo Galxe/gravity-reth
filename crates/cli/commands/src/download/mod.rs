@@ -18,6 +18,9 @@
 //!
 //! [`DownloadDefaults`] defines the discovery endpoints and default help text used when the command
 //! needs to discover a manifest instead of consuming an explicit source.
+//! The manifest chain ID is checked when the selected chain determines the source, default data
+//! directory, or pre-Merge pruning settings. Explicit sources and data directories do not require
+//! a matching chain when component selection is independent of its hardforks.
 //!
 //! ## Selection and planning
 //!
@@ -88,6 +91,7 @@ pub mod manifest;
 pub mod manifest_cmd;
 mod planning;
 mod progress;
+mod prune;
 mod session;
 mod source;
 mod tui;
@@ -104,6 +108,7 @@ use eyre::Result;
 use manifest::{ComponentSelection, SnapshotComponentType, SnapshotManifest};
 use planning::{collect_planned_archives, PlannedDownloads};
 use progress::{DownloadProgress, DownloadRequestLimiter};
+use prune::prune_unlisted_outputs;
 use reth_chainspec::{EthChainSpec, EthereumHardfork, EthereumHardforks, MAINNET};
 use reth_cli::chainspec::ChainSpecParser;
 use reth_cli_util::cancellation::CancellationToken;
@@ -111,7 +116,7 @@ use reth_db::{init_db, Database};
 use reth_db_api::transaction::DbTx;
 use reth_fs_util as fs;
 use reth_node_core::args::DefaultPruningValues;
-use reth_prune_types::PruneMode;
+use reth_prune_types::{PruneMode, PruneModes};
 use source::{
     discover_manifest_url, fetch_manifest_from_source, fetch_snapshot_api_entries,
     print_snapshot_listing, resolve_manifest_base_url,
@@ -130,7 +135,7 @@ const RETH_SNAPSHOTS_BASE_URL: &str = "https://snapshots-r2.reth.rs";
 const RETH_SNAPSHOTS_API_URL: &str = "https://snapshots.reth.rs/api/snapshots";
 const RETH_SNAPSHOTS_SOURCE: &str = "https://snapshots.reth.rs (default)";
 const SNAPSHOT_API_PATH: &str = "/api/snapshots";
-const FORCE_REMOVED_DATADIR_PATHS: &[&str] = &["db", "rocksdb", "static_files", "reth.toml"];
+const MANAGED_DATADIR_PATHS: &[&str] = &["db", "rocksdb", "static_files", "reth.toml"];
 
 /// Maximum number of simultaneous HTTP downloads across the entire snapshot job.
 const MAX_CONCURRENT_DOWNLOADS: usize = 8;
@@ -177,10 +182,14 @@ pub struct DownloadDefaults {
     pub snapshot_api_url: Cow<'static, str>,
     /// Optional custom long help text that overrides the generated help
     pub long_help: Option<String>,
+    /// Whether the full preset also downloads the snapshot's RocksDB indices instead of
+    /// rebuilding them.
+    pub full_preset_includes_rocksdb_indices: bool,
 }
 
 impl DownloadDefaults {
     /// Initialize the global download defaults with this configuration
+    #[expect(clippy::result_large_err, reason = "returns the rejected defaults to the caller")]
     pub fn try_init(self) -> Result<(), Self> {
         DOWNLOAD_DEFAULTS.set(self)
     }
@@ -201,6 +210,7 @@ impl DownloadDefaults {
             default_chain_aware_base_url: None,
             snapshot_api_url: Cow::Borrowed(RETH_SNAPSHOTS_API_URL),
             long_help: None,
+            full_preset_includes_rocksdb_indices: false,
         }
     }
 
@@ -307,6 +317,12 @@ impl DownloadDefaults {
         self.default_base_url = source_url.clone();
         self.default_chain_aware_base_url = Some(source_url.clone());
         self.snapshot_api_url = Cow::Owned(format!("{}{SNAPSHOT_API_PATH}", source_url.as_ref()));
+        self
+    }
+
+    /// Builder: Make the full preset also download the snapshot's RocksDB indices.
+    pub const fn with_full_preset_rocksdb_indices(mut self) -> Self {
+        self.full_preset_includes_rocksdb_indices = true;
         self
     }
 
@@ -417,7 +433,8 @@ pub struct DownloadCommand<C: ChainSpecParser> {
 
     /// Skip optional RocksDB indices even when archive components are selected.
     ///
-    /// This affects `--archive`/`--all` and TUI archive preset (`a`).
+    /// This affects `--archive`/`--all`, TUI archive preset (`a`), and the full preset when it
+    /// includes RocksDB indices.
     #[arg(long, conflicts_with_all = ["url", "with_rocksdb"])]
     without_rocksdb: bool,
 
@@ -429,6 +446,13 @@ pub struct DownloadCommand<C: ChainSpecParser> {
     /// Overwrite existing snapshot data by removing db, rocksdb, static_files, and reth.toml.
     #[arg(long, conflicts_with = "list")]
     force: bool,
+
+    /// Remove snapshot-managed files not listed by the selected plan, retaining verified outputs.
+    ///
+    /// Unselected components and local reth.toml edits are removed. Run with the node stopped;
+    /// removal happens before downloading, so a failed download leaves the directory pruned.
+    #[arg(long, conflicts_with_all = ["force", "list", "url"])]
+    prune_unlisted: bool,
 
     /// Enable resumable two-phase downloads (download to disk first, then extract).
     ///
@@ -536,6 +560,8 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> DownloadCo
         let target_dir = data_dir.data_dir();
         if self.force {
             clear_existing_datadir(target_dir, static_files_dir.as_deref())?;
+        } else if self.prune_unlisted {
+            prune_unlisted_outputs(&planned.archives, target_dir, static_files_dir.as_deref())?;
         }
         fs::create_dir_all(target_dir)?;
         let downloads = {
@@ -574,8 +600,17 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> DownloadCo
         let manifest = self.load_manifest(chain_id).await?;
         let ResolvedComponents { mut selections, preset } = self.resolve_components(&manifest)?;
 
-        if matches!(preset, Some(SelectionPreset::Archive)) {
-            inject_archive_only_components(&mut selections, &manifest, !self.without_rocksdb);
+        match preset {
+            Some(SelectionPreset::Archive) => {
+                inject_archive_only_components(&mut selections, &manifest, !self.without_rocksdb)
+            }
+            Some(SelectionPreset::Full)
+                if DownloadDefaults::get_global().full_preset_includes_rocksdb_indices &&
+                    !self.without_rocksdb =>
+            {
+                inject_rocksdb_indices(&mut selections, &manifest)
+            }
+            _ => {}
         }
 
         let planned = collect_planned_archives(&manifest, &selections)?;
@@ -588,6 +623,11 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> DownloadCo
 
         info!(target: "reth::cli", source = %manifest_source, "Fetching snapshot manifest");
         let mut manifest = fetch_manifest_from_source(&manifest_source).await?;
+        if self.env.datadir.datadir.as_ref().is_none() ||
+            (self.manifest_url.is_none() && self.manifest_path.is_none())
+        {
+            self.validate_manifest_chain(&manifest)?;
+        }
         manifest.base_url = Some(resolve_manifest_base_url(&manifest, &manifest_source)?);
 
         info!(target: "reth::cli",
@@ -624,7 +664,7 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> DownloadCo
             let tx = db.tx_mut()?;
 
             if should_write_prune {
-                config_gen::write_prune_checkpoints_tx(&tx, &config, manifest.block)?;
+                config_gen::write_prune_checkpoints_tx(&tx, &config, selections, manifest.block)?;
             }
 
             if should_reset_indices {
@@ -634,8 +674,12 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> DownloadCo
             tx.commit()?;
         }
 
-        let start_command = startup_node_command::<C>(self.env.chain.as_ref());
-        info!(target: "reth::cli", "Snapshot download complete. Run `{}` to start syncing.", start_command);
+        if self.env.chain.chain().id() == manifest.chain_id {
+            let start_command = startup_node_command::<C>(self.env.chain.as_ref());
+            info!(target: "reth::cli", "Snapshot download complete. Run `{}` to start syncing.", start_command);
+        } else {
+            info!(target: "reth::cli", "Snapshot download complete.");
+        }
 
         Ok(())
     }
@@ -662,7 +706,7 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> DownloadCo
 
         if self.full {
             return Ok(ResolvedComponents {
-                selections: self.full_preset_selections(manifest),
+                selections: self.full_preset_selections(manifest)?,
                 preset: Some(SelectionPreset::Full),
             });
         }
@@ -743,6 +787,10 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> DownloadCo
         }
 
         if self.non_interactive {
+            eyre::ensure!(
+                !self.prune_unlisted,
+                "--prune-unlisted with --non-interactive requires an explicit component selection"
+            );
             return Ok(ResolvedComponents {
                 selections: self.minimal_preset_selections(manifest),
                 preset: Some(SelectionPreset::Minimal),
@@ -750,8 +798,10 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> DownloadCo
         }
 
         // Interactive TUI
-        let full_preset = self.full_preset_selections(manifest);
-        let SelectorOutput { selections, preset } = run_selector(manifest.clone(), &full_preset)?;
+        let minimal_preset = self.minimal_preset_selections(manifest);
+        let full_preset = self.full_preset_selections(manifest)?;
+        let SelectorOutput { selections, preset } =
+            run_selector(manifest.clone(), &minimal_preset, &full_preset)?;
         let selected =
             selections.into_iter().filter(|(_, sel)| *sel != ComponentSelection::None).collect();
 
@@ -763,36 +813,47 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> DownloadCo
         &self,
         manifest: &SnapshotManifest,
     ) -> BTreeMap<SnapshotComponentType, ComponentSelection> {
-        SnapshotComponentType::ALL
-            .iter()
-            .copied()
-            .filter(|ty| manifest.component(*ty).is_some())
-            .map(|ty| (ty, ty.minimal_selection()))
-            .collect()
+        self.pruning_preset_selections(manifest, SelectionPreset::Minimal)
     }
 
     /// Builds the default full-node component selection for the manifest.
     fn full_preset_selections(
         &self,
         manifest: &SnapshotManifest,
+    ) -> Result<BTreeMap<SnapshotComponentType, ComponentSelection>> {
+        if DefaultPruningValues::get_global().full_bodies_history_use_pre_merge {
+            self.validate_manifest_chain(manifest)?;
+        }
+        Ok(self.pruning_preset_selections(manifest, SelectionPreset::Full))
+    }
+
+    /// Builds component selections from the configured pruning preset.
+    fn pruning_preset_selections(
+        &self,
+        manifest: &SnapshotManifest,
+        preset: SelectionPreset,
     ) -> BTreeMap<SnapshotComponentType, ComponentSelection> {
+        let defaults = DefaultPruningValues::get_global();
+        let (prune_modes, bodies_history_use_pre_merge) = match preset {
+            SelectionPreset::Minimal => (&defaults.minimal_prune_modes, false),
+            SelectionPreset::Full => {
+                (&defaults.full_prune_modes, defaults.full_bodies_history_use_pre_merge)
+            }
+            SelectionPreset::Archive => unreachable!("archive selects every component"),
+        };
         let mut selections = BTreeMap::new();
 
-        for ty in [
-            SnapshotComponentType::State,
-            SnapshotComponentType::Headers,
-            SnapshotComponentType::Transactions,
-            SnapshotComponentType::Receipts,
-            SnapshotComponentType::AccountChangesets,
-            SnapshotComponentType::StorageChangesets,
-            SnapshotComponentType::TransactionSenders,
-            SnapshotComponentType::RocksdbIndices,
-        ] {
+        for &ty in &SnapshotComponentType::ALL {
             if manifest.component(ty).is_none() {
                 continue;
             }
 
-            let selection = self.full_selection_for_component(ty, manifest.block);
+            let selection = self.pruning_selection_for_component(
+                ty,
+                manifest.block,
+                prune_modes,
+                bodies_history_use_pre_merge,
+            );
             if selection != ComponentSelection::None {
                 selections.insert(ty, selection);
             }
@@ -801,51 +862,40 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> DownloadCo
         selections
     }
 
-    /// Returns the full preset selection for one component type.
-    fn full_selection_for_component(
+    /// Returns the component selection for one configured pruning preset.
+    fn pruning_selection_for_component(
         &self,
         ty: SnapshotComponentType,
         snapshot_block: u64,
+        prune_modes: &PruneModes,
+        bodies_history_use_pre_merge: bool,
     ) -> ComponentSelection {
-        let defaults = DefaultPruningValues::get_global();
-        match ty {
-            SnapshotComponentType::State | SnapshotComponentType::Headers => {
-                ComponentSelection::All
+        if ty == SnapshotComponentType::Transactions && bodies_history_use_pre_merge {
+            return match self
+                .env
+                .chain
+                .ethereum_fork_activation(EthereumHardfork::Paris)
+                .block_number()
+            {
+                Some(paris) if snapshot_block >= paris => ComponentSelection::Since(paris),
+                Some(_) => ComponentSelection::None,
+                None => ComponentSelection::All,
             }
-            SnapshotComponentType::Transactions => {
-                if defaults.full_bodies_history_use_pre_merge {
-                    match self
-                        .env
-                        .chain
-                        .ethereum_fork_activation(EthereumHardfork::Paris)
-                        .block_number()
-                    {
-                        Some(paris) if snapshot_block >= paris => ComponentSelection::Since(paris),
-                        Some(_) => ComponentSelection::None,
-                        None => ComponentSelection::All,
-                    }
-                } else {
-                    selection_from_prune_mode(
-                        defaults.full_prune_modes.bodies_history,
-                        snapshot_block,
-                    )
-                }
-            }
-            SnapshotComponentType::Receipts => {
-                selection_from_prune_mode(defaults.full_prune_modes.receipts, snapshot_block)
-            }
-            SnapshotComponentType::AccountChangesets => {
-                selection_from_prune_mode(defaults.full_prune_modes.account_history, snapshot_block)
-            }
-            SnapshotComponentType::StorageChangesets => {
-                selection_from_prune_mode(defaults.full_prune_modes.storage_history, snapshot_block)
-            }
-            SnapshotComponentType::TransactionSenders => {
-                selection_from_prune_mode(defaults.full_prune_modes.sender_recovery, snapshot_block)
-            }
-            // Keep hidden by default in full mode; if users want indices they can use archive.
-            SnapshotComponentType::RocksdbIndices => ComponentSelection::None,
         }
+
+        let mode = match ty {
+            SnapshotComponentType::State | SnapshotComponentType::Headers => {
+                return ComponentSelection::All
+            }
+            SnapshotComponentType::Transactions => prune_modes.bodies_history,
+            SnapshotComponentType::TransactionSenders => prune_modes.sender_recovery,
+            SnapshotComponentType::Receipts => prune_modes.receipts,
+            SnapshotComponentType::AccountChangesets => prune_modes.account_history,
+            SnapshotComponentType::StorageChangesets => prune_modes.storage_history,
+            SnapshotComponentType::RocksdbIndices => return ComponentSelection::None,
+        };
+
+        selection_from_prune_mode(mode, snapshot_block)
     }
 
     /// Resolves the manifest source from CLI input or snapshot discovery.
@@ -873,6 +923,16 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> DownloadCo
                 discover_manifest_url(chain_id).await
             }
         }
+    }
+
+    fn validate_manifest_chain(&self, manifest: &SnapshotManifest) -> Result<()> {
+        let chain_id = self.env.chain.chain().id();
+        eyre::ensure!(
+            manifest.chain_id == chain_id,
+            "Snapshot chain ID {} does not match selected chain ID {chain_id}",
+            manifest.chain_id
+        );
+        Ok(())
     }
 }
 
@@ -912,12 +972,8 @@ fn selection_from_prune_mode(mode: Option<PruneMode>, snapshot_block: u64) -> Co
 /// Removes existing snapshot data that is managed by `reth download`.
 fn clear_existing_datadir(target_dir: &Path, static_files_dir: Option<&Path>) -> Result<()> {
     info!(target: "reth::cli", dir = ?target_dir, "Clearing existing snapshot data");
-    for entry in FORCE_REMOVED_DATADIR_PATHS {
-        let path = if *entry == "static_files" {
-            static_files_dir.map_or_else(|| target_dir.join(entry), Path::to_path_buf)
-        } else {
-            target_dir.join(entry)
-        };
+    for entry in MANAGED_DATADIR_PATHS {
+        let path = managed_datadir_path(entry, target_dir, static_files_dir);
         if !path.try_exists()? {
             continue;
         }
@@ -931,6 +987,19 @@ fn clear_existing_datadir(target_dir: &Path, static_files_dir: Option<&Path>) ->
     }
 
     Ok(())
+}
+
+/// Resolves a snapshot-managed path, including an explicitly configured static-file root.
+fn managed_datadir_path(
+    entry: &str,
+    target_dir: &Path,
+    static_files_dir: Option<&Path>,
+) -> PathBuf {
+    if entry == "static_files" {
+        static_files_dir.map_or_else(|| target_dir.join(entry), Path::to_path_buf)
+    } else {
+        target_dir.join(entry)
+    }
 }
 
 /// If all data components (txs, receipts, changesets) are `All`, automatically
@@ -962,6 +1031,16 @@ fn inject_archive_only_components(
         if manifest.component(component).is_some() {
             selections.insert(component, ComponentSelection::All);
         }
+    }
+}
+
+/// Selects the manifest's RocksDB indices, if it publishes them.
+fn inject_rocksdb_indices(
+    selections: &mut BTreeMap<SnapshotComponentType, ComponentSelection>,
+    manifest: &SnapshotManifest,
+) {
+    if manifest.component(SnapshotComponentType::RocksdbIndices).is_some() {
+        selections.insert(SnapshotComponentType::RocksdbIndices, ComponentSelection::All);
     }
 }
 
@@ -1072,7 +1151,7 @@ mod tests {
     use super::*;
     use clap::{Args, Parser};
     use extract::CompressionFormat;
-    use manifest::{ComponentManifest, SingleArchive};
+    use manifest::{ComponentManifest, OutputFileChecksum, SingleArchive};
     use reth_chainspec::{HOLESKY, MAINNET};
     use reth_ethereum_cli::chainspec::EthereumChainSpecParser;
 
@@ -1245,6 +1324,19 @@ mod tests {
     }
 
     #[test]
+    fn test_download_prune_unlisted_conflicts_with_force_list_and_url() {
+        let parse = |args: &[&str]| {
+            CommandParser::<DownloadCommand<EthereumChainSpecParser>>::try_parse_from(args)
+        };
+        assert!(parse(&["reth", "--prune-unlisted"]).unwrap().args.prune_unlisted);
+        assert!(parse(&["reth", "--prune-unlisted", "--force"]).is_err());
+        assert!(parse(&["reth", "--prune-unlisted", "--list"]).is_err());
+        assert!(
+            parse(&["reth", "--prune-unlisted", "--url", "https://example.com/a.tar.zst"]).is_err()
+        );
+    }
+
+    #[test]
     fn test_download_resumable_defaults_to_true() {
         let args =
             CommandParser::<DownloadCommand<EthereumChainSpecParser>>::parse_from(["reth"]).args;
@@ -1298,6 +1390,67 @@ mod tests {
         ]);
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn minimal_component_selection_uses_configured_prune_modes() {
+        let args =
+            CommandParser::<DownloadCommand<EthereumChainSpecParser>>::parse_from(["reth"]).args;
+        let history_distance = 64_864;
+        let modes = PruneModes {
+            sender_recovery: Some(PruneMode::Full),
+            receipts: Some(PruneMode::Distance(128)),
+            account_history: Some(PruneMode::Distance(history_distance)),
+            storage_history: Some(PruneMode::Distance(history_distance)),
+            bodies_history: Some(PruneMode::Distance(history_distance)),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            args.pruning_selection_for_component(
+                SnapshotComponentType::Transactions,
+                1_000_000,
+                &modes,
+                false,
+            ),
+            ComponentSelection::Distance(history_distance)
+        );
+        assert_eq!(
+            args.pruning_selection_for_component(
+                SnapshotComponentType::Receipts,
+                1_000_000,
+                &modes,
+                false,
+            ),
+            ComponentSelection::Distance(128)
+        );
+        assert_eq!(
+            args.pruning_selection_for_component(
+                SnapshotComponentType::AccountChangesets,
+                1_000_000,
+                &modes,
+                false,
+            ),
+            ComponentSelection::Distance(history_distance)
+        );
+        assert_eq!(
+            args.pruning_selection_for_component(
+                SnapshotComponentType::StorageChangesets,
+                1_000_000,
+                &modes,
+                false,
+            ),
+            ComponentSelection::Distance(history_distance)
+        );
+        assert_eq!(
+            args.pruning_selection_for_component(
+                SnapshotComponentType::TransactionSenders,
+                1_000_000,
+                &modes,
+                false,
+            ),
+            ComponentSelection::None
+        );
     }
 
     #[test]
@@ -1398,6 +1551,35 @@ mod tests {
     }
 
     #[test]
+    fn inject_rocksdb_indices_keeps_index_stages() {
+        let manifest = manifest_with_archive_only_components();
+        let mut selections = BTreeMap::new();
+        selections
+            .insert(SnapshotComponentType::AccountChangesets, ComponentSelection::Distance(10));
+
+        inject_rocksdb_indices(&mut selections, &manifest);
+
+        assert_eq!(
+            selections.get(&SnapshotComponentType::RocksdbIndices),
+            Some(&ComponentSelection::All)
+        );
+        assert_eq!(selections.get(&SnapshotComponentType::TransactionSenders), None);
+        assert!(!should_reset_index_stage_checkpoints(&selections));
+    }
+
+    #[test]
+    fn inject_rocksdb_indices_skips_manifest_without_indices() {
+        let mut manifest = manifest_with_archive_only_components();
+        manifest.components.clear();
+        let mut selections = BTreeMap::new();
+
+        inject_rocksdb_indices(&mut selections, &manifest);
+
+        assert!(selections.is_empty());
+        assert!(should_reset_index_stage_checkpoints(&selections));
+    }
+
+    #[test]
     fn should_reset_index_stage_checkpoints_without_rocksdb_indices() {
         let mut selections = BTreeMap::new();
         selections.insert(SnapshotComponentType::Transactions, ComponentSelection::All);
@@ -1434,5 +1616,94 @@ mod tests {
     #[test]
     fn download_command_uses_binary_name() {
         assert_eq!(download_command_for_binary("tempo"), "tempo download");
+    }
+
+    #[tokio::test]
+    async fn test_download_explicit_source_and_datadir_allow_other_chains() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest_path = dir.path().join("manifest.json");
+        let mut manifest = manifest_with_archive_only_components();
+        manifest.chain_id = 42431;
+        for component in manifest.components.values_mut() {
+            if let ComponentManifest::Single(archive) = component {
+                archive.output_files.push(OutputFileChecksum {
+                    path: archive.file.clone(),
+                    size: 1,
+                    blake3: blake3::hash(b"x").to_hex().to_string(),
+                });
+            }
+        }
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let manifest_url = format!("file://{}", manifest_path.display());
+        let target = dir.path().join("download");
+
+        for source in ["--manifest-url", "--manifest-path"] {
+            let location = if source == "--manifest-url" {
+                manifest_url.as_str()
+            } else {
+                manifest_path.to_str().unwrap()
+            };
+            for selection in ["--archive", "--minimal", "--non-interactive", "--with-txs"] {
+                let args = CommandParser::<DownloadCommand<EthereumChainSpecParser>>::parse_from([
+                    "reth",
+                    source,
+                    location,
+                    "--datadir",
+                    target.to_str().unwrap(),
+                    selection,
+                ])
+                .args;
+                let resolved = args.resolve_download(args.env.chain.chain().id()).await.unwrap();
+                assert_eq!(resolved.manifest.chain_id, 42431);
+                assert_eq!(
+                    args.env.datadir.clone().resolve_datadir(args.env.chain.chain()).data_dir(),
+                    target
+                );
+                assert!(!target.exists());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_download_chain_derived_datadir_rejects_other_chains() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest_path = dir.path().join("manifest.json");
+        let mut manifest = manifest_with_archive_only_components();
+        manifest.chain_id = 42431;
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+
+        for datadir in [vec![], vec!["--datadir", "default"]] {
+            let mut cli_args =
+                vec!["reth", "--manifest-path", manifest_path.to_str().unwrap(), "--archive"];
+            cli_args.extend(datadir);
+            let args =
+                CommandParser::<DownloadCommand<EthereumChainSpecParser>>::parse_from(cli_args)
+                    .args;
+            assert_eq!(
+                args.resolve_download(args.env.chain.chain().id()).await.err().unwrap().to_string(),
+                "Snapshot chain ID 42431 does not match selected chain ID 1"
+            );
+        }
+    }
+
+    #[test]
+    fn test_download_full_chain_derived_pruning_rejects_other_chains() {
+        let args = CommandParser::<DownloadCommand<EthereumChainSpecParser>>::parse_from([
+            "reth",
+            "--datadir",
+            "download",
+            "--manifest-url",
+            "https://example.com/manifest.json",
+            "--full",
+        ])
+        .args;
+        let mut manifest = manifest_with_archive_only_components();
+        manifest.chain_id = 42431;
+        assert_eq!(
+            args.full_preset_selections(&manifest).unwrap_err().to_string(),
+            "Snapshot chain ID 42431 does not match selected chain ID 1"
+        );
+        manifest.chain_id = 1;
+        assert!(args.full_preset_selections(&manifest).is_ok());
     }
 }

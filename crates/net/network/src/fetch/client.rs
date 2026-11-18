@@ -4,6 +4,10 @@ use crate::{fetch::DownloadRequest, flattened_response::FlattenedResponse};
 use alloy_primitives::B256;
 use futures::{future, future::Either};
 use reth_eth_wire::{BlockAccessLists, EthNetworkPrimitives, NetworkPrimitives};
+use reth_eth_wire_types::snap::{
+    GetAccountRangeMessage, GetBlockAccessListsMessage, GetByteCodesMessage,
+    GetStorageRangesMessage, GetTrieNodesMessage, SnapProtocolMessage,
+};
 use reth_network_api::test_utils::PeersHandle;
 use reth_network_p2p::{
     block_access_lists::client::{BalRequirement, BlockAccessListsClient},
@@ -13,6 +17,7 @@ use reth_network_p2p::{
     headers::client::{HeadersClient, HeadersRequest},
     priority::Priority,
     receipts::client::{ReceiptsClient, ReceiptsResponse},
+    snap::client::{SnapClient, SnapResponse},
     BlockClient,
 };
 use reth_network_peers::PeerId;
@@ -56,6 +61,22 @@ impl<N: NetworkPrimitives> DownloadClient for FetchClient<N> {
 // The `Output` future of the [HeadersClient] impl of [FetchClient] that either returns a response
 // or an error.
 type FetchClientFuture<T> = Either<FlattenedResponse<T>, future::Ready<T>>;
+
+impl<N: NetworkPrimitives> FetchClient<N> {
+    /// Sends a `snap/2` request to an available peer.
+    fn send_snap_request(
+        &self,
+        request: SnapProtocolMessage,
+        priority: Priority,
+    ) -> FetchClientFuture<PeerRequestResult<SnapResponse>> {
+        let (response, rx) = oneshot::channel();
+        if self.request_tx.send(DownloadRequest::GetSnap { request, response, priority }).is_ok() {
+            Either::Left(FlattenedResponse::from(rx))
+        } else {
+            Either::Right(future::err(RequestError::ChannelClosed))
+        }
+    }
+}
 
 impl<N: NetworkPrimitives> HeadersClient for FetchClient<N> {
     type Header = N::BlockHeader;
@@ -150,5 +171,68 @@ impl<N: NetworkPrimitives> BlockAccessListsClient for FetchClient<N> {
         } else {
             Either::Right(future::err(RequestError::ChannelClosed))
         }
+    }
+}
+
+impl<N: NetworkPrimitives> SnapClient for FetchClient<N> {
+    type Output = FetchClientFuture<PeerRequestResult<SnapResponse>>;
+
+    /// Sends a `GetAccountRange` (`snap/2`) request to an available peer.
+    fn get_account_range_with_priority(
+        &self,
+        request: GetAccountRangeMessage,
+        priority: Priority,
+    ) -> Self::Output {
+        self.send_snap_request(SnapProtocolMessage::GetAccountRange(request), priority)
+    }
+
+    /// Sends a `GetStorageRanges` (`snap/2`) request to an available peer.
+    fn get_storage_ranges(&self, request: GetStorageRangesMessage) -> Self::Output {
+        self.get_storage_ranges_with_priority(request, Priority::Normal)
+    }
+
+    /// Sends a `GetStorageRanges` (`snap/2`) request to an available peer.
+    fn get_storage_ranges_with_priority(
+        &self,
+        request: GetStorageRangesMessage,
+        priority: Priority,
+    ) -> Self::Output {
+        self.send_snap_request(SnapProtocolMessage::GetStorageRanges(request), priority)
+    }
+
+    /// Sends a `GetByteCodes` (`snap/2`) request to an available peer.
+    fn get_byte_codes(&self, request: GetByteCodesMessage) -> Self::Output {
+        self.get_byte_codes_with_priority(request, Priority::Normal)
+    }
+
+    /// Sends a `GetByteCodes` (`snap/2`) request to an available peer.
+    fn get_byte_codes_with_priority(
+        &self,
+        request: GetByteCodesMessage,
+        priority: Priority,
+    ) -> Self::Output {
+        self.send_snap_request(SnapProtocolMessage::GetByteCodes(request), priority)
+    }
+
+    fn get_trie_nodes(&self, request: GetTrieNodesMessage) -> Self::Output {
+        self.get_trie_nodes_with_priority(request, Priority::Normal)
+    }
+
+    fn get_trie_nodes_with_priority(
+        &self,
+        _request: GetTrieNodesMessage,
+        _priority: Priority,
+    ) -> Self::Output {
+        // This client negotiates snap/2; trie-node requests remain snap/1-only.
+        Either::Right(future::err(RequestError::UnsupportedCapability))
+    }
+
+    /// Sends a `GetBlockAccessLists` (`snap/2`) request to an available peer.
+    fn get_block_access_lists_with_priority(
+        &self,
+        request: GetBlockAccessListsMessage,
+        priority: Priority,
+    ) -> Self::Output {
+        self.send_snap_request(SnapProtocolMessage::GetBlockAccessLists(request), priority)
     }
 }

@@ -51,6 +51,9 @@ pub use trie::{BranchNodeMasks, BranchNodeMasksMap, ProofTrieNode};
 mod trie_node_v2;
 pub use trie_node_v2::*;
 
+/// Merkle Patricia trie range-proof verification.
+pub mod range_proof;
+
 mod proofs;
 #[cfg(any(test, feature = "test-utils"))]
 pub use proofs::triehash;
