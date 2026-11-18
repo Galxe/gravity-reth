@@ -17,7 +17,7 @@ use reth_storage_api::{
     BlockReader, BlockReaderIdExt, ChangeSetReader, ProviderReadView, StateProviderFactory,
     TransactionVariant,
 };
-use reth_tasks::{pool::BlockingTaskGuard, Runtime};
+use reth_tasks::{pool::BlockingTaskGuard, CancelOnDrop, Runtime};
 use serde::Serialize;
 use tokio::sync::oneshot;
 
@@ -147,17 +147,23 @@ where
             .acquire_owned()
             .await
             .map_err(|_| EthApiError::InternalEthError)?;
-        self.on_blocking_task(async move |this| {
-            let _permit = permit;
-            this.try_block_execution_outcome(block_id, block_count)
-        })
-        .await
+        let guard = CancelOnDrop::default();
+        let cancel = guard.clone();
+        let outcome = self
+            .on_blocking_task(async move |this| {
+                let _permit = permit;
+                this.try_block_execution_outcome(block_id, block_count, &cancel)
+            })
+            .await;
+        drop(guard);
+        outcome
     }
 
     fn try_block_execution_outcome(
         &self,
         block_id: BlockId,
         block_count: u64,
+        cancel: &CancelOnDrop,
     ) -> EthResult<Option<ExecutionOutcome<N::Receipt>>> {
         let provider = self.provider().view()?;
         let Some(start_block) = provider.block_number_for_id(block_id)? else { return Ok(None) };
@@ -184,12 +190,16 @@ where
 
         // Committed blocks: replay them with the chain's block-level steps.
         let evm_config = self.evm_config().with_read_provider(provider.clone()).chain_block_mode();
-        let outcome = evm_config.executor(db).execute_batch(&blocks).map_err(
+        let blocks = blocks.iter().take_while(|_| !cancel.is_cancelled());
+        let outcome = evm_config.executor(db).execute_batch(blocks).map_err(
             |e: reth_evm::execute::BlockExecutionError| {
                 EthApiError::Internal(reth_errors::RethError::Other(e.into()))
             },
         )?;
 
+        if cancel.is_cancelled() {
+            return Err(EthApiError::InternalEthError)
+        }
         Ok(Some(outcome))
     }
 }

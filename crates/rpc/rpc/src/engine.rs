@@ -1,8 +1,7 @@
 use alloy_eips::{BlockId, BlockNumberOrTag};
 use alloy_primitives::{Address, Bytes, B256, U256, U64};
 use alloy_rpc_types_eth::{
-    state::StateOverride, BlockOverrides, EIP1186AccountProofResponse, Filter, Index, Log,
-    SyncStatus,
+    state::StateOverride, BlockOverrides, EIP1186AccountProofResponse, Filter, Index, SyncStatus,
 };
 use alloy_serde::JsonStorageKey;
 use jsonrpsee::core::RpcResult as Result;
@@ -12,7 +11,8 @@ use reth_rpc_convert::RpcTxReq;
 /// Re-export for convenience
 pub use reth_rpc_engine_api::EngineApi;
 use reth_rpc_eth_api::{
-    EngineEthFilter, FullEthApiTypes, QueryLimits, RpcBlock, RpcHeader, RpcReceipt, RpcTransaction,
+    EngineEthFilter, FullEthApiTypes, QueryLimits, RpcBlock, RpcHeader, RpcLog, RpcReceipt,
+    RpcTransaction,
 };
 use tracing_futures::Instrument;
 
@@ -43,6 +43,7 @@ impl<Eth, EthFilter>
         RpcTxReq<Eth::NetworkTypes>,
         RpcBlock<Eth::NetworkTypes>,
         RpcReceipt<Eth::NetworkTypes>,
+        RpcLog<Eth::NetworkTypes>,
     > for EngineEthApi<Eth, EthFilter>
 where
     Eth: EthApiServer<
@@ -53,7 +54,7 @@ where
             RpcHeader<Eth::NetworkTypes>,
             TxTy<Eth::Primitives>,
         > + FullEthApiTypes,
-    EthFilter: EngineEthFilter,
+    EthFilter: EngineEthFilter<RpcLog<Eth::NetworkTypes>>,
 {
     /// Handler for: `eth_syncing`
     fn syncing(&self) -> Result<SyncStatus> {
@@ -157,7 +158,7 @@ where
     }
 
     /// Handler for `eth_getLogs`
-    async fn logs(&self, filter: Filter) -> Result<Vec<Log>> {
+    async fn logs(&self, filter: Filter) -> Result<Vec<RpcLog<Eth::NetworkTypes>>> {
         self.eth_filter.logs(filter, QueryLimits::no_limits()).instrument(engine_span!()).await
     }
 

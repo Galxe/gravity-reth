@@ -322,14 +322,16 @@ where
         self,
         ctx: reth_node_api::AddOnsContext<'_, N>,
     ) -> eyre::Result<Self::Handle> {
-        let validation_api = ValidationApi::<_, _, <N::Types as NodeTypes>::Payload>::new(
-            ctx.node.provider().rpc_provider(),
-            Arc::new(ctx.node.consensus().clone()),
-            ctx.node.evm_config().clone(),
-            ctx.config.rpc.flashbots_config(),
-            ctx.node.task_executor().clone(),
-            Arc::new(EthereumEngineValidator::new(ctx.config.chain.clone())),
-        );
+        let validation_api =
+            ValidationApi::<_, _, <N::Types as NodeTypes>::Payload>::new_with_sender_recovery_cache(
+                ctx.node.provider().rpc_provider(),
+                Arc::new(ctx.node.consensus().clone()),
+                ctx.node.evm_config().clone(),
+                ctx.config.rpc.flashbots_config(),
+                ctx.node.task_executor().clone(),
+                Arc::new(EthereumEngineValidator::new(ctx.config.chain.clone())),
+                ctx.sender_recovery_cache.clone(),
+            );
 
         let eth_config = EthConfigHandler::new(
             ctx.node.provider().rpc_provider(),
@@ -483,7 +485,11 @@ where
     type EVM = EthEvmConfig<Types::ChainSpec>;
 
     async fn build_evm(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::EVM> {
-        Ok(EthEvmConfig::new(ctx.chain_spec()))
+        let evm = EthEvmConfig::new(ctx.chain_spec());
+        Ok(match ctx.sender_recovery_cache() {
+            Some(cache) => evm.with_sender_recovery_cache(cache.clone()),
+            None => evm,
+        })
     }
 }
 

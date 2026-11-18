@@ -10,7 +10,6 @@ use alloy_eips::eip7685::Requests;
 use alloy_primitives::{B256, U256};
 use alloy_rpc_types_engine::{
     BlobsBundleV1, BlobsBundleV2, ExecutionPayloadEnvelopeV2 as LegacyBuiltPayloadShanghai,
-    ExecutionPayloadEnvelopeV3 as LegacyBuiltPayloadCancun,
     ExecutionPayloadEnvelopeV4 as LegacyBuiltPayloadPrague,
     ExecutionPayloadEnvelopeV5 as LegacyBuiltPayloadOsaka,
     ExecutionPayloadEnvelopeV6 as LegacyBuiltPayloadAmsterdam, ExecutionPayloadFieldV2,
@@ -61,18 +60,7 @@ pub struct BuiltPayloadShanghai {
 /// Engine API v2 REST-SSZ payload-build response for Cancun.
 ///
 /// This is wire-compatible with the legacy `engine_getPayloadV3` response envelope.
-#[derive(Clone, Debug, PartialEq, Eq, ssz_derive::Encode, ssz_derive::Decode)]
-pub struct BuiltPayloadCancun {
-    /// Execution payload V3.
-    pub execution_payload: ExecutionPayloadCancun,
-    /// The expected value to be received by the fee recipient in wei.
-    pub block_value: U256,
-    /// The blobs, commitments, and proofs associated with the executed payload.
-    pub blobs_bundle: BlobsBundleV1,
-    /// A suggestion from the execution layer whether this payload should be used instead of an
-    /// externally provided one.
-    pub should_override_builder: bool,
-}
+pub type BuiltPayloadCancun = alloy_rpc_types_engine::ExecutionPayloadEnvelopeV3;
 
 /// This structure maps to the Engine API v2 REST-SSZ payload-build response for Prague.
 ///
@@ -164,28 +152,6 @@ impl TryFrom<LegacyBuiltPayloadShanghai> for BuiltPayloadShanghai {
             ExecutionPayloadFieldV2::V1(_) => {
                 Err(BuiltPayloadConversionError::UnexpectedPayloadFork("Paris"))
             }
-        }
-    }
-}
-
-impl From<LegacyBuiltPayloadCancun> for BuiltPayloadCancun {
-    fn from(value: LegacyBuiltPayloadCancun) -> Self {
-        Self {
-            execution_payload: value.execution_payload,
-            block_value: value.block_value,
-            blobs_bundle: value.blobs_bundle,
-            should_override_builder: value.should_override_builder,
-        }
-    }
-}
-
-impl From<BuiltPayloadCancun> for LegacyBuiltPayloadCancun {
-    fn from(value: BuiltPayloadCancun) -> Self {
-        Self {
-            execution_payload: value.execution_payload,
-            block_value: value.block_value,
-            blobs_bundle: value.blobs_bundle,
-            should_override_builder: value.should_override_builder,
         }
     }
 }
@@ -517,15 +483,6 @@ mod tests {
         let shanghai = BuiltPayloadShanghai { payload: payload_v2(), block_value: U256::from(1) };
         let legacy = LegacyBuiltPayloadShanghai::from(shanghai.clone());
         assert_eq!(BuiltPayloadShanghai::try_from(legacy).unwrap(), shanghai);
-
-        let cancun = BuiltPayloadCancun {
-            execution_payload: payload_v3(),
-            block_value: U256::from(2),
-            blobs_bundle: BlobsBundleV1::empty(),
-            should_override_builder: true,
-        };
-        let legacy = LegacyBuiltPayloadCancun::from(cancun.clone());
-        assert_eq!(BuiltPayloadCancun::from(legacy), cancun);
 
         let prague = BuiltPayloadPrague {
             payload: payload_v3(),

@@ -19,11 +19,14 @@ use crate::{
 use active::QueuedOutgoingMessages;
 use alloy_primitives::map::{FbBuildHasher, HashMap};
 use counter::SessionCounter;
-use futures::{future::Either, io, FutureExt, StreamExt};
+use futures::{
+    future::{self, Either},
+    io, stream, FutureExt, StreamExt,
+};
 use reth_ecies::{stream::ECIESStream, ECIESError};
 use reth_eth_wire::{
     errors::EthStreamError, handshake::EthRlpxHandshake, multiplex::RlpxProtocolMultiplexer,
-    BlockRangeUpdate, Capabilities, DisconnectReason, EthStream, EthVersion,
+    BlockRangeUpdate, Capabilities, DisconnectReason, EthSnapStream, EthStream, EthVersion,
     HelloMessageWithProtocols, NetworkPrimitives, UnauthedP2PStream, UnifiedStatus,
     HANDSHAKE_TIMEOUT,
 };
@@ -46,7 +49,7 @@ use std::{
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     net::TcpStream,
-    sync::{mpsc, oneshot},
+    sync::{mpsc, oneshot, watch},
 };
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::PollSender;
@@ -1324,20 +1327,57 @@ async fn authenticate_stream<N: NetworkPrimitives>(
                 }
             }
         }
+    } else if p2p_stream.shared_capabilities().is_exact_eth_snap_v2() {
+        // Exactly `eth` + `snap/2` (no other extras): use the dedicated stream instead of the
+        // general-purpose satellite multiplexer. If `snap/2` is negotiated alongside other extra
+        // capabilities, fall through to the satellite path — the dedicated stream only composes
+        // `eth` and `snap/2`.
+        match EthSnapStream::handshake(
+            p2p_stream,
+            status,
+            fork_filter,
+            handshake,
+            eth_max_message_size,
+        )
+        .await
+        {
+            Ok((stream, their_status)) => (stream.into(), their_status),
+            Err(err) => {
+                return PendingSessionEvent::Disconnected {
+                    remote_addr,
+                    session_id,
+                    direction,
+                    error: Some(PendingSessionHandshakeError::Eth(err)),
+                }
+            }
+        }
     } else {
-        // Multiplex the stream with the extra protocols
         let mut multiplex_stream = RlpxProtocolMultiplexer::new(p2p_stream);
+        let (protocol_start, protocol_ready) = watch::channel(false);
 
-        // install additional handlers
+        // Register bounded inbound queues and frame limits before reading early satellite frames.
+        // The application callbacks stay dormant until the eth Status handshake succeeds.
         for handler in extra_handlers.into_iter() {
-            let cap = handler.protocol().cap;
+            let protocol = handler.protocol();
+            let limits = handler.inbound_limits();
             let remote_peer_id = authenticated_peer_id;
-
+            let mut protocol_ready = protocol_ready.clone();
+            // The unsupported-handler pass guarantees a matching negotiated capability. The
+            // multiplexer retains that immutable capability set, so installation cannot fail.
             multiplex_stream
-                .install_protocol(&cap, move |conn| {
-                    handler.into_connection(direction, remote_peer_id, conn)
+                .install_protocol_with_limits(&protocol.cap, limits, move |conn| {
+                    stream::once(async move {
+                        // A closed gate means authentication failed and the connection is dropped.
+                        protocol_ready
+                            .wait_for(|started| *started)
+                            .await
+                            .is_ok()
+                            .then(|| handler.into_connection(direction, remote_peer_id, conn))
+                    })
+                    .filter_map(future::ready)
+                    .flatten()
                 })
-                .ok();
+                .expect("remaining handler capability was negotiated");
         }
 
         let (multiplex_stream, their_status) = match multiplex_stream
@@ -1354,6 +1394,7 @@ async fn authenticate_stream<N: NetworkPrimitives>(
                 }
             }
         };
+        protocol_start.send_replace(true);
 
         (multiplex_stream.into(), their_status)
     };

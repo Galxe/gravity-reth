@@ -946,7 +946,12 @@ async fn test_invalid_safe_does_not_update_finalized() {
         .unwrap()
         .expect("canonical head should produce an outcome")
         .outcome;
-    assert_matches!(outcome.await, Err(ForkchoiceUpdateError::InvalidState));
+    assert_matches!(
+        outcome.await,
+        Err(reth_engine_primitives::BeaconForkChoiceUpdateError::ForkchoiceUpdateError(
+            ForkchoiceUpdateError::InvalidState
+        ))
+    );
     assert_eq!(
         test_harness.tree.canonical_in_memory_state.get_finalized_num_hash(),
         Some(previous_finalized.num_hash())

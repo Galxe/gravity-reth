@@ -16,6 +16,7 @@
 pub mod capability;
 mod disconnect;
 pub mod errors;
+pub mod eth_snap;
 pub mod eth_snap_stream;
 mod ethstream;
 mod hello;
@@ -37,6 +38,7 @@ pub use tokio_util::codec::{
 
 pub use crate::{
     disconnect::CanDisconnect,
+    eth_snap::{EthSnapMessage, EthSnapStream},
     ethstream::{EthStream, EthStreamInner, UnauthedEthStream},
     hello::{HelloMessage, HelloMessageBuilder, HelloMessageWithProtocols},
     p2pstream::{

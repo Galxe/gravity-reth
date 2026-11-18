@@ -536,9 +536,9 @@ alloy-rpc-client = { version = "2.0.5", default-features = false }
 alloy-rpc-types = { version = "2.0.5", features = ["eth"], default-features = false }
 alloy-rpc-types-admin = { version = "2.0.5", default-features = false }
 alloy-rpc-types-anvil = { version = "2.0.5", default-features = false }
-alloy-rpc-types-beacon = { version = "2.0.5", default-features = false }
+alloy-rpc-types-beacon = { version = "=2.1.0", default-features = false }
 alloy-rpc-types-debug = { version = "2.0.5", default-features = false }
-alloy-rpc-types-engine = { version = "2.0.5", default-features = false }
+alloy-rpc-types-engine = { version = "=2.1.0", default-features = false }
 alloy-rpc-types-eth = { version = "2.0.5", default-features = false }
 alloy-rpc-types-mev = { version = "2.0.5", default-features = false }
 alloy-rpc-types-trace = { version = "2.0.5", default-features = false }
@@ -563,9 +563,9 @@ boyer-moore-magiclen = "0.2.16"
 bytes = { version = "1.11.1", default-features = false }
 blake3 = "1.8"
 brotli = "8"
-cfg-if = "1.0"
 clap = "4"
 color-eyre = "0.6"
+flate2 = "1"
 dashmap = "6.2"
 derive_more = { version = "2", default-features = false, features = ["full"] }
 dirs-next = "2.0.0"

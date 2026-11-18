@@ -210,6 +210,7 @@ impl EngineNodeLauncher {
             beacon_engine_handle: beacon_engine_handle.clone(),
             jwt_secret,
             engine_events: event_sender.clone(),
+            sender_recovery_cache: ctx.sender_recovery_cache().cloned(),
         };
         let validator_builder = add_ons.engine_validator_builder();
 
@@ -377,7 +378,7 @@ impl EngineNodeLauncher {
                             }
                         }
                     }
-                    payload = built_payloads.select_next_some(), if !built_payloads.is_terminated() => {
+                    Some(payload) = built_payloads.next(), if !built_payloads.is_terminated() => {
                         if let Some(executed_block) = payload.executed_block() {
                             debug!(target: "reth::cli", block=?executed_block.recovered_block.num_hash(),  "inserting built payload");
                             // Bridge the v2.3.0 `BuiltPayloadExecutedBlock` into the gravity-form

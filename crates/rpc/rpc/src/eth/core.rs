@@ -21,8 +21,8 @@ use reth_rpc_eth_api::{
     EthApiTypes, RpcNodeCore,
 };
 use reth_rpc_eth_types::{
-    builder::config::PendingBlockKind, receipt::EthReceiptConverter, EthApiError, EthStateCache,
-    FeeHistoryCache, GasCap, GasPriceOracle, PendingBlock,
+    builder::config::PendingBlockKind, receipt::EthReceiptConverter, EthApiError, EthApiSettings,
+    EthStateCache, FeeHistoryCache, GasCap, GasPriceOracle, PendingBlock,
 };
 use reth_storage_api::{noop::NoopProvider, BlockReaderIdExt, ProviderHeader};
 use reth_tasks::{
@@ -173,6 +173,10 @@ where
     type NetworkTypes = Rpc::Network;
     type RpcConvert = Rpc;
 
+    fn eth_api_settings(&self) -> &EthApiSettings {
+        self.inner.eth_api_settings()
+    }
+
     fn converter(&self) -> &Self::RpcConvert {
         &self.converter
     }
@@ -266,14 +270,8 @@ pub struct EthApiInner<N: RpcNodeCore, Rpc: RpcConvert> {
     eth_cache: EthStateCache<N::Primitives>,
     /// The async gas oracle frontend for gas price suggestions
     gas_oracle: GasPriceOracle<N::Provider>,
-    /// Maximum gas limit for `eth_call` and call tracing RPC methods.
-    gas_cap: u64,
-    /// Maximum number of blocks for `eth_simulateV1`.
-    max_simulate_blocks: u64,
-    /// Whether to compute state roots for `eth_simulateV1`.
-    compute_state_root_for_eth_simulate: bool,
-    /// The maximum number of blocks into the past for generating state proofs.
-    eth_proof_window: u64,
+    /// Settings shared by the `eth` RPC helpers.
+    settings: EthApiSettings,
     /// The block number at which the node started
     starting_block: U256,
     /// The type that can spawn tasks which would otherwise block.
@@ -307,20 +305,8 @@ pub struct EthApiInner<N: RpcNodeCore, Rpc: RpcConvert> {
     tx_batch_sender:
         mpsc::UnboundedSender<BatchTxRequest<<N::Pool as TransactionPool>::Transaction>>,
 
-    /// Configuration for pending block construction.
-    pending_block_kind: PendingBlockKind,
-
-    /// Timeout duration for `send_raw_transaction_sync` RPC method.
-    send_raw_transaction_sync_timeout: Duration,
-
     /// Blob sidecar converter
     blob_sidecar_converter: BlobSidecarConverter,
-
-    /// Maximum memory the EVM can allocate per RPC request.
-    evm_memory_limit: u64,
-
-    /// Whether to force upcasting EIP-4844 blob sidecars to EIP-7594 format when Osaka is active.
-    force_blob_sidecar_upcasting: bool,
 }
 
 impl<N, Rpc> EthApiInner<N, Rpc>
@@ -352,6 +338,48 @@ where
         evm_memory_limit: u64,
         force_blob_sidecar_upcasting: bool,
     ) -> Self {
+        let gas_cap: GasCap = gas_cap.into();
+        Self::new_with_settings(
+            components,
+            eth_cache,
+            gas_oracle,
+            EthApiSettings {
+                proof_permits,
+                max_batch_size,
+                max_blocking_io_requests,
+                gas_cap: gas_cap.into(),
+                max_simulate_blocks,
+                compute_state_root_for_eth_simulate,
+                eth_proof_window,
+                pending_block_kind,
+                send_raw_transaction_sync_timeout,
+                evm_memory_limit,
+                force_blob_sidecar_upcasting,
+                sender_recovery_cache: None,
+            },
+            blocking_task_pool,
+            fee_history_cache,
+            task_spawner,
+            converter,
+            next_env,
+            raw_tx_forwarder,
+        )
+    }
+
+    /// Creates the API with one shared set of initialization and runtime settings.
+    #[expect(clippy::too_many_arguments)]
+    pub fn new_with_settings(
+        components: N,
+        eth_cache: EthStateCache<N::Primitives>,
+        gas_oracle: GasPriceOracle<N::Provider>,
+        settings: EthApiSettings,
+        blocking_task_pool: BlockingTaskPool,
+        fee_history_cache: FeeHistoryCache<ProviderHeader<N::Provider>>,
+        task_spawner: Runtime,
+        converter: Rpc,
+        next_env: impl PendingEnvBuilder<N::Evm>,
+        raw_tx_forwarder: Option<RpcClient>,
+    ) -> Self {
         let signers = parking_lot::RwLock::new(Default::default());
         let provider = components.provider().clone();
         // get the block number of the latest block
@@ -368,7 +396,7 @@ where
 
         // Create tx pool insertion batcher
         let (processor, tx_batch_sender) =
-            BatchTxProcessor::new(components.pool().clone(), max_batch_size);
+            BatchTxProcessor::new(components.pool().clone(), settings.max_batch_size);
         task_spawner.spawn_critical_task("tx-batcher", processor);
 
         Self {
@@ -377,27 +405,22 @@ where
             signers,
             eth_cache,
             gas_oracle,
-            gas_cap: gas_cap.into().into(),
-            max_simulate_blocks,
-            compute_state_root_for_eth_simulate,
-            eth_proof_window,
             starting_block,
             task_spawner,
             pending_block: Default::default(),
             blocking_task_pool,
             fee_history_cache,
-            blocking_task_guard: BlockingTaskGuard::new(proof_permits),
-            blocking_io_request_semaphore: Arc::new(Semaphore::new(max_blocking_io_requests)),
+            blocking_task_guard: BlockingTaskGuard::new(settings.proof_permits),
+            blocking_io_request_semaphore: Arc::new(Semaphore::new(
+                settings.max_blocking_io_requests,
+            )),
+            settings,
             raw_tx_sender,
             raw_tx_forwarder,
             converter,
             next_env_builder: Box::new(next_env),
             tx_batch_sender,
-            pending_block_kind,
-            send_raw_transaction_sync_timeout,
             blob_sidecar_converter: BlobSidecarConverter::new(),
-            evm_memory_limit,
-            force_blob_sidecar_upcasting,
         }
     }
 
@@ -470,22 +493,28 @@ where
         self.components.pool()
     }
 
+    /// Returns the settings shared by the `eth` RPC helpers.
+    #[inline]
+    pub const fn eth_api_settings(&self) -> &EthApiSettings {
+        &self.settings
+    }
+
     /// Returns the gas cap.
     #[inline]
     pub const fn gas_cap(&self) -> u64 {
-        self.gas_cap
+        self.settings.gas_cap
     }
 
     /// Returns the `max_simulate_blocks`.
     #[inline]
     pub const fn max_simulate_blocks(&self) -> u64 {
-        self.max_simulate_blocks
+        self.settings.max_simulate_blocks
     }
 
     /// Returns whether state roots are computed for `eth_simulateV1`.
     #[inline]
     pub const fn compute_state_root_for_eth_simulate(&self) -> bool {
-        self.compute_state_root_for_eth_simulate
+        self.settings.compute_state_root_for_eth_simulate
     }
 
     /// Returns a handle to the gas oracle.
@@ -521,7 +550,7 @@ where
     /// The maximum number of blocks into the past for generating state proofs.
     #[inline]
     pub const fn eth_proof_window(&self) -> u64 {
-        self.eth_proof_window
+        self.settings.eth_proof_window
     }
 
     /// Returns reference to [`BlockingTaskGuard`].
@@ -570,7 +599,7 @@ where
     /// Returns the pending block kind
     #[inline]
     pub const fn pending_block_kind(&self) -> PendingBlockKind {
-        self.pending_block_kind
+        self.settings.pending_block_kind
     }
 
     /// Returns a handle to the raw transaction forwarder.
@@ -582,7 +611,7 @@ where
     /// Returns the timeout duration for `send_raw_transaction_sync` RPC method.
     #[inline]
     pub const fn send_raw_transaction_sync_timeout(&self) -> Duration {
-        self.send_raw_transaction_sync_timeout
+        self.settings.send_raw_transaction_sync_timeout
     }
 
     /// Returns a handle to the blob sidecar converter.
@@ -594,7 +623,7 @@ where
     /// Returns the EVM memory limit.
     #[inline]
     pub const fn evm_memory_limit(&self) -> u64 {
-        self.evm_memory_limit
+        self.settings.evm_memory_limit
     }
 
     /// Returns a reference to the blocking IO request semaphore.
@@ -606,7 +635,7 @@ where
     /// Returns whether to force upcasting EIP-4844 blob sidecars to EIP-7594 format.
     #[inline]
     pub const fn force_blob_sidecar_upcasting(&self) -> bool {
-        self.force_blob_sidecar_upcasting
+        self.settings.force_blob_sidecar_upcasting
     }
 }
 
@@ -682,6 +711,35 @@ mod tests {
         .build()
     }
 
+    #[test]
+    fn shared_settings_preserve_builder_limits() {
+        let api = EthApiBuilder::new(
+            MockEthProvider::default(),
+            testing_pool(),
+            NoopNetwork::default(),
+            EthEvmConfig::mainnet(),
+        )
+        .gas_cap(123_456u64.into())
+        .max_simulate_blocks(7)
+        .eth_proof_window(19)
+        .proof_permits(3)
+        .max_batch_size(5)
+        .max_blocking_io_requests(11)
+        .evm_memory_limit(4096)
+        .send_raw_transaction_sync_timeout(Duration::from_secs(17))
+        .build();
+        let settings = api.eth_api_settings();
+        assert_eq!(settings.gas_cap, 123_456);
+        assert_eq!(settings.max_simulate_blocks, 7);
+        assert_eq!(settings.eth_proof_window, 19);
+        assert_eq!(settings.proof_permits, 3);
+        assert_eq!(settings.max_batch_size, 5);
+        assert_eq!(settings.max_blocking_io_requests, 11);
+        assert_eq!(settings.evm_memory_limit, 4096);
+        assert_eq!(settings.send_raw_transaction_sync_timeout, Duration::from_secs(17));
+        assert!(settings.sender_recovery_cache.is_none());
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn ordinary_rpc_does_not_wait_for_consistent_view() {
         use reth_db_api::database::Database;
@@ -722,7 +780,7 @@ mod tests {
             let proof = proof.unwrap();
             assert_eq!(proof.balance, U256::ZERO);
             assert_eq!(proof.nonce, 0);
-            assert_eq!(proof.storage_hash, alloy_consensus::constants::EMPTY_ROOT_HASH);
+            assert_eq!(proof.storage_hash, B256::ZERO);
         });
 
         let balance = tokio::time::timeout(

@@ -1383,6 +1383,55 @@ pub trait PoolTransaction:
     /// Define a method to convert from the `Pooled` type to `Self`
     fn from_pooled(pooled: Recovered<Self::Pooled>) -> Self;
 
+    /// Recovers a pooled transaction using the chain's transaction recovery implementation.
+    fn try_recover(pooled: Self::Pooled) -> Result<Self, Self::Pooled> {
+        pooled.try_into_recovered().map(Self::from_pooled)
+    }
+
+    /// Recovers a pooled transaction, sharing checked sender recovery when configured.
+    fn try_recover_with_cache(
+        pooled: Self::Pooled,
+        cache: &reth_evm::SenderRecoveryCache,
+    ) -> Result<Self, Self::Pooled> {
+        match cache.recover(&pooled) {
+            Ok(signer) => Ok(Self::from_pooled(Recovered::new_unchecked(pooled, signer))),
+            Err(_) => Err(pooled),
+        }
+    }
+
+    /// Uses the specialized non-cached recovery hook when caching is disabled.
+    fn try_recover_with_cache_opt(
+        pooled: Self::Pooled,
+        cache: Option<&reth_evm::SenderRecoveryCache>,
+    ) -> Result<Self, Self::Pooled> {
+        match cache {
+            Some(cache) => Self::try_recover_with_cache(pooled, cache),
+            None => Self::try_recover(pooled),
+        }
+    }
+
+    /// Cached raw ingress hook. Override alongside `recover_raw_transaction` for custom formats.
+    fn recover_raw_transaction_with_cache(
+        data: &[u8],
+        cache: &reth_evm::SenderRecoveryCache,
+    ) -> Result<Self, RawPoolTransactionError> {
+        // A custom raw decoder may attach metadata or recognize a chain-specific encoding.
+        // Keep that hook authoritative; the standard Ethereum type specializes this fast path.
+        let transaction = Self::recover_raw_transaction(data)?;
+        let (consensus, _) = transaction.consensus_ref().into_parts();
+        let _ = cache.recover(consensus);
+        Ok(transaction)
+    }
+
+    /// Decodes the complete pooled representation, retaining any blob sidecar.
+    fn decode_raw_transaction(data: &[u8]) -> Result<Self::Pooled, RawPoolTransactionError> {
+        if data.is_empty() {
+            return Err(RawPoolTransactionError::EmptyRawTransactionData)
+        }
+        Self::Pooled::decode_2718_exact(data)
+            .map_err(|_| RawPoolTransactionError::FailedToDecodeSignedTransaction)
+    }
+
     /// Decodes and recovers a raw transaction into this pool transaction type.
     ///
     /// Implementations can override this to avoid constructing the pooled transaction as an
@@ -1596,6 +1645,14 @@ impl PoolTransaction for EthPooledTransaction {
     type Consensus = TransactionSigned;
 
     type Pooled = PooledTransactionVariant;
+
+    fn recover_raw_transaction_with_cache(
+        data: &[u8],
+        cache: &reth_evm::SenderRecoveryCache,
+    ) -> Result<Self, RawPoolTransactionError> {
+        Self::try_recover_with_cache(Self::decode_raw_transaction(data)?, cache)
+            .map_err(|_| RawPoolTransactionError::InvalidTransactionSignature)
+    }
 
     fn clone_into_consensus(&self) -> Recovered<Self::Consensus> {
         self.transaction().clone()

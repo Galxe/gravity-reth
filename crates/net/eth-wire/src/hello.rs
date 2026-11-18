@@ -96,6 +96,19 @@ impl HelloMessageWithProtocols {
             Ok(())
         }
     }
+
+    /// Toggles advertisement of the `snap/2` satellite protocol (EIP-8189).
+    ///
+    /// snap/2 is negotiated as an `RLPx` capability and rides alongside `eth` on the same
+    /// connection. Disabling removes `snap/2`, preserving explicitly configured legacy `snap/1`.
+    pub fn with_snap(mut self, enable: bool) -> Self {
+        if enable {
+            let _ = self.try_add_protocol(Protocol::snap_2());
+        } else {
+            self.protocols.retain(|p| p.cap.name != "snap" || p.cap.version != 2);
+        }
+        self
+    }
 }
 
 /// Raw rlpx protocol message used in the `p2p` handshake, containing information about the
@@ -230,8 +243,8 @@ impl HelloMessageBuilder {
 #[cfg(test)]
 mod tests {
     use crate::{
-        p2pstream::P2PMessage, Capability, EthVersion, HelloMessage, HelloMessageWithProtocols,
-        ProtocolVersion,
+        p2pstream::P2PMessage, protocol::Protocol, Capability, EthVersion, HelloMessage,
+        HelloMessageWithProtocols, ProtocolVersion,
     };
     use alloy_rlp::{Decodable, Encodable, Header, EMPTY_STRING_CODE};
     use reth_network_peers::pk2id;
@@ -339,5 +352,13 @@ mod tests {
         let mut buf = encoded.as_slice();
         assert_eq!(HelloMessage::decode(&mut buf).unwrap(), hello);
         assert_eq!(buf, [0xff]);
+    }
+    #[test]
+    fn disabling_snap_v2_preserves_explicit_snap_v1() {
+        let mut hello = HelloMessageWithProtocols::builder(Default::default()).build();
+        hello.try_add_protocol(Protocol::snap_1()).unwrap();
+        let hello = hello.with_snap(true).with_snap(false);
+        assert!(hello.contains_protocol(&Protocol::snap_1()));
+        assert!(!hello.contains_protocol(&Protocol::snap_2()));
     }
 }
