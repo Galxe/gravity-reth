@@ -2244,7 +2244,7 @@ struct ReceiveCache {
     /// Valid packet hashes paired with their canonical source IP.
     ///
     /// A replay from another IP must not suppress the genuine packet from the expected source.
-    unique_packets: schnellru::LruMap<(B256, IpAddr), ()>,
+    unique_packets: reth_lru::LruMap<(B256, IpAddr), ()>,
 }
 
 impl ReceiveCache {
@@ -2278,16 +2278,13 @@ impl ReceiveCache {
 
     /// Remembers a packet we accepted.
     fn insert_packet(&mut self, hash: B256, ip: IpAddr) {
-        self.unique_packets.insert((hash, ip.to_canonical()), ());
+        let _ = self.unique_packets.insert((hash, ip.to_canonical()), ());
     }
 }
 
 impl Default for ReceiveCache {
     fn default() -> Self {
-        Self {
-            ip_messages: Default::default(),
-            unique_packets: schnellru::LruMap::new(schnellru::ByLength::new(32)),
-        }
+        Self { ip_messages: Default::default(), unique_packets: reth_lru::LruMap::new(32) }
     }
 }
 

@@ -8425,11 +8425,11 @@ dependencies = [
  "parking_lot",
  "rand 0.8.7",
  "reth-ethereum-forks",
+ "reth-lru",
  "reth-net-banlist",
  "reth-net-nat",
  "reth-network-peers",
  "reth-tracing",
- "schnellru",
  "secp256k1 0.30.0",
  "serde",
  "thiserror 2.0.20",
@@ -8478,10 +8478,10 @@ dependencies = [
  "rand 0.9.5",
  "reth-chainspec",
  "reth-ethereum-forks",
+ "reth-lru",
  "reth-network-peers",
  "reth-tokio-util",
  "reth-tracing",
- "schnellru",
  "secp256k1 0.30.0",
  "serde",
  "serde_with",
@@ -8704,6 +8704,7 @@ dependencies = [
  "reth-execution-cache",
  "reth-execution-types",
  "reth-exex-types",
+ "reth-lru",
  "reth-metrics",
  "reth-network-p2p",
  "reth-node-ethereum",
@@ -8731,7 +8732,6 @@ dependencies = [
  "revm",
  "revm-primitives",
  "revm-state",
- "schnellru",
  "serde_json",
  "smallvec",
  "thiserror 2.0.20",
@@ -9377,6 +9377,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "reth-lru"
+version = "2.3.0"
+dependencies = [
+ "alloy-primitives",
+ "hashbrown 0.17.1",
+]
+
+[[package]]
 name = "reth-mdbx-sys"
 version = "2.3.0"
 dependencies = [
@@ -9454,6 +9462,7 @@ dependencies = [
  "reth-evm",
  "reth-evm-ethereum",
  "reth-fs-util",
+ "reth-lru",
  "reth-metrics",
  "reth-net-banlist",
  "reth-net-nat",
@@ -9470,7 +9479,6 @@ dependencies = [
  "reth-tracing",
  "reth-transaction-pool",
  "rustc-hash",
- "schnellru",
  "secp256k1 0.30.0",
  "serde",
  "smallvec",
@@ -10642,6 +10650,7 @@ dependencies = [
  "reth-ethereum-primitives",
  "reth-evm",
  "reth-execution-types",
+ "reth-lru",
  "reth-metrics",
  "reth-primitives-traits",
  "reth-revm",
@@ -10652,7 +10661,6 @@ dependencies = [
  "reth-transaction-pool",
  "revm",
  "revm-inspectors",
- "schnellru",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -11049,6 +11057,7 @@ dependencies = [
  "reth-evm-ethereum",
  "reth-execution-types",
  "reth-fs-util",
+ "reth-lru",
  "reth-metrics",
  "reth-pipe-exec-layer-event-bus",
  "reth-primitives-traits",
@@ -11060,7 +11069,6 @@ dependencies = [
  "revm-interpreter",
  "revm-primitives",
  "rustc-hash",
- "schnellru",
  "serde",
  "serde_json",
  "smallvec",

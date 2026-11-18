@@ -4,15 +4,15 @@ use super::{EthStateCacheConfig, MultiConsumerLruCache};
 use crate::block::CachedTransaction;
 use alloy_consensus::transaction::TxHashRef;
 use alloy_eips::BlockHashOrNumber;
-use alloy_primitives::{TxHash, B256};
+use alloy_primitives::{map::FbBuildHasher, TxHash, B256};
 use futures::{Stream, StreamExt};
 use reth_chain_state::CanonStateNotification;
 use reth_errors::{ProviderError, ProviderResult};
 use reth_execution_types::Chain;
+use reth_lru::LruMap;
 use reth_primitives_traits::{Block, BlockBody, NodePrimitives, RecoveredBlock};
 use reth_storage_api::{BlockReader, TransactionVariant};
 use reth_tasks::Runtime;
-use schnellru::{ByLength, LruMap};
 use std::{
     collections::VecDeque,
     future::Future,
@@ -50,10 +50,15 @@ type CachedBlockAndReceiptsResponseSender<B, R> =
 /// The type that can send the response for a transaction hash lookup
 type TransactionHashResponseSender<B, R> = oneshot::Sender<Option<CachedTransaction<B, R>>>;
 
-type BlockLruCache<B> =
-    MultiConsumerLruCache<B256, Arc<RecoveredBlock<B>>, BlockWithSendersResponseSender<B>>;
+type BlockLruCache<B> = MultiConsumerLruCache<
+    B256,
+    Arc<RecoveredBlock<B>>,
+    BlockWithSendersResponseSender<B>,
+    FbBuildHasher<32>,
+>;
 
-type ReceiptsLruCache<R> = MultiConsumerLruCache<B256, Arc<Vec<R>>, ReceiptsResponseSender<R>>;
+type ReceiptsLruCache<R> =
+    MultiConsumerLruCache<B256, Arc<Vec<R>>, ReceiptsResponseSender<R>, FbBuildHasher<32>>;
 
 /// Provides async access to cached eth data
 ///
@@ -111,7 +116,7 @@ impl<N: NodePrimitives> EthStateCache<N> {
             action_task_spawner,
             rate_limiter: Arc::new(Semaphore::new(max_concurrent_db_requests)),
             pending_fetches: VecDeque::new(),
-            tx_hash_index: LruMap::new(ByLength::new(max_cached_tx_hashes)),
+            tx_hash_index: LruMap::with_hasher(max_cached_tx_hashes, Default::default()),
         };
         let cache = Self { to_service };
         (cache, service)
@@ -282,7 +287,7 @@ where
     /// cache misses that are waiting for a slot from occupying Tokio blocking threads.
     pending_fetches: VecDeque<CacheFetch>,
     /// LRU index mapping transaction hashes to their block hash and index within the block.
-    tx_hash_index: LruMap<TxHash, (B256, usize), ByLength>,
+    tx_hash_index: LruMap<TxHash, (B256, usize), FbBuildHasher<32>>,
 }
 
 impl<Provider> EthStateCacheService<Provider, Runtime>
@@ -344,7 +349,7 @@ where
     fn index_block_transactions(&mut self, block: &RecoveredBlock<Provider::Block>) {
         let block_hash = block.hash();
         for (tx_idx, tx) in block.body().transactions().iter().enumerate() {
-            self.tx_hash_index.insert(*tx.tx_hash(), (block_hash, tx_idx));
+            let _ = self.tx_hash_index.insert(*tx.tx_hash(), (block_hash, tx_idx));
         }
     }
 
@@ -784,7 +789,7 @@ mod tests {
         let block = test_block();
         let tx_hash = *block.body().transactions().next().expect("test transaction").tx_hash();
 
-        service.tx_hash_index.insert(tx_hash, (B256::repeat_byte(0x33), 0));
+        let _ = service.tx_hash_index.insert(tx_hash, (B256::repeat_byte(0x33), 0));
 
         service.remove_block_transactions(&block);
 
