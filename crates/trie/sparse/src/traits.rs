@@ -79,9 +79,9 @@ pub trait SparseTrieInterface: Sized + Debug + Send + Sync {
 
     /// Reveals one or more trie nodes if they have not been revealed before.
     ///
-    /// This function decodes trie nodes and inserts them into the trie structure. It handles
-    /// different node types (leaf, extension, branch) by appropriately adding them to the trie and
-    /// recursively revealing their children.
+    /// Attaches supplied nodes where their paths identify blinded nodes in the current trie.
+    /// Nodes already revealed, paths diverging from the trie, and paths naming absent children
+    /// may be skipped.
     ///
     /// # Arguments
     ///
@@ -90,7 +90,8 @@ pub trait SparseTrieInterface: Sized + Debug + Send + Sync {
     ///
     /// # Returns
     ///
-    /// `Ok(())` if successful, or an error if any of the nodes was not revealed.
+    /// `Ok(())` if processing succeeds, including when nodes are skipped, or an error if
+    /// revelation fails. Success does not guarantee that every supplied node was incorporated.
     fn reveal_nodes(&mut self, nodes: Vec<RevealedSparseNode>) -> SparseTrieResult<()>;
 
     /// Updates the value of a leaf node at the specified path.
