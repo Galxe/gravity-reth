@@ -405,27 +405,24 @@ where
             "Finished executing block range"
         );
 
-        // Prepare the input for post execute commit hook, where an `ExExNotification` will be sent.
-        //
-        // Note: Since we only write to `blocks` if there are any ExExes, we don't need to perform
-        // the `has_exexs` check here as well
-        if !blocks.is_empty() {
-            let previous_input =
-                self.post_execute_commit_input.replace(Chain::new(blocks, state.clone(), None));
-
-            if previous_input.is_some() {
-                // Not processing the previous post execute commit input is a critical error, as it
-                // means that we didn't send the notification to ExExes
-                return Err(StageError::PostExecuteCommit(
-                    "Previous post execute commit input wasn't processed",
-                ))
-            }
+        if !blocks.is_empty() && self.post_execute_commit_input.is_some() {
+            return Err(StageError::PostExecuteCommit(
+                "Previous post execute commit input wasn't processed",
+            ))
         }
+        // Notifications retain the unpruned outcome; only copy it if the write will prune reverts.
+        let mut exex_state = None;
 
         let time = Instant::now();
 
         if self.can_prune_changesets(provider, start_block, max_block)? {
             let prune_modes = provider.prune_modes_ref();
+            if !blocks.is_empty() &&
+                prune_modes.account_history.is_some() &&
+                prune_modes.storage_history.is_some()
+            {
+                exex_state = Some(state.clone());
+            }
 
             // Iterate over all reverts and clear them if pruning is configured.
             for block_number in start_block..=max_block {
@@ -461,6 +458,11 @@ where
             write = ?db_write_duration,
             "Execution time"
         );
+
+        if !blocks.is_empty() {
+            self.post_execute_commit_input =
+                Some(Chain::new(blocks, exex_state.unwrap_or(state), None));
+        }
 
         let done = stage_progress == max_block;
         Ok(ExecOutput {
@@ -843,6 +845,18 @@ mod tests {
 
     #[tokio::test]
     async fn sanity_execution_of_block() {
+        use futures_util::{FutureExt, StreamExt};
+        use reth_chain_state::ForkChoiceSubscriptions;
+        use reth_exex::{ExExHandle, ExExManager, Wal};
+        use reth_provider::{providers::BlockchainProvider, ChangeSetReader};
+
+        fn post_commit<P>(stage: &mut ExecutionStage<EthEvmConfig>, _provider: &P)
+        where
+            ExecutionStage<EthEvmConfig>: Stage<P>,
+        {
+            <ExecutionStage<EthEvmConfig> as Stage<P>>::post_execute_commit(stage).unwrap();
+        }
+
         let factory = create_test_provider_factory();
         let provider = factory.provider_rw().unwrap();
         let input = ExecInput { target: Some(1), checkpoint: None };
@@ -895,7 +909,16 @@ mod tests {
 
         // If there is a pruning configuration, then it's forced to use the database.
         // This way we test both cases.
-        let modes = [None, Some(PruneModes::default())];
+        let modes = [
+            None,
+            Some(PruneModes::default()),
+            Some(PruneModes {
+                account_history: Some(PruneMode::Full),
+                storage_history: Some(PruneMode::Full),
+                ..Default::default()
+            }),
+        ];
+        let mut unpruned_outcome = None;
         let random_filter = ReceiptsLogPruneConfig(BTreeMap::from([(
             Address::random(),
             PruneMode::Distance(100000),
@@ -911,6 +934,26 @@ mod tests {
             }
 
             let mut execution_stage = stage();
+            let wal_dir = tempfile::tempdir().unwrap();
+            let wal = Wal::new(wal_dir.path()).unwrap();
+            let blockchain = BlockchainProvider::new(factory.clone()).unwrap();
+            let (exex, _events, mut notifications) = ExExHandle::new(
+                "execution-stage".to_string(),
+                Default::default(),
+                blockchain.clone(),
+                execution_stage.evm_config.clone(),
+                wal.handle(),
+            );
+            let mut manager = ExExManager::new(
+                factory.clone(),
+                vec![exex],
+                10,
+                wal,
+                blockchain.finalized_block_stream(),
+            );
+            execution_stage.exex_manager_handle = manager.handle();
+            assert!(execution_stage.exex_manager_handle.has_exexs());
+            let pruning = mode.as_ref().is_some_and(|m| m.account_history.is_some());
             provider.set_prune_modes(mode.clone().unwrap_or_default());
 
             let output = execution_stage.execute(&provider, input).unwrap();
@@ -932,6 +975,29 @@ mod tests {
                 },
                 done: true
             } if processed == total && total == block.gas_used);
+
+            {
+                let provider = factory.database_provider_rw().unwrap();
+                post_commit(&mut execution_stage, &provider);
+                assert!(execution_stage.post_execute_commit_input.is_none());
+                assert_eq!(provider.account_block_changeset(1).unwrap().is_empty(), pruning);
+            }
+            assert!((&mut manager).now_or_never().is_none());
+            let notification = notifications.next().now_or_never().flatten().unwrap().unwrap();
+            let ExExNotification::ChainCommitted { new } = notification else {
+                panic!("expected execution-stage committed notification")
+            };
+            assert!(new
+                .execution_outcome()
+                .bundle
+                .reverts
+                .iter()
+                .any(|reverts| !reverts.is_empty()));
+            if let Some(expected) = &unpruned_outcome {
+                assert_eq!(new.execution_outcome(), expected);
+            } else {
+                unpruned_outcome = Some(new.execution_outcome().clone());
+            }
 
             let provider = factory.provider().unwrap();
 
@@ -968,6 +1034,11 @@ mod tests {
                 provider.tx_ref().get::<tables::PlainStorageState>(account1),
                 Ok(Some(entry)) if entry.key == B256::with_last_byte(1) && entry.value == U256::from(2)
             ));
+
+            if pruning {
+                // This final case deliberately discarded disk reverts; earlier cases still unwind.
+                continue
+            }
 
             let mut provider = factory.database_provider_rw().unwrap();
             let mut stage = stage();

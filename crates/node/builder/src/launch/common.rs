@@ -480,6 +480,19 @@ where
         N: ProviderNodeTypes<DB = DB, ChainSpec = ChainSpec>,
         Evm: ConfigureEvm<Primitives = N::Primitives> + 'static,
     {
+        self.create_provider_factory_with_recovery::<N, Evm>(|_| Ok(())).await
+    }
+
+    /// Creates the provider after running an optional backfill recovery hook before consistency
+    /// checks.
+    pub async fn create_provider_factory_with_recovery<N, Evm>(
+        &self,
+        recover: impl FnOnce(&ProviderFactory<N>) -> eyre::Result<()>,
+    ) -> eyre::Result<ProviderFactory<N>>
+    where
+        N: ProviderNodeTypes<DB = DB, ChainSpec = ChainSpec>,
+        Evm: ConfigureEvm<Primitives = N::Primitives> + 'static,
+    {
         // `as_blocks_per_file_map` matches every segment exhaustively, so a new segment is a
         // compile error there instead of being silently missed here.
         let blocks_per_file_map = self.toml_config().static_files.as_blocks_per_file_map();
@@ -493,6 +506,8 @@ where
         )
         .with_prune_modes(self.prune_modes())
         .with_static_files_metrics();
+
+        recover(&factory)?;
 
         let has_receipt_pruning = self.toml_config().prune.has_receipts_pruning();
 
@@ -563,7 +578,19 @@ where
         N: ProviderNodeTypes<DB = DB, ChainSpec = ChainSpec>,
         Evm: ConfigureEvm<Primitives = N::Primitives> + 'static,
     {
-        let factory = self.create_provider_factory::<N, Evm>().await?;
+        self.with_provider_factory_and_recovery::<N, Evm>(|_| Ok(())).await
+    }
+
+    /// Attaches the provider after running a caller-supplied backfill recovery hook.
+    pub async fn with_provider_factory_and_recovery<N, Evm>(
+        self,
+        recover: impl FnOnce(&ProviderFactory<N>) -> eyre::Result<()>,
+    ) -> eyre::Result<LaunchContextWith<Attached<WithConfigs<ChainSpec>, ProviderFactory<N>>>>
+    where
+        N: ProviderNodeTypes<DB = DB, ChainSpec = ChainSpec>,
+        Evm: ConfigureEvm<Primitives = N::Primitives> + 'static,
+    {
+        let factory = self.create_provider_factory_with_recovery::<N, Evm>(recover).await?;
         let ctx = LaunchContextWith {
             inner: self.inner,
             attachment: self.attachment.map_right(|_| factory),

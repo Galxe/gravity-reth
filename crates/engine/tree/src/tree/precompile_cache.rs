@@ -1,4 +1,4 @@
-//! Contains a precompile cache backed by `schnellru::LruMap` (LRU by length).
+//! Contains bounded caches for successful precompile results.
 
 use alloy_primitives::{
     map::{DefaultHashBuilder, FbBuildHasher},
@@ -14,6 +14,9 @@ use tracing::error;
 
 /// Default max cache size for [`PrecompileCache`]
 const MAX_CACHE_SIZE: u32 = 1024 * 1024;
+
+/// Maximum calldata size to cache for a precompile.
+const MAX_PRECOMPILE_CACHE_INPUT_SIZE: usize = 2 * 1024;
 
 /// Stores caches for each precompile.
 #[derive(Debug, Clone, Default)]
@@ -180,7 +183,9 @@ where
     }
 
     fn call(&self, input: PrecompileInput<'_>) -> PrecompileResult {
-        if let Some(entry) = &self.cache.get(input.data, self.spec_id.clone()) &&
+        let cacheable_input = input.data.len() <= MAX_PRECOMPILE_CACHE_INPUT_SIZE;
+        if cacheable_input &&
+            let Some(entry) = &self.cache.get(input.data, self.spec_id.clone()) &&
             input.gas >= entry.gas_used()
         {
             self.increment_by_one_precompile_cache_hits();
@@ -194,6 +199,7 @@ where
         match &result {
             // Only successful outputs are cacheable. Non-success statuses and errors must execute
             // again instead of poisoning the cache for subsequent calls.
+            Ok(output) if output.is_success() && !cacheable_input => {}
             Ok(output) if output.is_success() => {
                 // Sanity-check precompile output to ensure that it does not affect state gas in any
                 // way.
@@ -258,6 +264,55 @@ mod tests {
         precompile::{PrecompileOutput, PrecompileStatus},
     };
     use revm_primitives::hardfork::SpecId;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn precompile_input_cache_bound_preserves_execution() {
+        for size in [MAX_PRECOMPILE_CACHE_INPUT_SIZE, MAX_PRECOMPILE_CACHE_INPUT_SIZE + 1] {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let observed_calls = Arc::clone(&calls);
+            let precompile: DynPrecompile = (
+                PrecompileId::custom("bounded"),
+                move |input: PrecompileInput<'_>| -> PrecompileResult {
+                    observed_calls.fetch_add(1, Ordering::Relaxed);
+                    Ok(PrecompileOutput {
+                        status: PrecompileStatus::Success,
+                        gas_used: 500,
+                        state_gas_used: 0,
+                        reservoir: input.reservoir,
+                        gas_refunded: 0,
+                        bytes: Bytes::from_static(b"bounded_result"),
+                    })
+                },
+            )
+                .into();
+            let cache = PrecompileCache::default();
+            let wrapped = CachedPrecompile::wrap(precompile, cache.clone(), SpecId::PRAGUE, None);
+            let address = Address::with_last_byte(1);
+            let mut evm =
+                EthEvmFactory::default().create_evm(EmptyDB::default(), EvmEnv::default());
+            evm.precompiles_mut().apply_precompile(&address, |_| Some(wrapped));
+            let input = Bytes::from(vec![0; size]);
+            for _ in 0..2 {
+                let output = evm
+                    .transact_raw(TxEnv {
+                        caller: Address::ZERO,
+                        gas_limit: 100_000,
+                        data: input.clone(),
+                        kind: address.into(),
+                        ..Default::default()
+                    })
+                    .unwrap()
+                    .result
+                    .into_output()
+                    .unwrap();
+                assert_eq!(output.as_ref(), b"bounded_result");
+            }
+            let cacheable = size <= MAX_PRECOMPILE_CACHE_INPUT_SIZE;
+            assert_eq!(calls.load(Ordering::Relaxed), if cacheable { 1 } else { 2 });
+            assert_eq!(cache.get(&input, SpecId::PRAGUE).is_some(), cacheable);
+        }
+    }
 
     #[test]
     fn test_precompile_cache_basic() {

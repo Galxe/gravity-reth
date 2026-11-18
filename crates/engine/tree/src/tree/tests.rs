@@ -1840,3 +1840,21 @@ fn input_error_classification_preserves_provider_and_internal_failures() {
         Err(InsertBlockFatalError::BlockExecutionError(_))
     ));
 }
+
+#[test]
+fn forkchoice_notifies_active_backfill_of_a_new_head() {
+    let mut harness = TestHarness::new(MAINNET.clone());
+    harness.tree.backfill_sync_state = BackfillSyncState::Active;
+    let head = B256::repeat_byte(0x42);
+    let state = ForkchoiceState {
+        head_block_hash: head,
+        safe_block_hash: B256::ZERO,
+        finalized_block_hash: B256::ZERO,
+    };
+    assert!(harness.tree.validate_forkchoice_state(state).unwrap().is_some());
+    assert!(matches!(
+        harness.from_tree_rx.try_recv().unwrap(),
+        EngineApiEvent::BackfillAction(BackfillAction::UpdateTarget(target)) if target == head
+    ));
+    assert!(harness.tree.backfill_sync_state.is_active());
+}
