@@ -12,13 +12,16 @@ use reth_e2e_test_utils::{
     node::NodeTestContext, setup, setup_engine, transaction::TransactionTestContext, wallet::Wallet,
 };
 use reth_node_api::TreeConfig;
-use reth_node_builder::{NodeBuilder, NodeHandle};
+use reth_node_builder::{rpc::BasicEngineApiBuilder, EngineApiExt, NodeBuilder, NodeHandle};
 use reth_node_core::{
     args::RpcServerArgs,
     node_config::NodeConfig,
     version::{version_metadata, CLIENT_CODE},
 };
-use reth_node_ethereum::{engine_ssz_proxy::EngineSszProxyLayer, EthereumAddOns, EthereumNode};
+use reth_node_ethereum::{
+    engine_ssz_proxy::EngineSszProxyLayer, EthereumAddOns, EthereumEngineValidatorBuilder,
+    EthereumNode,
+};
 use reth_provider::BlockNumReader;
 use reth_rpc_api::{TestingBuildBlockRequestV1, TestingBuildBlockResponseV1};
 use reth_rpc_layer::secret_to_bearer_header;
@@ -26,8 +29,10 @@ use reth_tasks::Runtime;
 use ssz::{Decode, Encode};
 use std::sync::Arc;
 
-const ENGINE_PRAGUE_PAYLOADS_ROUTE: &str = "/engine/v2/prague/payloads";
-const ENGINE_PRAGUE_FORKCHOICE_ROUTE: &str = "/engine/v2/prague/forkchoice";
+const ENGINE_PAYLOADS_ROUTE: &str = "/engine/v1/payloads";
+const ENGINE_EXECUTION_VERSION_HEADER: &str = "eth-execution-version";
+const ENGINE_PRAGUE_FORK_HEADER: &str = "prague";
+const ENGINE_FORKCHOICE_ROUTE: &str = "/engine/v1/forkchoice";
 const ENGINE_CAPABILITIES_ROUTE: &str = "/engine/v2/capabilities";
 const ENGINE_IDENTITY_ROUTE: &str = "/engine/v2/identity";
 
@@ -297,17 +302,26 @@ async fn test_engine_ssz_proxy_can_mine_block() -> eyre::Result<()> {
                 .with_http_api(reth_rpc_server_types::RpcModuleSelection::All),
         );
 
-    let (ssz_layer, ssz_handle) = EngineSszProxyLayer::new(chain_spec.clone());
+    let (ssz_layer, ssz_handle) = EngineSszProxyLayer::new();
+    let engine_api_handle = ssz_handle.clone();
+    let engine_api_builder = EngineApiExt::new(
+        BasicEngineApiBuilder::<EthereumEngineValidatorBuilder>::default(),
+        move |engine_api| {
+            engine_api_handle.set_engine_api_sync(engine_api);
+        },
+    );
     let NodeHandle { node, node_exit_future: _ } = NodeBuilder::new(node_config)
         .testing_node(runtime)
         .with_types::<EthereumNode>()
         .with_components(EthereumNode::components())
-        .with_add_ons(EthereumAddOns::default().with_auth_http_middleware(ssz_layer))
+        .with_add_ons(
+            EthereumAddOns::default()
+                .with_engine_api(engine_api_builder)
+                .with_auth_http_middleware(ssz_layer),
+        )
         .launch()
         .await?;
 
-    ssz_handle.set_engine(node.add_ons_handle.beacon_engine_handle.clone()).await;
-    ssz_handle.set_blob_store(node.pool.blob_store().clone()).await;
     let node = NodeTestContext::new(node, eth_payload_attributes).await?;
 
     let wallets = Wallet::new(1).wallet_gen();
@@ -401,8 +415,9 @@ async fn test_engine_ssz_proxy_can_mine_block() -> eyre::Result<()> {
     );
 
     let new_payload_response = client
-        .post(format!("{auth_url}{ENGINE_PRAGUE_PAYLOADS_ROUTE}"))
+        .post(format!("{auth_url}{ENGINE_PAYLOADS_ROUTE}"))
         .header(reqwest::header::AUTHORIZATION, auth_header.to_str()?)
+        .header(ENGINE_EXECUTION_VERSION_HEADER, ENGINE_PRAGUE_FORK_HEADER)
         .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
         .header(reqwest::header::ACCEPT, "application/octet-stream")
         .body((payload, B256::ZERO, envelope.execution_requests.take()).as_ssz_bytes())
@@ -414,8 +429,9 @@ async fn test_engine_ssz_proxy_can_mine_block() -> eyre::Result<()> {
     assert_eq!(status.status, PayloadStatusEnum::Valid);
 
     let fcu_response = client
-        .post(format!("{auth_url}{ENGINE_PRAGUE_FORKCHOICE_ROUTE}"))
+        .post(format!("{auth_url}{ENGINE_FORKCHOICE_ROUTE}"))
         .header(reqwest::header::AUTHORIZATION, auth_header.to_str()?)
+        .header(ENGINE_EXECUTION_VERSION_HEADER, ENGINE_PRAGUE_FORK_HEADER)
         .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
         .header(reqwest::header::ACCEPT, "application/octet-stream")
         .body(

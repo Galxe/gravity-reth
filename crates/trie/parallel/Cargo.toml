@@ -25,7 +25,6 @@ reth-trie.workspace = true
 # alloy
 alloy-rlp.workspace = true
 alloy-primitives.workspace = true
-alloy-eip7928.workspace = true
 alloy-evm.workspace = true
 
 # revm

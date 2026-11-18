@@ -13,7 +13,7 @@ use crate::{
     HashBuilder, Nibbles, TRIE_ACCOUNT_RLP_MAX_SIZE,
 };
 use alloy_consensus::EMPTY_ROOT_HASH;
-use alloy_primitives::{keccak256, Address, B256};
+use alloy_primitives::{keccak256, Address, B256, U256};
 use alloy_rlp::{BufMut, Encodable};
 use alloy_trie::proof::AddedRemovedKeys;
 use reth_execution_errors::{StateRootError, StorageRootError};
@@ -22,7 +22,7 @@ use tracing::{debug, instrument, trace};
 
 /// The default updates after which root algorithms should return intermediate progress rather than
 /// finishing the computation.
-const DEFAULT_INTERMEDIATE_THRESHOLD: u64 = 100_000;
+pub(crate) const DEFAULT_INTERMEDIATE_THRESHOLD: u64 = 100_000;
 
 #[cfg(feature = "metrics")]
 use crate::metrics::{StateRootMetrics, TrieRootMetrics};
@@ -662,20 +662,67 @@ where
             ))
         }
 
+        let mut trie_cursor = self.trie_cursor_factory.storage_trie_cursor(self.hashed_address)?;
+        StorageRootCalculation {
+            hashed_address: self.hashed_address,
+            prefix_set: self.prefix_set,
+            previous_state: self.previous_state,
+            walk_all_changed_branch_children: self.walk_all_changed_branch_children,
+            threshold: self.threshold,
+            retain_updates,
+        }
+        .calculate(
+            &mut trie_cursor,
+            &mut hashed_storage_cursor,
+            #[cfg(feature = "metrics")]
+            &self.metrics,
+        )
+    }
+}
+
+/// Parameters for a storage root calculation using pre-created cursors.
+pub(crate) struct StorageRootCalculation {
+    pub(crate) hashed_address: B256,
+    pub(crate) prefix_set: PrefixSet,
+    pub(crate) previous_state: Option<IntermediateRootState>,
+    pub(crate) walk_all_changed_branch_children: bool,
+    pub(crate) threshold: u64,
+    pub(crate) retain_updates: bool,
+}
+
+impl StorageRootCalculation {
+    /// Calculates with cursors already bound to `hashed_address`. All reads must share one view.
+    pub(crate) fn calculate<TC, HC>(
+        self,
+        trie_cursor: &mut TC,
+        hashed_storage_cursor: &mut HC,
+        #[cfg(feature = "metrics")] metrics: &TrieRootMetrics,
+    ) -> Result<StorageRootProgress, StorageRootError>
+    where
+        TC: TrieCursor,
+        HC: crate::hashed_cursor::HashedStorageCursor<Value = U256>,
+    {
+        let Self {
+            hashed_address,
+            prefix_set,
+            previous_state,
+            walk_all_changed_branch_children,
+            threshold,
+            retain_updates,
+        } = self;
+        let hashed_storage_cursor = BorrowedHashedCursor(hashed_storage_cursor);
         let mut tracker = TrieTracker::default();
         let mut trie_updates = StorageTrieUpdates::default();
 
-        let trie_cursor = self.trie_cursor_factory.storage_trie_cursor(self.hashed_address)?;
-
-        let (mut hash_builder, mut storage_node_iter) = match self.previous_state {
+        let (mut hash_builder, mut storage_node_iter) = match previous_state {
             Some(state) => {
                 let hash_builder = state.hash_builder.with_updates(retain_updates);
                 let walker = TrieWalker::<_>::storage_trie_from_stack(
                     trie_cursor,
                     state.walker_stack,
-                    self.prefix_set,
+                    prefix_set,
                 )
-                .with_walk_all_changed_branch_children(self.walk_all_changed_branch_children)
+                .with_walk_all_changed_branch_children(walk_all_changed_branch_children)
                 .with_deletions_retained(retain_updates);
                 let node_iter = TrieNodeIter::storage_trie(walker, hashed_storage_cursor)
                     .with_last_hashed_key(state.last_hashed_key);
@@ -683,8 +730,8 @@ where
             }
             None => {
                 let hash_builder = HashBuilder::default().with_updates(retain_updates);
-                let walker = TrieWalker::storage_trie(trie_cursor, self.prefix_set)?
-                    .with_walk_all_changed_branch_children(self.walk_all_changed_branch_children)
+                let walker = TrieWalker::storage_trie(trie_cursor, prefix_set)?
+                    .with_walk_all_changed_branch_children(walk_all_changed_branch_children)
                     .with_deletions_retained(retain_updates);
                 let node_iter = TrieNodeIter::storage_trie(walker, hashed_storage_cursor);
                 (hash_builder, node_iter)
@@ -709,7 +756,7 @@ where
                     // Check if we need to return intermediate progress
                     let total_updates_len =
                         storage_node_iter.walker.removed_keys_len() + hash_builder.updates_len();
-                    if retain_updates && total_updates_len as u64 >= self.threshold {
+                    if retain_updates && total_updates_len as u64 >= threshold {
                         let (walker_stack, walker_deleted_keys) = storage_node_iter.walker.split();
                         trie_updates.removed_nodes.extend(walker_deleted_keys);
                         let (hash_builder, hash_builder_updates) = hash_builder.split();
@@ -739,12 +786,12 @@ where
         let stats = tracker.finish();
 
         #[cfg(feature = "metrics")]
-        self.metrics.record(stats);
+        metrics.record(stats);
 
         trace!(
             target: "trie::storage_root",
             %root,
-            hashed_address = %self.hashed_address,
+            hashed_address = %hashed_address,
             duration = ?stats.duration(),
             branches_added = stats.branches_added(),
             leaves_added = stats.leaves_added(),
@@ -753,6 +800,24 @@ where
 
         let storage_slots_walked = stats.leaves_added() as usize;
         Ok(StorageRootProgress::Complete(root, storage_slots_walked, trie_updates))
+    }
+}
+
+/// Borrows a hashed cursor without changing the public cursor trait's implementations.
+struct BorrowedHashedCursor<'a, C>(&'a mut C);
+
+impl<C: HashedCursor> HashedCursor for BorrowedHashedCursor<'_, C> {
+    type Value = C::Value;
+    fn seek(
+        &mut self,
+        key: B256,
+    ) -> Result<Option<(B256, Self::Value)>, reth_storage_errors::db::DatabaseError> {
+        self.0.seek(key)
+    }
+    fn next(
+        &mut self,
+    ) -> Result<Option<(B256, Self::Value)>, reth_storage_errors::db::DatabaseError> {
+        self.0.next()
     }
 }
 
