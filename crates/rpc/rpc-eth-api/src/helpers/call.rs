@@ -27,8 +27,7 @@ use reth_evm::{
     ConfigureEvm, ConfigureEvmForRead, Evm, EvmEnvFor, HaltReasonFor, InspectorFor,
     TransactionEnvMut, TxEnvFor,
 };
-use reth_node_api::BlockBody;
-use reth_primitives_traits::{Recovered, RecoveredBlock};
+use reth_primitives_traits::{BlockBody, Recovered, RecoveredBlock};
 use reth_revm::{
     database::StateProviderDatabase,
     db::{
@@ -233,6 +232,12 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                         }
                     };
 
+                    // EIP-7708 already emits transfer logs: https://eips.ethereum.org/EIPS/eip-7708
+                    let trace_transfers = trace_transfers &&
+                        (!Cfg::spec(&evm_env.cfg_env)
+                            .into()
+                            .is_enabled_in(revm::primitives::hardfork::SpecId::AMSTERDAM) ||
+                            evm_env.cfg_env.is_eip7708_disabled());
                     let (result, results) = if trace_transfers {
                         // prepare inspector to capture transfer inside the evm so they are recorded
                         // and included in logs

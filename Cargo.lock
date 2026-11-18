@@ -3797,6 +3797,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "example-custom-evm"
+version = "0.0.0"
+dependencies = [
+ "alloy-evm",
+ "alloy-genesis",
+ "alloy-primitives",
+ "alloy-rpc-types-engine",
+ "eyre",
+ "reth-ethereum",
+ "reth-tracing",
+ "tokio",
+]
+
+[[package]]
 name = "example-custom-inspector"
 version = "0.0.0"
 dependencies = [
@@ -7944,6 +7958,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "reth-alloy-provider"
+version = "2.3.0"
+dependencies = [
+ "alloy-consensus",
+ "alloy-eips",
+ "alloy-network",
+ "alloy-primitives",
+ "alloy-provider",
+ "alloy-rpc-types",
+ "alloy-rpc-types-engine",
+ "reth-chainspec",
+ "reth-db-api",
+ "reth-errors",
+ "reth-execution-types",
+ "reth-node-types",
+ "reth-primitives",
+ "reth-provider",
+ "reth-prune-types",
+ "reth-stages-types",
+ "reth-storage-api",
+ "reth-trie",
+ "revm",
+ "revm-primitives",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "reth-basic-payload-builder"
 version = "2.3.0"
 dependencies = [
@@ -8622,6 +8664,7 @@ name = "reth-engine-tree"
 version = "2.3.0"
 dependencies = [
  "alloy-consensus",
+ "alloy-eip7928",
  "alloy-eips",
  "alloy-evm",
  "alloy-primitives",
@@ -8680,6 +8723,7 @@ dependencies = [
  "reth-testing-utils",
  "reth-tracing",
  "reth-trie",
+ "reth-trie-common",
  "reth-trie-db",
  "reth-trie-parallel",
  "reth-trie-sparse",
@@ -9565,6 +9609,7 @@ version = "2.3.0"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
+ "alloy-network",
  "alloy-primitives",
  "alloy-rpc-types",
  "alloy-rpc-types-engine",
@@ -9613,7 +9658,9 @@ dependencies = [
  "reth-rpc",
  "reth-rpc-api",
  "reth-rpc-builder",
+ "reth-rpc-convert",
  "reth-rpc-engine-api",
+ "reth-rpc-eth-api",
  "reth-rpc-eth-types",
  "reth-rpc-layer",
  "reth-stages",
@@ -10305,7 +10352,6 @@ dependencies = [
  "reth-network-api",
  "reth-network-peers",
  "reth-network-types",
- "reth-node-api",
  "reth-payload-primitives",
  "reth-primitives-traits",
  "reth-provider",
@@ -10548,7 +10594,6 @@ dependencies = [
  "reth-errors",
  "reth-evm",
  "reth-network-api",
- "reth-node-api",
  "reth-primitives-traits",
  "reth-prune-types",
  "reth-revm",
@@ -11060,6 +11105,7 @@ name = "reth-trie-common"
 version = "2.3.0"
 dependencies = [
  "alloy-consensus",
+ "alloy-eips",
  "alloy-genesis",
  "alloy-primitives",
  "alloy-rlp",
@@ -11186,7 +11232,6 @@ dependencies = [
  "reth-trie-db",
  "serde",
  "serde_json",
- "slotmap",
  "smallvec",
  "tracing",
 ]
@@ -12311,15 +12356,6 @@ name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
-
-[[package]]
-name = "slotmap"
-version = "1.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bdd58c3c93c3d278ca835519292445cb4b0d4dc59ccfdf7ceadaab3f8aeb4038"
-dependencies = [
- "version_check",
-]
 
 [[package]]
 name = "small_btree"

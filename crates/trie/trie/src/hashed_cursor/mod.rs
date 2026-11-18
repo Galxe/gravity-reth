@@ -2,6 +2,9 @@ use alloy_primitives::{B256, U256};
 use reth_primitives_traits::Account;
 use reth_storage_errors::db::DatabaseError;
 
+/// Opt-in observers for hashed cursor operations.
+pub mod metrics;
+
 /// Implementation of hashed state cursor traits for the post state.
 mod post_state;
 pub use post_state::*;

@@ -20,7 +20,6 @@
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 
-use reth_execution_types::RecoveredBlockAndExecutionOutput;
 use alloy_consensus::BlockHeader;
 use alloy_eips::BlockHashOrNumber;
 use alloy_network::{primitives::HeaderResponse, BlockResponse};
@@ -34,10 +33,9 @@ use reth_db_api::{
     models::StoredBlockBodyIndices,
 };
 use reth_errors::{ProviderError, ProviderResult};
+use reth_execution_types::RecoveredBlockAndExecutionOutput;
 use reth_node_types::{BlockTy, HeaderTy, NodeTypes, PrimitivesTy, ReceiptTy, TxTy};
-use reth_primitives::{
-    Account, Bytecode, RecoveredBlock, SealedHeader, TransactionMeta,
-};
+use reth_primitives::{Account, Bytecode, RecoveredBlock, SealedHeader, TransactionMeta};
 use reth_provider::{
     AccountReader, BlockHashReader, BlockIdReader, BlockNumReader, BlockReader, BytecodeReader,
     CanonChainTracker, CanonStateNotification, CanonStateNotifications, CanonStateSubscriptions,
@@ -614,6 +612,12 @@ where
     fn pending(&self) -> Result<StateProviderBox, ProviderError> {
         trace!(target: "alloy-provider", "Getting pending state provider");
         self.latest()
+    }
+
+    fn maybe_pending(&self) -> Result<Option<StateProviderBox>, ProviderError> {
+        // This RPC-backed factory has no local pending execution outcome.
+        // Keep pending()'s existing fallback separate from an actual pending view.
+        Ok(None)
     }
 
     fn pending_state_by_hash(
@@ -1236,7 +1240,8 @@ where
 
     fn pending_block_and_receipts(
         &self,
-    ) -> Result<Option<RecoveredBlockAndExecutionOutput<Self::Block, Self::Receipt>>, ProviderError> {
+    ) -> Result<Option<RecoveredBlockAndExecutionOutput<Self::Block, Self::Receipt>>, ProviderError>
+    {
         Err(ProviderError::UnsupportedProvider)
     }
 
@@ -1555,6 +1560,12 @@ where
         Ok(Box::new(self.clone()))
     }
 
+    fn maybe_pending(&self) -> Result<Option<StateProviderBox>, ProviderError> {
+        // This RPC-backed factory has no local pending execution outcome.
+        // Keep pending()'s existing fallback separate from an actual pending view.
+        Ok(None)
+    }
+
     fn pending_state_by_hash(
         &self,
         _block_hash: B256,
@@ -1711,6 +1722,7 @@ where
                 };
 
                 Ok(Some(revm::state::AccountInfo {
+                    account_id: None,
                     balance: account_info.balance,
                     nonce: account_info.nonce,
                     code_hash,

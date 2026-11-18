@@ -1,3 +1,4 @@
+use self::blob_cache::BlobValidationCache;
 use alloy_consensus::{
     BlobTransactionValidationError, BlockHeader, EnvKzgSettings, Transaction, TxReceipt,
 };
@@ -28,7 +29,7 @@ use reth_metrics::{
     metrics::{gauge, Gauge},
     Metrics,
 };
-use reth_node_api::{NewPayloadError, PayloadTypes};
+use reth_payload_primitives::{NewPayloadError, PayloadTypes};
 use reth_primitives_traits::{
     block::error::SealedBlockRecoveryError, BlockBody, GotExpected, NodePrimitives, RecoveredBlock,
     SealedBlock, SealedHeaderFor,
@@ -44,6 +45,8 @@ use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tokio::sync::{oneshot, RwLock};
 use tracing::warn;
+
+mod blob_cache;
 
 /// The type that implements the `validation` rpc namespace trait
 #[derive(Clone, Debug, derive_more::Deref)]
@@ -102,6 +105,7 @@ where
             disallow,
             validation_window,
             cached_state: Default::default(),
+            validated_blobs: Default::default(),
             task_spawner,
             sender_recovery_cache,
             metrics: Default::default(),
@@ -395,16 +399,15 @@ where
     }
 
     /// Validates the given [`BlobsBundleV2`] and returns versioned hashes for blobs.
+    ///
+    /// Exact blob, commitment, and cell-proof matches from recent submissions reuse KZG
+    /// validation. The resulting hashes are still checked against the block's EIP-4844
+    /// transactions during payload validation.
     pub fn validate_blobs_bundle_v2(
         &self,
         blobs_bundle: BlobsBundleV2,
     ) -> Result<Vec<B256>, ValidationApiError> {
-        let versioned_hashes = blobs_bundle.versioned_hashes();
-        let sidecar =
-            blobs_bundle.try_into_sidecar().map_err(|_| ValidationApiError::InvalidBlobsBundle)?;
-
-        sidecar.validate(&versioned_hashes, EnvKzgSettings::default().get())?;
-        Ok(versioned_hashes)
+        self.validated_blobs.validate(blobs_bundle)
     }
 
     /// Converts the payload into a block and recovers the transaction senders.
@@ -667,6 +670,8 @@ pub struct ValidationApiInner<Provider, E: ConfigureEvm, T: PayloadTypes> {
     /// latest head block state. Uses async `RwLock` to safely handle concurrent validation
     /// requests.
     cached_state: RwLock<(B256, CachedReads)>,
+    /// Recently validated blob, commitment, and cell-proof tuples shared by V2 submissions.
+    validated_blobs: BlobValidationCache,
     /// Task spawner for blocking operations
     task_spawner: Runtime,
     /// Cache of recovered transaction senders shared with transaction ingress and payload

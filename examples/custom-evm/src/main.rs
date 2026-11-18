@@ -3,7 +3,7 @@
 #![warn(unused_crate_dependencies)]
 
 use alloy_evm::{
-    eth::EthEvmContext,
+    eth::{EthBlockExecutionCtx, EthBlockExecutorFactory, EthEvmContext},
     precompiles::PrecompilesMap,
     revm::{
         context::DBErrorMarker,
@@ -14,10 +14,15 @@ use alloy_evm::{
 };
 use alloy_genesis::Genesis;
 use alloy_primitives::{address, Bytes};
+use alloy_rpc_types_engine::ExecutionData;
 use reth_ethereum::{
     chainspec::{Chain, ChainSpec},
     evm::{
-        primitives::{Database, EvmEnv},
+        primitives::{
+            execute::BlockExecutionError, ConfigureEngineEvm, ConfigureEvm, ConfigureEvmForRead,
+            Database, EvmEnv, EvmEnvFor, ExecutableTxIterator, ExecutionCtxFor,
+            NextBlockEnvAttributes,
+        },
         revm::{
             context::{BlockEnv, Context, TxEnv},
             context_interface::result::{EVMError, HaltReason},
@@ -27,7 +32,7 @@ use reth_ethereum::{
             primitives::hardfork::SpecId,
             MainBuilder, MainContext,
         },
-        EthEvm, EthEvmConfig,
+        EthBlockAssembler, EthEvm, EthEvmConfig, RethReceiptBuilder,
     },
     node::{
         api::{FullNodeTypes, NodeTypes},
@@ -36,11 +41,12 @@ use reth_ethereum::{
         node::EthereumAddOns,
         EthereumNode,
     },
+    primitives::{Header, SealedBlock, SealedHeader},
     tasks::Runtime,
-    EthPrimitives,
+    Block, EthPrimitives,
 };
 use reth_tracing::{RethTracer, Tracer};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 /// Custom EVM configuration.
 #[derive(Debug, Clone, Default)]
@@ -67,7 +73,7 @@ impl EvmFactory for MyEvmFactory {
             .build_mainnet_with_inspector(NoOpInspector {})
             .with_precompiles(PrecompilesMap::from_static(EthPrecompiles::new(spec).precompiles));
 
-        if spec.enables(SpecId::PRAGUE) {
+        if spec.is_enabled_in(SpecId::PRAGUE) {
             evm = evm.with_precompiles(PrecompilesMap::from_static(custom_precompiles(spec)));
         }
 
@@ -93,12 +99,111 @@ impl<Node> ExecutorBuilder<Node> for MyExecutorBuilder
 where
     Node: FullNodeTypes<Types: NodeTypes<ChainSpec = ChainSpec, Primitives = EthPrimitives>>,
 {
-    type EVM = EthEvmConfig<ChainSpec, MyEvmFactory>;
+    type EVM = MyEvmConfig;
 
     async fn build_evm(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::EVM> {
-        let evm_config =
-            EthEvmConfig::new_with_evm_factory(ctx.chain_spec(), MyEvmFactory::default());
-        Ok(evm_config)
+        Ok(MyEvmConfig::new(ctx.chain_spec()))
+    }
+}
+
+/// A node configuration that retains the example's custom EVM factory.
+#[derive(Debug, Clone)]
+pub struct MyEvmConfig {
+    base: EthEvmConfig,
+    custom: EthEvmConfig<ChainSpec, MyEvmFactory>,
+}
+
+impl MyEvmConfig {
+    /// Configures block environments and the custom executor for the same chain.
+    pub fn new(chain_spec: Arc<ChainSpec>) -> Self {
+        Self {
+            base: EthEvmConfig::new(chain_spec.clone()),
+            custom: EthEvmConfig::new_with_evm_factory(chain_spec, MyEvmFactory),
+        }
+    }
+}
+
+impl ConfigureEvmForRead for MyEvmConfig {}
+
+impl ConfigureEvm for MyEvmConfig {
+    type Primitives = <EthEvmConfig as ConfigureEvm>::Primitives;
+    type Error = <EthEvmConfig as ConfigureEvm>::Error;
+    type NextBlockEnvCtx = <EthEvmConfig as ConfigureEvm>::NextBlockEnvCtx;
+    type BlockExecutorFactory =
+        EthBlockExecutorFactory<RethReceiptBuilder, Arc<ChainSpec>, MyEvmFactory>;
+    type BlockAssembler = EthBlockAssembler<ChainSpec>;
+
+    fn block_executor_factory(&self) -> &Self::BlockExecutorFactory {
+        &self.custom.executor_factory
+    }
+
+    fn block_assembler(&self) -> &Self::BlockAssembler {
+        self.base.block_assembler()
+    }
+
+    fn evm_env(&self, header: &Header) -> Result<EvmEnv<SpecId>, Self::Error> {
+        self.base.evm_env(header)
+    }
+
+    fn next_evm_env(
+        &self,
+        parent: &Header,
+        attributes: &NextBlockEnvAttributes,
+    ) -> Result<EvmEnv<SpecId>, Self::Error> {
+        self.base.next_evm_env(parent, attributes)
+    }
+
+    fn context_for_block<'a>(
+        &self,
+        block: &'a SealedBlock<Block>,
+    ) -> Result<EthBlockExecutionCtx<'a>, Self::Error> {
+        self.base.context_for_block(block)
+    }
+
+    fn context_for_next_block(
+        &self,
+        parent: &SealedHeader,
+        attributes: Self::NextBlockEnvCtx,
+    ) -> Result<EthBlockExecutionCtx<'_>, Self::Error> {
+        self.base.context_for_next_block(parent, attributes)
+    }
+
+    fn parallel_executor<'a, DB: reth_ethereum::evm::primitives::ParallelDatabase + 'a>(
+        &self,
+        db: DB,
+    ) -> Box<
+        dyn reth_ethereum::evm::primitives::parallel_execute::ParallelExecutor<
+                Primitives = Self::Primitives,
+                Error = BlockExecutionError,
+            > + 'a,
+    > {
+        // The serial adapter executes with this example's custom factory.
+        Box::new(reth_ethereum::evm::primitives::parallel_execute::WrapExecutor::new(
+            reth_ethereum::evm::primitives::execute::BasicBlockExecutor::new(
+                self.clone(),
+                reth_ethereum::evm::revm::database_interface::WrapDatabaseRef(db),
+            ),
+        ))
+    }
+}
+
+impl ConfigureEngineEvm<ExecutionData> for MyEvmConfig {
+    fn evm_env_for_payload(&self, payload: &ExecutionData) -> Result<EvmEnvFor<Self>, Self::Error> {
+        self.base.evm_env_for_payload(payload)
+    }
+
+    fn context_for_payload<'a>(
+        &self,
+        payload: &'a ExecutionData,
+    ) -> Result<ExecutionCtxFor<'a, Self>, Self::Error> {
+        self.base.context_for_payload(payload)
+    }
+
+    fn tx_iterator_for_payload(
+        &self,
+        payload: &ExecutionData,
+    ) -> Result<impl ExecutableTxIterator<Self>, Self::Error> {
+        self.base.tx_iterator_for_payload(payload)
     }
 }
 
@@ -154,4 +259,49 @@ async fn main() -> eyre::Result<()> {
     println!("Node started");
 
     handle.node_exit_future.await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_evm::{revm::database::EmptyDB, Evm};
+    use alloy_primitives::TxKind;
+    use reth_ethereum::evm::revm::{
+        context::CfgEnv,
+        context_interface::result::{ExecutionResult, SuccessReason},
+    };
+
+    #[test]
+    fn custom_precompile_and_fork_builtins_survive_later_forks() {
+        let config = MyEvmConfig::new(reth_ethereum::chainspec::MAINNET.clone());
+        // Visit forks out of order to exercise the per-spec cache rather than its first entry.
+        for (spec, reason) in [
+            (SpecId::OSAKA, SuccessReason::Return),
+            (SpecId::PRAGUE, SuccessReason::Return),
+            (SpecId::AMSTERDAM, SuccessReason::Return),
+            (SpecId::CANCUN, SuccessReason::Stop),
+        ] {
+            if spec.is_enabled_in(SpecId::PRAGUE) {
+                let standard = Precompiles::new(PrecompileSpecId::from_spec_id(spec));
+                let custom = custom_precompiles(spec);
+                assert_eq!(custom.addresses().len(), standard.addresses().len() + 1);
+                assert!(standard.addresses().all(|address| custom.contains(address)));
+            }
+            let env = EvmEnv {
+                cfg_env: CfgEnv::new_with_spec(spec).with_chain_id(1),
+                block_env: BlockEnv { gas_limit: 30_000_000, ..Default::default() },
+            };
+            let output = config
+                .evm_with_env(EmptyDB::default(), env)
+                .transact(TxEnv {
+                    kind: TxKind::Call(address!("0x0000000000000000000000000000000000000999")),
+                    gas_limit: 50_000,
+                    ..Default::default()
+                })
+                .unwrap();
+            assert!(
+                matches!(output.result, ExecutionResult::Success { reason: actual, .. } if actual == reason)
+            );
+        }
+    }
 }

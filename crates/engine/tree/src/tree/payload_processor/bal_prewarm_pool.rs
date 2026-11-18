@@ -198,54 +198,66 @@ mod tests {
         use alloy_primitives::{Bytes, U256};
         use reth_execution_cache::CachedStatus;
         use reth_provider::test_utils::ExtendedAccount;
-        for count in [0u64, 1, 8, 9, 17] {
+        for count in [0usize, 1, 8, 9, 17] {
             let addr = Address::repeat_byte(1);
+            let caches = ExecutionCache::new(1000);
+            // Fixed-cache is direct-mapped: collisions may evict a previously warmed slot.
+            // Choose a collision-free read set against this cache's actual hash seed, then clear
+            // the probe values so every real warm below must read the provider.
+            let missing_key = StorageKey::from(U256::from(99));
+            let mut keys = vec![missing_key];
+            for candidate in 0..65_536u64 {
+                if keys.len() == count + 1 {
+                    break
+                }
+                let candidate = StorageKey::from(U256::from(candidate));
+                if candidate == missing_key {
+                    continue
+                }
+                caches.clear();
+                for &key in keys.iter().chain(core::iter::once(&candidate)) {
+                    caches.insert_storage(addr, key, Some(U256::MAX));
+                }
+                if keys.iter().chain(core::iter::once(&candidate)).all(|&key| {
+                    caches.get_or_try_insert_storage_with::<()>(addr, key, || Err(())).is_ok()
+                }) {
+                    keys.push(candidate);
+                }
+                if keys.len() == count + 1 {
+                    break
+                }
+            }
+            assert_eq!(keys.len(), count + 1, "could not construct a collision-free fixture");
+            caches.clear();
+            let slots = &keys[1..];
             let account = ExtendedAccount::new(7, U256::from(100))
                 .with_bytecode(Bytes::from_static(&[0x00]))
-                .extend_storage(
-                    (0..count)
-                        .map(|i| (StorageKey::from(U256::from(i)), U256::from(i + 1)))
-                        .collect::<Vec<_>>(),
-                );
+                .extend_storage(slots.iter().enumerate().map(|(i, &key)| (key, U256::from(i + 1))));
             let provider = MockEthProvider::default();
             provider.extend_accounts(vec![(addr, account)]);
             let expected_account = provider.basic_account(&addr).unwrap().unwrap();
             let code_hash = expected_account.bytecode_hash.unwrap();
-            let pool = BalPrewarmPool::new(2);
-            let caches = ExecutionCache::new(1000);
+            // Warming is best-effort under bucket contention. This fixture verifies exact cache
+            // contents without competing writers; the separate two-worker test checks draining.
+            let pool = BalPrewarmPool::new(1);
             pool.begin_block(Arc::new(move || Ok(Box::new(provider.clone()))), caches.clone());
-            pool.warm_account_with_storage(
-                addr,
-                (0..count).map(|i| StorageKey::from(U256::from(i))),
-            );
+            pool.warm_account_with_storage(addr, slots.iter().copied());
             // Keep the old public entry points usable alongside the batch API.
             pool.warm_account(addr);
-            pool.warm_storage(addr, StorageKey::from(U256::from(99)));
+            pool.warm_storage(addr, missing_key);
             pool.end_block();
             assert_eq!(
                 caches.get_or_try_insert_account_with::<()>(addr, || Err(())).unwrap(),
                 CachedStatus::Cached(Some(expected_account))
             );
-            for i in 0..count {
+            for (i, &key) in slots.iter().enumerate() {
                 assert_eq!(
-                    caches
-                        .get_or_try_insert_storage_with::<()>(
-                            addr,
-                            StorageKey::from(U256::from(i)),
-                            || Err(())
-                        )
-                        .unwrap(),
+                    caches.get_or_try_insert_storage_with::<()>(addr, key, || Err(())).unwrap(),
                     CachedStatus::Cached(U256::from(i + 1))
                 );
             }
             assert_eq!(
-                caches
-                    .get_or_try_insert_storage_with::<()>(
-                        addr,
-                        StorageKey::from(U256::from(99)),
-                        || Err(())
-                    )
-                    .unwrap(),
+                caches.get_or_try_insert_storage_with::<()>(addr, missing_key, || Err(())).unwrap(),
                 CachedStatus::Cached(U256::ZERO)
             );
             assert!(
