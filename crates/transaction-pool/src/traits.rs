@@ -52,7 +52,7 @@
 
 use crate::{
     blobstore::{BlobStore, BlobStoreError},
-    error::{InvalidPoolTransactionError, PoolError, PoolResult},
+    error::{InvalidPoolTransactionError, PoolError, PoolResult, RawPoolTransactionError},
     pool::{
         state::SubPool, BestTransactionFilter, NewTransactionEvent, TransactionEvents,
         TransactionListenerKind,
@@ -62,7 +62,7 @@ use crate::{
 };
 use alloy_consensus::{error::ValueError, transaction::TxHashRef, BlockHeader, Signed, Typed2718};
 use alloy_eips::{
-    eip2718::{Encodable2718, WithEncoded},
+    eip2718::{Decodable2718, Encodable2718, WithEncoded},
     eip2930::AccessList,
     eip4844::{
         env_settings::KzgSettings, BlobAndProofV1, BlobAndProofV2, BlobCellsAndProofsV1,
@@ -1341,8 +1341,7 @@ pub trait PoolTransaction:
     fn try_from_consensus(
         tx: Recovered<Self::Consensus>,
     ) -> Result<Self, Self::TryFromConsensusError> {
-        let (tx, signer) = tx.into_parts();
-        Ok(Self::from_pooled(Recovered::new_unchecked(tx.try_into()?, signer)))
+        Ok(Self::from_pooled(tx.try_convert()?))
     }
 
     /// Clone the transaction into a consensus variant.
@@ -1350,6 +1349,13 @@ pub trait PoolTransaction:
     /// This method is preferred when the [`PoolTransaction`] already wraps the consensus variant.
     fn clone_into_consensus(&self) -> Recovered<Self::Consensus> {
         self.clone().into_consensus()
+    }
+
+    /// Returns the EIP-2718 encoded consensus transaction.
+    ///
+    /// Implementations that synthesize the consensus representation should override this method.
+    fn encoded_2718_consensus(&self) -> Bytes {
+        self.consensus_ref().encoded_2718().into()
     }
 
     /// Returns a reference to the consensus transaction with the recovered sender.
@@ -1369,19 +1375,33 @@ pub trait PoolTransaction:
     /// Define a method to convert from the `Pooled` type to `Self`
     fn from_pooled(pooled: Recovered<Self::Pooled>) -> Self;
 
+    /// Decodes and recovers a raw transaction into this pool transaction type.
+    ///
+    /// Implementations can override this to avoid constructing the pooled transaction as an
+    /// intermediate value when the raw representation can be converted directly into `Self`.
+    fn recover_raw_transaction(data: &[u8]) -> Result<Self, RawPoolTransactionError> {
+        if data.is_empty() {
+            return Err(RawPoolTransactionError::EmptyRawTransactionData)
+        }
+
+        let transaction = Self::Pooled::decode_2718_exact(data)
+            .map_err(|_| RawPoolTransactionError::FailedToDecodeSignedTransaction)?;
+
+        transaction
+            .try_into_recovered()
+            .map(Self::from_pooled)
+            .map_err(|_| RawPoolTransactionError::InvalidTransactionSignature)
+    }
+
     /// Tries to convert the `Consensus` type into the `Pooled` type.
     fn try_into_pooled(self) -> Result<Recovered<Self::Pooled>, Self::TryFromConsensusError> {
-        let consensus = self.into_consensus();
-        let (tx, signer) = consensus.into_parts();
-        Ok(Recovered::new_unchecked(tx.try_into()?, signer))
+        self.into_consensus().try_convert()
     }
 
     /// Clones the consensus transactions and tries to convert the `Consensus` type into the
     /// `Pooled` type.
     fn clone_into_pooled(&self) -> Result<Recovered<Self::Pooled>, Self::TryFromConsensusError> {
-        let consensus = self.clone_into_consensus();
-        let (tx, signer) = consensus.into_parts();
-        Ok(Recovered::new_unchecked(tx.try_into()?, signer))
+        self.clone_into_consensus().try_convert()
     }
 
     /// Converts the `Pooled` type into the `Consensus` type.
@@ -1574,7 +1594,7 @@ impl PoolTransaction for EthPooledTransaction {
     }
 
     fn consensus_ref(&self) -> Recovered<&Self::Consensus> {
-        Recovered::new_unchecked(&*self.transaction, self.transaction.signer())
+        self.transaction.as_recovered_ref()
     }
 
     fn into_consensus(self) -> Recovered<Self::Consensus> {
@@ -1731,11 +1751,9 @@ impl EthPoolTransaction for EthPooledTransaction {
         self,
         sidecar: Arc<BlobTransactionSidecarVariant>,
     ) -> Option<Recovered<Self::Pooled>> {
-        let (signed_transaction, signer) = self.into_consensus().into_parts();
-        let pooled_transaction =
-            signed_transaction.try_into_pooled_eip4844(Arc::unwrap_or_clone(sidecar)).ok()?;
-
-        Some(Recovered::new_unchecked(pooled_transaction, signer))
+        self.into_consensus()
+            .try_map(|tx| tx.try_into_pooled_eip4844(Arc::unwrap_or_clone(sidecar)))
+            .ok()
     }
 
     fn try_from_eip4844(
@@ -1925,12 +1943,22 @@ impl<Tx: PoolTransaction> Stream for NewSubpoolTransactionStream<Tx> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::MockTransaction;
     use alloy_consensus::{
         EthereumTxEnvelope, SignableTransaction, TxEip1559, TxEip2930, TxEip4844, TxEip7702,
         TxEnvelope, TxLegacy,
     };
     use alloy_eips::eip4844::DATA_GAS_PER_BLOB;
     use alloy_primitives::Signature;
+
+    #[test]
+    fn test_mock_consensus_encoding() {
+        let transaction = MockTransaction::legacy();
+        assert_eq!(
+            transaction.encoded_2718_consensus(),
+            transaction.into_consensus().encoded_2718()
+        );
+    }
 
     #[test]
     fn test_pool_size_invariants() {
@@ -1972,7 +2000,7 @@ mod tests {
     #[test]
     fn test_eth_pooled_transaction_new_legacy() {
         // Create a legacy transaction with specific parameters
-        let tx = TxEnvelope::Legacy(
+        let tx = EthereumTxEnvelope::<TxEip4844>::Legacy(
             TxLegacy {
                 gas_price: 10,
                 gas_limit: 1000,
@@ -1989,6 +2017,7 @@ mod tests {
         assert_eq!(pooled_tx.encoded_length, 200);
         assert_eq!(pooled_tx.blob_sidecar, EthBlobTransactionSidecar::None);
         assert_eq!(pooled_tx.cost, U256::from(100) + U256::from(10 * 1000));
+        assert_eq!(pooled_tx.encoded_2718_consensus(), transaction.encoded_2718());
     }
 
     #[test]

@@ -563,7 +563,7 @@ RPC State Cache:
       --rpc-cache.max-cached-tx-hashes <MAX_CACHED_TX_HASHES>
           Maximum number of transaction hashes to cache for transaction lookups
 
-          [default: 30000]
+          [default: 100000]
 
 Gas Price Oracle:
       --gpo.blocks <BLOCKS>
@@ -1067,6 +1067,9 @@ Engine:
 
           [default: 1]
 
+      --cpu-cores <COUNT>
+          Override the available CPU count for node thread pools and parallel execution decisions. Does not change CPU affinity. Explicit thread counts take precedence
+
       --engine.disable-precompile-cache
           Disable precompile cache
 
@@ -1082,10 +1085,10 @@ Engine:
           Allow unwinding canonical header to ancestor during forkchoice updates. See `TreeConfig::unwind_canonical_header` for more details
 
       --engine.storage-worker-count <STORAGE_WORKER_COUNT>
-          Configure the number of storage proof workers in the Tokio blocking pool. If not specified, defaults to 2x available parallelism
+          Configure the number of storage proof workers in the Tokio blocking pool. If not specified or zero, defaults to 2x available parallelism
 
       --engine.account-worker-count <ACCOUNT_WORKER_COUNT>
-          Configure the number of account proof workers in the Tokio blocking pool. If not specified, defaults to the same count as storage workers
+          Configure the number of account proof workers in the Tokio blocking pool. If not specified or zero, defaults to 2x available parallelism
 
       --engine.prewarming-threads <PREWARMING_THREADS>
           Configure the number of prewarming threads. If not specified, defaults to available parallelism

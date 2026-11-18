@@ -10,7 +10,7 @@ use reth_engine_primitives::{
     DEFAULT_MULTIPROOF_TASK_CHUNK_SIZE, DEFAULT_PERSISTENCE_BACKPRESSURE_THRESHOLD,
     DEFAULT_SPARSE_TRIE_MAX_HOT_ACCOUNTS, DEFAULT_SPARSE_TRIE_MAX_HOT_SLOTS,
 };
-use std::{sync::OnceLock, time::Duration};
+use std::{num::NonZeroUsize, sync::OnceLock, time::Duration};
 
 use crate::node_config::{
     DEFAULT_CROSS_BLOCK_CACHE_SIZE_MB, DEFAULT_MEMORY_BLOCK_BUFFER_TARGET,
@@ -384,6 +384,11 @@ pub struct EngineArgs {
     #[arg(long = "engine.reserved-cpu-cores", default_value_t = DefaultEngineValues::get_global().reserved_cpu_cores)]
     pub reserved_cpu_cores: usize,
 
+    /// Override the available CPU count for node thread pools and parallel execution decisions.
+    /// Does not change CPU affinity. Explicit thread counts take precedence.
+    #[arg(long = "cpu-cores", value_name = "COUNT")]
+    pub cpu_cores: Option<NonZeroUsize>,
+
     /// CAUTION: This CLI flag has no effect anymore, use --engine.disable-precompile-cache
     /// if you want to disable precompile cache
     #[arg(long = "engine.precompile-cache", default_value = "true", hide = true)]
@@ -415,12 +420,12 @@ pub struct EngineArgs {
     pub allow_unwind_canonical_header: bool,
 
     /// Configure the number of storage proof workers in the Tokio blocking pool.
-    /// If not specified, defaults to 2x available parallelism.
+    /// If not specified or zero, defaults to 2x available parallelism.
     #[arg(long = "engine.storage-worker-count", default_value = Resettable::from(DefaultEngineValues::get_global().storage_worker_count.map(|v| v.to_string().into())))]
     pub storage_worker_count: Option<usize>,
 
     /// Configure the number of account proof workers in the Tokio blocking pool.
-    /// If not specified, defaults to the same count as storage workers.
+    /// If not specified or zero, defaults to 2x available parallelism.
     #[arg(long = "engine.account-worker-count", default_value = Resettable::from(DefaultEngineValues::get_global().account_worker_count.map(|v| v.to_string().into())))]
     pub account_worker_count: Option<usize>,
 
@@ -570,6 +575,7 @@ impl Default for EngineArgs {
             accept_execution_requests_hash,
             multiproof_chunk_size,
             reserved_cpu_cores,
+            cpu_cores: None,
             precompile_cache_enabled: true,
             precompile_cache_disabled,
             state_root_fallback,
@@ -658,7 +664,11 @@ impl EngineArgs {
             .without_bal_batch_io(self.disable_bal_batch_io);
         #[cfg(feature = "trie-debug")]
         let config = config.with_proof_jitter(self.proof_jitter);
-        config
+        if let Some(cpu_cores) = self.cpu_cores {
+            config.with_has_enough_parallelism(cpu_cores.get() >= 5)
+        } else {
+            config
+        }
     }
 }
 
@@ -672,6 +682,50 @@ mod tests {
     struct CommandParser<T: Args> {
         #[command(flatten)]
         args: T,
+    }
+
+    #[test]
+    fn cpu_cores_override_controls_parallel_state_root() {
+        for (cores, enabled) in [(1, false), (4, false), (5, true), (8, true)] {
+            let args = CommandParser::<EngineArgs>::parse_from([
+                "reth",
+                "--cpu-cores",
+                &cores.to_string(),
+            ])
+            .args;
+            assert_eq!(args.cpu_cores.unwrap().get(), cores);
+            assert_eq!(args.tree_config().use_state_root_task(), enabled);
+        }
+    }
+
+    #[test]
+    fn cpu_cores_override_rejects_zero() {
+        let err = CommandParser::<EngineArgs>::try_parse_from(["reth", "--cpu-cores", "0"])
+            .err()
+            .unwrap();
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+    }
+
+    #[test]
+    fn cpu_cores_override_preserves_state_root_fallback() {
+        let args = CommandParser::<EngineArgs>::parse_from([
+            "reth",
+            "--cpu-cores",
+            "8",
+            "--engine.state-root-fallback",
+        ])
+        .args;
+        assert!(args.tree_config().state_root_fallback());
+        assert!(args.tree_config().use_state_root_task());
+
+        let legacy = CommandParser::<EngineArgs>::parse_from([
+            "reth",
+            "--cpu-cores",
+            "8",
+            "--engine.legacy-state-root",
+        ])
+        .args;
+        assert!(!legacy.tree_config().use_state_root_task());
     }
 
     #[test]
@@ -755,6 +809,7 @@ mod tests {
             accept_execution_requests_hash: true,
             multiproof_chunk_size: 512,
             reserved_cpu_cores: 4,
+            cpu_cores: Some(NonZeroUsize::new(8).unwrap()),
             precompile_cache_enabled: true,
             precompile_cache_disabled: true,
             state_root_fallback: true,
@@ -800,6 +855,8 @@ mod tests {
             "512",
             "--engine.reserved-cpu-cores",
             "4",
+            "--cpu-cores",
+            "8",
             "--engine.disable-precompile-cache",
             "--engine.state-root-fallback",
             "--engine.always-process-payload-attributes-on-canonical-head",

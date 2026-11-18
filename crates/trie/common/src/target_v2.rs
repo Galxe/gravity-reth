@@ -2,7 +2,8 @@
 
 use crate::Nibbles;
 use alloc::vec::Vec;
-use alloy_primitives::{map::B256Map, B256};
+use alloy_primitives::{keccak256, map::B256Map, B256};
+use revm_state::EvmState;
 
 /// Target describes a proof target. For every proof target given, a proof calculator will calculate
 /// and return all nodes whose path is a prefix of the target's `key_nibbles`.
@@ -57,6 +58,51 @@ pub struct MultiProofTargetsV2 {
 }
 
 impl MultiProofTargetsV2 {
+    /// Returns a set of [`MultiProofTargetsV2`] and the total amount of storage targets, based on
+    /// the given state.
+    pub fn from_state(state: EvmState) -> (Self, usize) {
+        let mut targets = Self::default();
+        targets.account_targets.reserve(state.len());
+        targets.storage_targets.reserve(state.len());
+        let mut storage_target_count = 0;
+        for (addr, account) in state {
+            // if the account was not touched, or if the account was selfdestructed, do not
+            // fetch proofs for it
+            //
+            // Since selfdestruct can only happen in the same transaction, we can skip
+            // prefetching proofs for selfdestructed accounts
+            //
+            // See: https://eips.ethereum.org/EIPS/eip-6780
+            if !account.is_touched() || account.is_selfdestructed() {
+                continue
+            }
+
+            let hashed_address = keccak256(addr);
+
+            if account.info != account.original_info() {
+                targets.account_targets.push(hashed_address.into());
+            }
+
+            let mut storage_slots = Vec::with_capacity(account.storage.len());
+            for (key, slot) in account.storage {
+                // do nothing if unchanged
+                if !slot.is_changed() {
+                    continue
+                }
+
+                let hashed_slot = keccak256(B256::new(key.to_be_bytes()));
+                storage_slots.push(ProofV2Target::from(hashed_slot));
+            }
+
+            storage_target_count += storage_slots.len();
+            if !storage_slots.is_empty() {
+                targets.storage_targets.insert(hashed_address, storage_slots);
+            }
+        }
+
+        (targets, storage_target_count)
+    }
+
     /// Returns true is there are no account or storage targets.
     pub fn is_empty(&self) -> bool {
         self.account_targets.is_empty() && self.storage_targets.is_empty()
@@ -69,6 +115,10 @@ impl MultiProofTargetsV2 {
     }
 
     /// Returns an iterator that yields chunks of the specified size.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the chunk size is zero.
     pub fn chunks(self, chunk_size: usize) -> impl Iterator<Item = Self> {
         ChunkedMultiProofTargetsV2::new(self, chunk_size)
     }
@@ -96,6 +146,7 @@ pub struct ChunkedMultiProofTargetsV2 {
 impl ChunkedMultiProofTargetsV2 {
     /// Creates a new chunked iterator for the given targets.
     pub fn new(targets: MultiProofTargetsV2, size: usize) -> Self {
+        assert!(size > 0, "chunk size must be non-zero");
         Self {
             account_targets: targets.account_targets.into_iter(),
             storage_targets: targets.storage_targets,
@@ -198,5 +249,14 @@ impl Iterator for ChunkedMultiProofTargetsV2 {
         } else {
             Some(chunk)
         }
+    }
+}
+
+#[cfg(test)]
+mod chunk_size_tests {
+    #[test]
+    #[should_panic(expected = "chunk size must be non-zero")]
+    fn zero_chunk_size_is_rejected() {
+        let _ = super::MultiProofTargetsV2::default().chunks(0);
     }
 }

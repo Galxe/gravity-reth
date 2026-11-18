@@ -200,20 +200,21 @@ impl TrieUpdates {
         TrieUpdatesSorted { account_nodes, storage_tries }
     }
 
-    /// Converts trie updates into [`TrieUpdatesSortedRef`].
-    pub fn into_sorted_ref<'a>(&'a self) -> TrieUpdatesSortedRef<'a> {
+    /// Allocates sorted collections borrowing the trie updates as [`TrieUpdatesSortedRef`].
+    pub fn to_sorted_ref<'a>(&'a self) -> TrieUpdatesSortedRef<'a> {
         let mut account_nodes = self.account_nodes.iter().collect::<Vec<_>>();
         account_nodes.sort_unstable_by(|a, b| a.0.cmp(b.0));
 
         TrieUpdatesSortedRef {
             removed_nodes: self.removed_nodes.iter().collect::<BTreeSet<_>>(),
             account_nodes,
-            storage_tries: self
-                .storage_tries
-                .iter()
-                .map(|m| (*m.0, m.1.into_sorted_ref().clone()))
-                .collect(),
+            storage_tries: self.storage_tries.iter().map(|m| (*m.0, m.1.to_sorted_ref())).collect(),
         }
+    }
+
+    /// Allocates sorted collections borrowing the trie updates.
+    pub fn into_sorted_ref(&self) -> TrieUpdatesSortedRef<'_> {
+        self.to_sorted_ref()
     }
 
     /// Clears the nodes and storage trie maps in this `TrieUpdates`.
@@ -341,13 +342,19 @@ impl StorageTrieUpdates {
         StorageTrieUpdatesSorted { is_deleted: self.is_deleted, storage_nodes }
     }
 
-    /// Convert storage trie updates into [`StorageTrieUpdatesSortedRef`].
-    pub fn into_sorted_ref(&self) -> StorageTrieUpdatesSortedRef<'_> {
+    /// Allocates sorted collections borrowing the storage updates as
+    /// [`StorageTrieUpdatesSortedRef`].
+    pub fn to_sorted_ref(&self) -> StorageTrieUpdatesSortedRef<'_> {
         StorageTrieUpdatesSortedRef {
             is_deleted: self.is_deleted,
             removed_nodes: self.removed_nodes.iter().collect::<BTreeSet<_>>(),
             storage_nodes: self.storage_nodes.iter().collect::<BTreeMap<_, _>>(),
         }
+    }
+
+    /// Allocates sorted collections borrowing the storage updates.
+    pub fn into_sorted_ref(&self) -> StorageTrieUpdatesSortedRef<'_> {
+        self.to_sorted_ref()
     }
 }
 

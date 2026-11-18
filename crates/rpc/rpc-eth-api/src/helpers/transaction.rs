@@ -15,7 +15,7 @@ use alloy_dyn_abi::TypedData;
 use alloy_eips::{eip2718::Encodable2718, BlockId};
 use alloy_network::{TransactionBuilder, TransactionBuilder4844};
 use alloy_primitives::{Address, Bytes, TxHash, B256, U256};
-use alloy_rpc_types_eth::{state::EvmOverrides, TransactionInfo};
+use alloy_rpc_types_eth::{state::EvmOverrides, TransactionInfo, TransactionRequest};
 use futures::{Future, StreamExt};
 use reth_chain_state::CanonStateSubscriptions;
 use reth_primitives_traits::{
@@ -24,7 +24,7 @@ use reth_primitives_traits::{
 use reth_rpc_convert::{transaction::RpcConvert, RpcTxReq, TransactionConversionError};
 use reth_rpc_eth_types::{
     block::convert_transaction_receipt,
-    utils::{binary_search, recover_raw_transaction},
+    utils::binary_search,
     EthApiError::{self, TransactionConfirmationTimeout},
     FillTransaction, SignError, TransactionSource,
 };
@@ -33,7 +33,8 @@ use reth_storage_api::{
     TransactionsProvider,
 };
 use reth_transaction_pool::{
-    AddedTransactionOutcome, PoolPooledTx, PoolTransaction, TransactionOrigin, TransactionPool,
+    AddedTransactionOutcome, PoolPooledTx, PoolTransaction, PoolTx, TransactionOrigin,
+    TransactionPool,
 };
 use std::{sync::Arc, time::Duration};
 
@@ -85,11 +86,15 @@ pub trait EthTransactions: LoadTransaction<Provider: BlockReaderIdExt> {
         tx: Bytes,
     ) -> impl Future<Output = Result<B256, Self::Error>> + Send {
         async move {
-            let recovered = recover_raw_transaction::<PoolPooledTx<Self::Pool>>(&tx)?;
-            // RPC-submitted transactions are Local (exempt from per-sender slot limits);
-            // upstream regressed this to External in #21969 and restored it in #25412,
-            // which landed after this merge base.
-            self.send_transaction(TransactionOrigin::Local, WithEncoded::new(tx, recovered)).await
+            let pool_transaction =
+                <PoolTx<Self::Pool> as PoolTransaction>::recover_raw_transaction(&tx)
+                    .map_err(Self::Error::from_eth_err)?;
+            // RPC submissions use the local-origin pool policy.
+            self.send_pool_transaction(
+                TransactionOrigin::Local,
+                WithEncoded::new(tx, pool_transaction),
+            )
+            .await
         }
     }
 
@@ -98,6 +103,21 @@ pub trait EthTransactions: LoadTransaction<Provider: BlockReaderIdExt> {
         &self,
         origin: TransactionOrigin,
         tx: WithEncoded<Recovered<PoolPooledTx<Self::Pool>>>,
+    ) -> impl Future<Output = Result<B256, Self::Error>> + Send {
+        async move {
+            let (encoded, recovered) = tx.split();
+            let pool_transaction =
+                <Self::Pool as TransactionPool>::Transaction::from_pooled(recovered);
+
+            self.send_pool_transaction(origin, WithEncoded::new(encoded, pool_transaction)).await
+        }
+    }
+
+    /// Submits the pool transaction to the pool with the given [`TransactionOrigin`].
+    fn send_pool_transaction(
+        &self,
+        origin: TransactionOrigin,
+        tx: WithEncoded<PoolTx<Self::Pool>>,
     ) -> impl Future<Output = Result<B256, Self::Error>> + Send;
 
     /// Decodes and recovers the transaction and submits it to the pool.
@@ -477,6 +497,8 @@ pub trait EthTransactions: LoadTransaction<Provider: BlockReaderIdExt> {
         Self: EthApiSpec + LoadBlock + EstimateCall,
     {
         async move {
+            ensure_no_conflicting_fee_fields(request.as_ref())?;
+
             let from = match request.as_ref().from() {
                 Some(from) => from,
                 None => return Err(SignError::NoAccount.into_eth_err()),
@@ -536,6 +558,8 @@ pub trait EthTransactions: LoadTransaction<Provider: BlockReaderIdExt> {
         Self: EthApiSpec + LoadBlock + EstimateCall + LoadFee,
     {
         async move {
+            ensure_no_conflicting_fee_fields(request.as_ref())?;
+
             if request.as_ref().value().is_none() {
                 request.as_mut().set_value(U256::ZERO);
             }
@@ -638,6 +662,8 @@ pub trait EthTransactions: LoadTransaction<Provider: BlockReaderIdExt> {
         request: RpcTxReq<Self::NetworkTypes>,
     ) -> impl Future<Output = Result<Bytes, Self::Error>> + Send {
         async move {
+            ensure_no_conflicting_fee_fields(request.as_ref())?;
+
             let from = match request.as_ref().from() {
                 Some(from) => from,
                 None => return Err(SignError::NoAccount.into_eth_err()),
@@ -790,6 +816,35 @@ pub trait LoadTransaction: SpawnBlocking + FullEthApiTypes + RpcNodeCoreExt {
                 .await
                 .map_err(Self::Error::from_eth_err)?;
             Ok(block.map(|block| (transaction, block)))
+        }
+    }
+}
+
+/// Rejects legacy gas prices combined with EIP-1559 fee fields before transaction construction.
+const fn ensure_no_conflicting_fee_fields(request: &TransactionRequest) -> Result<(), EthApiError> {
+    if request.gas_price.is_some() && request.has_eip1559_fields() {
+        return Err(EthApiError::ConflictingFeeFieldsInRequest)
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod fee_field_tests {
+    #[test]
+    fn rejects_mixed_legacy_and_dynamic_fee_fields() {
+        for (max_fee, priority_fee) in
+            [(None, None), (Some(2), None), (None, Some(1)), (Some(2), Some(1))]
+        {
+            for gas_price in [None, Some(3)] {
+                let request = alloy_rpc_types_eth::TransactionRequest {
+                    gas_price,
+                    max_fee_per_gas: max_fee,
+                    max_priority_fee_per_gas: priority_fee,
+                    ..Default::default()
+                };
+                let conflict = gas_price.is_some() && (max_fee.is_some() || priority_fee.is_some());
+                assert_eq!(super::ensure_no_conflicting_fee_fields(&request).is_err(), conflict);
+            }
         }
     }
 }

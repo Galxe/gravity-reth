@@ -7,7 +7,7 @@ use crate::{
     PriceBumpConfig,
 };
 use alloy_eips::{eip7594::BlobTransactionSidecarVariant, eip7702::SignedAuthorization};
-use alloy_primitives::{Address, TxHash, B256, U256};
+use alloy_primitives::{Address, Bytes, TxHash, B256, U256};
 use futures_util::future::Either;
 use reth_primitives_traits::{Block, Recovered, SealedBlock};
 use std::{fmt, fmt::Debug, future::Future, time::Instant};
@@ -452,6 +452,11 @@ impl<T: PoolTransaction> ValidPoolTransaction<T> {
     /// Note: this takes `&self` since indented usage is via `Arc<Self>`.
     pub fn to_consensus(&self) -> Recovered<T::Consensus> {
         self.transaction.clone_into_consensus()
+    }
+
+    /// Returns the EIP-2718 encoded consensus transaction.
+    pub fn encoded_2718_consensus(&self) -> Bytes {
+        self.transaction.encoded_2718_consensus()
     }
 
     /// Returns whether `maybe_replacement` is underpriced relative to this transaction.

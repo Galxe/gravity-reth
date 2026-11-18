@@ -1,7 +1,6 @@
 //! `Eth` Sim bundle implementation and helpers.
 
 use alloy_consensus::{transaction::TxHashRef, BlockHeader};
-use alloy_eips::BlockNumberOrTag;
 use alloy_evm::{env::BlockEnvironment, overrides::apply_block_overrides};
 use alloy_primitives::U256;
 use alloy_rpc_types_eth::{BlockId, Log};
@@ -289,7 +288,7 @@ where
         // Also, flatten the bundle here so that its easier to process
         let flattened_bundle = self.parse_and_flatten_bundle(&request)?;
 
-        let block_id = parent_block.unwrap_or(BlockId::Number(BlockNumberOrTag::Latest));
+        let block_id = parent_block.unwrap_or(BlockId::latest());
         let eth_api = self.eth_api().view().await?;
         let (current_block, mut evm_env, current_block_id) =
             eth_api.evm_env_and_recovered_block_at(block_id).await?;
@@ -395,8 +394,6 @@ where
                     if logs { Self::build_bundle_logs(&request, &flat_logs)? } else { vec![] };
 
                 // After processing all transactions, process refunds
-                // Store the original refundable value to calculate all payouts correctly
-                let original_refundable_value = refundable_value;
                 for item in &flattened_bundle {
                     if let Some(refund_percent) = item.refund_percent {
                         let refund_configs = item.refund_configs.clone().unwrap_or_else(|| {
@@ -411,11 +408,9 @@ where
                         // Add gas used for payout transactions
                         total_gas_used += SBUNDLE_PAYOUT_MAX_COST * refund_configs.len() as u64;
 
-                        // Calculate allocated refundable value (payout value) based on ORIGINAL
-                        // refundable value. This ensures all refund_percent values are
-                        // calculated from the same base.
-                        let payout_value = original_refundable_value * U256::from(refund_percent) /
-                            U256::from(100);
+                        // Calculate allocated refundable value (payout value)
+                        let payout_value =
+                            refundable_value * U256::from(refund_percent) / U256::from(100);
 
                         if payout_tx_fee > payout_value {
                             return Err(EthApiError::InvalidParams(
@@ -426,13 +421,6 @@ where
 
                         // Subtract payout value from total profit
                         total_profit = total_profit.checked_sub(payout_value).ok_or(
-                            EthApiError::InvalidParams(
-                                EthSimBundleError::NegativeProfit.to_string(),
-                            ),
-                        )?;
-
-                        // Adjust refundable value
-                        refundable_value = refundable_value.checked_sub(payout_value).ok_or(
                             EthApiError::InvalidParams(
                                 EthSimBundleError::NegativeProfit.to_string(),
                             ),

@@ -63,10 +63,18 @@ impl<TX: DbTx, KH: KeyHasher> PrefixSetLoader<'_, TX, KH> {
         // from the account prefix set.
         let mut storage_cursor = self.cursor_dup_read::<tables::StorageChangeSets>()?;
         let storage_range = BlockNumberAddress::range(range);
+        let mut last_address = None;
         for storage_entry in storage_cursor.walk_range(storage_range)? {
             let (BlockNumberAddress((_, address)), StorageEntry { key, .. }) = storage_entry?;
-            let hashed_address = KH::hash_key(address);
-            account_prefix_set.insert(Nibbles::unpack(hashed_address));
+            let hashed_address = match last_address {
+                Some((last, hashed)) if last == address => hashed,
+                _ => {
+                    let hashed = KH::hash_key(address);
+                    account_prefix_set.insert(Nibbles::unpack(hashed));
+                    last_address = Some((address, hashed));
+                    hashed
+                }
+            };
             storage_prefix_sets
                 .entry(hashed_address)
                 .or_default()

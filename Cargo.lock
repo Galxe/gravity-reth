@@ -10358,6 +10358,7 @@ dependencies = [
  "reth-consensus",
  "reth-consensus-common",
  "reth-db-api",
+ "reth-db-common",
  "reth-engine-primitives",
  "reth-errors",
  "reth-ethereum-engine-primitives",
@@ -10699,7 +10700,6 @@ dependencies = [
 name = "reth-rpc-server-types"
 version = "2.3.0"
 dependencies = [
- "alloy-eips",
  "alloy-primitives",
  "alloy-rpc-types-engine",
  "jsonrpsee-core",

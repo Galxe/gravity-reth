@@ -27,7 +27,7 @@ use reth_rpc_api::DebugApiServer;
 use reth_rpc_convert::RpcTxReq;
 use reth_rpc_eth_api::{
     helpers::{EthTransactions, TraceExt},
-    FromEthApiError, FromEvmError, RpcConvert, RpcNodeCore,
+    AsEthApiError, FromEthApiError, FromEvmError, RpcConvert, RpcNodeCore,
 };
 use reth_rpc_eth_types::{EthApiError, StateCacheDb};
 use reth_rpc_server_types::{result::internal_rpc_err, ToRpcResult};
@@ -230,7 +230,10 @@ where
         let block = eth_api
             .recovered_block(block_id)
             .await?
-            .ok_or(EthApiError::HeaderNotFound(block_id))?;
+            .ok_or(EthApiError::TracingBlockNotFound(block_id))?;
+        if block.number() == 0 {
+            return Err(EthApiError::GenesisNotTraceable.into())
+        }
         let evm_env = eth_api.evm_env_for_header(block.sealed_block().sealed_header())?;
 
         self.trace_block(eth_api, block, evm_env, opts, true).await
@@ -246,7 +249,7 @@ where
     ) -> Result<GethTrace, Eth::Error> {
         let eth_api = self.eth_api().view().await?;
         let (transaction, block) = match eth_api.transaction_and_block(tx_hash).await? {
-            None => return Err(EthApiError::TransactionNotFound.into()),
+            None => return Err(EthApiError::TracingTransactionNotFound.into()),
             Some(res) => res,
         };
         let evm_env = eth_api.evm_env_for_header(block.sealed_block().sealed_header())?;
@@ -340,6 +343,12 @@ where
                 Ok(trace)
             })
             .await
+            .map_err(|err| match err.as_err() {
+                Some(EthApiError::HeaderNotFound(id)) if *id == at => {
+                    EthApiError::TracingBlockNotFound(at).into()
+                }
+                _ => err,
+            })
     }
 
     /// Helper method to execute `debug_trace_call` at a specific transaction index within a block.
@@ -358,7 +367,7 @@ where
         let block = eth_api
             .recovered_block(block_id)
             .await?
-            .ok_or(EthApiError::HeaderNotFound(block_id))?;
+            .ok_or(EthApiError::TracingBlockNotFound(block_id))?;
 
         if tx_index >= block.transaction_count() {
             // tx_index out of bounds
@@ -613,7 +622,7 @@ where
         let block = eth_api
             .recovered_block(block_id)
             .await?
-            .ok_or(EthApiError::HeaderNotFound(block_id))?;
+            .ok_or(EthApiError::TracingBlockNotFound(block_id))?;
         let tx_index = usize::from(tx_index);
         let transaction_count = block.transaction_count();
         if tx_index >= transaction_count {
@@ -779,11 +788,11 @@ where
                     .provider()
                     .convert_block_number(number_or_tag)
                     .to_rpc_result()?
-                    .ok_or(EthApiError::HeaderNotFound(block_id))?;
+                    .ok_or(EthApiError::TracingBlockNotFound(block_id))?;
                 self.provider().header_by_number(number).to_rpc_result()?
             }
         }
-        .ok_or(EthApiError::HeaderNotFound(block_id))?;
+        .ok_or(EthApiError::TracingBlockNotFound(block_id))?;
 
         let mut res = Vec::new();
         header.encode(&mut res);
@@ -796,7 +805,7 @@ where
             .provider()
             .block_by_id(block_id)
             .to_rpc_result()?
-            .ok_or(EthApiError::HeaderNotFound(block_id))?;
+            .ok_or(EthApiError::TracingBlockNotFound(block_id))?;
         let mut res = Vec::new();
         block.encode(&mut res);
         Ok(res.into())

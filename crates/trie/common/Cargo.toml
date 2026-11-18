@@ -30,6 +30,7 @@ nybbles = { workspace = true, features = ["rlp"] }
 
 # reth
 revm-database.workspace = true
+revm-state.workspace = true
 reth-storage-errors.workspace = true
 # `serde` feature
 serde = { workspace = true, optional = true }
@@ -48,7 +49,7 @@ once_cell.workspace = true
 
 [dev-dependencies]
 reth-primitives-traits = { workspace = true, features = ["serde"] }
-reth-codecs.workspace = true
+reth-codecs = { workspace = true, features = ["alloy"] }
 alloy-genesis.workspace = true
 
 alloy-primitives = { workspace = true, features = ["getrandom"] }
@@ -106,7 +107,7 @@ serde = [
     "revm-state/serde",
     "parking_lot/serde",
 ]
-reth-codec = ["dep:reth-codecs", "dep:bytes"]
+reth-codec = ["dep:reth-codecs", "reth-codecs/alloy", "dep:bytes"]
 serde-bincode-compat = [
     "serde",
     "reth-primitives-traits/serde-bincode-compat",
