@@ -751,46 +751,32 @@ async fn test_connect_peer_in_different_network_should_fail() {
 async fn test_reconnect_trusted() {
     reth_tracing::init_test_tracing();
 
-    let net = Testnet::create(2).await;
-
-    let mut handles = net.handles();
-    let handle0 = handles.next().unwrap();
-    let handle1 = handles.next().unwrap();
-
-    drop(handles);
-    let _handle = net.spawn();
-
+    // Only the dialer knows the listener address, so a reconnect proves trusted redial works.
+    let peers_config = PeersConfig {
+        incoming_ip_throttle_duration: Duration::from_millis(100),
+        ..PeersConfig::test()
+    };
+    let peer0 = new_random_peer_with_config(peers_config.clone()).await;
+    let peer1 = new_random_peer_with_config(peers_config).await;
+    let handle0 = peer0.handle().clone();
+    let handle1 = peer1.handle().clone();
+    tokio::task::spawn(peer0);
+    tokio::task::spawn(peer1);
     let mut listener0 = NetworkEventStream::new(handle0.event_listener());
-
-    // Connect the two peers
     handle0.add_peer(*handle1.peer_id(), handle1.local_addr());
-    handle1.add_peer(*handle0.peer_id(), handle0.local_addr());
-    let peer = listener0.next_session_established().await.unwrap();
-    assert_eq!(peer, *handle1.peer_id());
+    assert_eq!(listener0.next_session_established().await, Some(*handle1.peer_id()));
     assert_eq!(handle0.num_connected_peers(), 1);
-
-    // Add handle1 as a trusted peer
     handle0.add_trusted_peer(*handle1.peer_id(), handle1.local_addr());
-
-    // Trigger disconnect from handle0
     handle0.disconnect_peer(*handle1.peer_id());
-
-    // Wait for the session to close
-    let (peer, reason) = listener0.next_session_closed().await.unwrap();
+    let (peer, _) = listener0.next_session_closed().await.unwrap();
     assert_eq!(peer, *handle1.peer_id());
     assert_eq!(handle0.num_connected_peers(), 0);
-    println!("Disconnect reason: {:?}", reason);
-
-    // Await that handle1 (trusted peer) reconnects automatically
-    let reconnect_result =
-        tokio::time::timeout(Duration::from_secs(10), listener0.next_session_established()).await;
-
-    match reconnect_result {
-        Ok(Some(peer)) => {
-            assert_eq!(peer, *handle1.peer_id());
-            assert_eq!(handle0.num_connected_peers(), 1);
-        }
-        Ok(None) => panic!("Event stream ended without reconnection"),
-        Err(_) => panic!("Trusted peer did not reconnect in time"),
-    }
+    let reconnected =
+        tokio::time::timeout(Duration::from_secs(10), listener0.next_session_established())
+            .await
+            .expect("trusted peer was not redialed in time");
+    assert_eq!(reconnected, Some(*handle1.peer_id()));
+    let peer = handle0.get_peer_by_id(*handle1.peer_id()).await.unwrap().unwrap();
+    assert!(peer.direction.is_outgoing());
+    assert_eq!(peer.kind, PeerKind::Trusted);
 }

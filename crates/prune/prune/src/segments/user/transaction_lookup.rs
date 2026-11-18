@@ -172,6 +172,124 @@ mod tests {
     use std::ops::Sub;
 
     #[test]
+    fn prune_transaction_zero_after_empty_genesis() {
+        let db = TestStageDB::default();
+        let mut rng = generators::rng();
+        let blocks = [
+            random_block_range(
+                &mut rng,
+                0..=0,
+                BlockRangeParams { tx_count: 0..1, ..Default::default() },
+            ),
+            random_block_range(
+                &mut rng,
+                1..=2,
+                BlockRangeParams { tx_count: 1..2, ..Default::default() },
+            ),
+        ]
+        .concat();
+        db.insert_blocks(blocks.iter(), StorageKind::Static).unwrap();
+        let hashes = blocks
+            .iter()
+            .flat_map(|block| &block.body().transactions)
+            .map(|tx| *tx.tx_hash())
+            .collect::<Vec<_>>();
+        db.insert_tx_hash_numbers(hashes.iter().enumerate().map(|(id, hash)| (*hash, id as u64)))
+            .unwrap();
+
+        let provider = db.factory.database_provider_rw().unwrap();
+        let result = TransactionLookup::new(PruneMode::Before(2))
+            .prune(
+                &provider,
+                PruneInput {
+                    previous_checkpoint: None,
+                    to_block: 1,
+                    limiter: PruneLimiter::default().set_deleted_entries_limit(10),
+                },
+            )
+            .unwrap();
+        assert_eq!(result.pruned, 1);
+        assert_eq!(result.checkpoint.unwrap().tx_number, Some(0));
+        provider.commit().unwrap();
+        assert_eq!(db.table::<tables::TransactionHashNumbers>().unwrap(), vec![(hashes[1], 1)]);
+    }
+
+    #[test]
+    fn prune_transaction_zero_when_earlier_blocks_are_empty() {
+        use reth_provider::{StaticFileProviderFactory, StaticFileWriter};
+        use reth_static_file_types::{StaticFileSegment, DEFAULT_BLOCKS_PER_STATIC_FILE};
+
+        let db = TestStageDB::default();
+        let mut rng = generators::rng();
+        let first_retained_block = DEFAULT_BLOCKS_PER_STATIC_FILE;
+        let blocks = [
+            random_block_range(
+                &mut rng,
+                first_retained_block - 1..=first_retained_block - 1,
+                BlockRangeParams { tx_count: 0..1, ..Default::default() },
+            ),
+            random_block_range(
+                &mut rng,
+                first_retained_block..=first_retained_block + 1,
+                BlockRangeParams { tx_count: 1..2, ..Default::default() },
+            ),
+        ]
+        .concat();
+        db.insert_blocks(blocks.iter(), StorageKind::Database(None)).unwrap();
+
+        // Earlier blocks were empty, so this file contains transaction zero.
+        let static_files = db.factory.static_file_provider();
+        {
+            // Writers advance from an existing preceding jar. Model the empty prefix, roll
+            // over normally, then expire that jar to leave transaction zero in the retained jar.
+            let mut writer = static_files.latest_writer(StaticFileSegment::Transactions).unwrap();
+            writer.user_header_mut().set_block_range(0, first_retained_block - 1);
+            writer.commit().unwrap();
+            for (tx_number, block) in blocks[1..].iter().enumerate() {
+                writer.increment_block(block.number).unwrap();
+                writer.append_transaction(tx_number as u64, &block.body().transactions[0]).unwrap();
+            }
+            writer.commit().unwrap();
+        }
+        static_files.delete_jar(StaticFileSegment::Transactions, first_retained_block - 1).unwrap();
+        assert_eq!(
+            static_files
+                .find_fixed_range(
+                    StaticFileSegment::Transactions,
+                    static_files.get_lowest_transaction_static_file_block().unwrap(),
+                )
+                .start(),
+            first_retained_block,
+        );
+
+        let hashes = blocks[1..]
+            .iter()
+            .map(|block| *block.body().transactions[0].tx_hash())
+            .collect::<Vec<_>>();
+        db.insert_tx_hash_numbers(hashes.iter().enumerate().map(|(id, hash)| (*hash, id as u64)))
+            .unwrap();
+
+        let provider = db.factory.database_provider_rw().unwrap();
+        let result = TransactionLookup::new(PruneMode::Before(first_retained_block + 1))
+            .prune(
+                &provider,
+                PruneInput {
+                    previous_checkpoint: None,
+                    to_block: first_retained_block,
+                    limiter: PruneLimiter::default().set_deleted_entries_limit(10),
+                },
+            )
+            .unwrap();
+        assert!(result.progress.is_finished());
+        assert_eq!(result.pruned, 1);
+        let checkpoint = result.checkpoint.unwrap();
+        assert_eq!(checkpoint.block_number, Some(first_retained_block));
+        assert_eq!(checkpoint.tx_number, Some(0));
+        provider.commit().unwrap();
+        assert_eq!(db.table::<tables::TransactionHashNumbers>().unwrap(), vec![(hashes[1], 1)]);
+    }
+
+    #[test]
     fn prune() {
         let db = TestStageDB::default();
         let mut rng = generators::rng();

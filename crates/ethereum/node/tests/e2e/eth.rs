@@ -51,6 +51,8 @@ async fn can_run_eth_node() -> eyre::Result<()> {
 
     let mut node = nodes.pop().unwrap();
     let raw_tx = TransactionTestContext::transfer_tx_bytes(1, wallet.inner).await;
+    // Leave an earlier canonical notification buffered before asserting the transaction block.
+    node.advance_block().await?;
 
     // make the node advance
     let tx_hash = node.rpc.inject_tx(raw_tx).await?;
@@ -235,7 +237,7 @@ async fn test_testing_build_block_v1_osaka() -> eyre::Result<()> {
         suggested_fee_recipient: Address::ZERO,
         withdrawals: Some(vec![]),
         parent_beacon_block_root: Some(B256::ZERO),
-        slot_number: None,
+        ..Default::default()
     };
 
     let request = TestingBuildBlockRequestV1 {
@@ -314,7 +316,7 @@ async fn test_engine_ssz_proxy_can_mine_block() -> eyre::Result<()> {
         suggested_fee_recipient: Address::ZERO,
         withdrawals: Some(vec![]),
         parent_beacon_block_root: Some(B256::ZERO),
-        slot_number: None,
+        ..Default::default()
     };
 
     let envelope = node

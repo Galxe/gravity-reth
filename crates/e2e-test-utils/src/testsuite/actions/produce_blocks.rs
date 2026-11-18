@@ -227,7 +227,7 @@ where
                 suggested_fee_recipient: alloy_primitives::Address::random(),
                 withdrawals: Some(vec![]),
                 parent_beacon_block_root: Some(B256::ZERO),
-                slot_number: None,
+                ..Default::default()
             };
 
             env.active_node_state_mut()?
@@ -300,7 +300,7 @@ where
                     suggested_fee_recipient: alloy_primitives::Address::random(),
                     withdrawals: Some(vec![]),
                     parent_beacon_block_root: Some(B256::ZERO),
-                    slot_number: None,
+                    ..Default::default()
                 };
 
                 let fresh_fcu_result = EngineApiClient::<Engine>::fork_choice_updated_v3(
@@ -749,7 +749,7 @@ where
                     debug!("Node {}: new_payload broadcast status: {:?}", idx, result.status);
 
                     // Check if this node accepted the payload
-                    if result.status == PayloadStatusEnum::Valid && !first_valid_seen {
+                    if result.is_valid() && !first_valid_seen {
                         first_valid_seen = true;
                     } else if let PayloadStatusEnum::Invalid { validation_error } = result.status {
                         debug!(
@@ -765,8 +765,7 @@ where
                 }
 
                 // Check if at least one node accepted the payload
-                let any_valid =
-                    broadcast_results.iter().any(|(_, status)| *status == PayloadStatusEnum::Valid);
+                let any_valid = broadcast_results.iter().any(|(_, status)| status.is_valid());
                 if !any_valid {
                     return Err(eyre::eyre!(
                         "Failed to successfully broadcast payload to any client"

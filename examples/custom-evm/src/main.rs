@@ -23,7 +23,7 @@ use reth_ethereum::{
             context_interface::result::{EVMError, HaltReason},
             inspector::{Inspector, NoOpInspector},
             interpreter::interpreter::EthInterpreter,
-            precompile::{PrecompileOutput, Precompiles},
+            precompile::{PrecompileOutput, PrecompileSpecId, Precompiles},
             primitives::hardfork::SpecId,
             MainBuilder, MainContext,
         },
@@ -67,8 +67,8 @@ impl EvmFactory for MyEvmFactory {
             .build_mainnet_with_inspector(NoOpInspector {})
             .with_precompiles(PrecompilesMap::from_static(EthPrecompiles::new(spec).precompiles));
 
-        if spec == SpecId::PRAGUE {
-            evm = evm.with_precompiles(PrecompilesMap::from_static(prague_custom()));
+        if spec.enables(SpecId::PRAGUE) {
+            evm = evm.with_precompiles(PrecompilesMap::from_static(custom_precompiles(spec)));
         }
 
         EthEvm::new(evm, false)
@@ -102,11 +102,13 @@ where
     }
 }
 
-/// Returns precompiles for Prague spec.
-pub fn prague_custom() -> &'static Precompiles {
-    static INSTANCE: OnceLock<Precompiles> = OnceLock::new();
-    INSTANCE.get_or_init(|| {
-        let mut precompiles = Precompiles::prague().clone();
+/// Returns the fork's precompiles with the custom address installed.
+pub fn custom_precompiles(spec: SpecId) -> &'static Precompiles {
+    static INSTANCES: [OnceLock<Precompiles>; PrecompileSpecId::NEXT as usize + 1] =
+        [const { OnceLock::new() }; PrecompileSpecId::NEXT as usize + 1];
+    let spec = PrecompileSpecId::from_spec_id(spec);
+    INSTANCES[spec as usize].get_or_init(|| {
+        let mut precompiles = Precompiles::new(spec).clone();
         // Custom precompile.
         let precompile = Precompile::new(
             PrecompileId::custom("custom"),

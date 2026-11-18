@@ -1543,4 +1543,123 @@ mod tests {
             );
         }
     }
+    #[tokio::test]
+    async fn bal_replay_unknown_and_pending_match_eth_and_debug_semantics() {
+        use reth_rpc_api::DebugApiServer;
+        use reth_rpc_eth_api::helpers::bal::GetBlockAccessList;
+        use reth_rpc_eth_types::EthApiError;
+        use reth_tasks::{pool::BlockingTaskGuard, Runtime};
+
+        let api = build_test_eth_api(MockEthProvider::default());
+        let runtime = Runtime::test();
+        let debug = crate::DebugApi::new(
+            api.clone(),
+            BlockingTaskGuard::new(1),
+            &runtime,
+            futures::stream::empty(),
+        );
+        for block_id in [BlockId::hash(B256::repeat_byte(0x91)), BlockId::pending()] {
+            assert_eq!(api.get_block_access_list(block_id).await.unwrap(), None);
+            let expected: jsonrpsee::types::ErrorObjectOwned =
+                EthApiError::HeaderNotFound(block_id).into();
+            assert_eq!(debug.raw_block_access_list(block_id).await.unwrap_err(), expected);
+        }
+        assert_eq!(api.get_raw_block_access_list(BlockId::pending()).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn bal_replay_raw_and_decoded_include_executed_storage_write() {
+        use alloy_consensus::{transaction::SignerRecoverable, TxEip1559};
+        use alloy_primitives::TxKind;
+        use reth_ethereum_primitives::Transaction;
+        use reth_rpc_api::DebugApiServer;
+        use reth_rpc_eth_api::helpers::bal::GetBlockAccessList;
+        use reth_tasks::{pool::BlockingTaskGuard, Runtime};
+        use reth_testing_utils::generators::{generate_key, sign_tx_with_key_pair};
+
+        let contract = Address::repeat_byte(0x42);
+        let mut rng = generators::rng();
+        let tx = sign_tx_with_key_pair(
+            generate_key(&mut rng),
+            Transaction::Eip1559(TxEip1559 {
+                chain_id: 1,
+                nonce: 0,
+                gas_limit: 100_000,
+                max_fee_per_gas: 1,
+                to: TxKind::Call(contract),
+                ..Default::default()
+            }),
+        );
+        let sender = tx.recover_signer().unwrap();
+        let provider = MockEthProvider::default()
+            .with_chain_spec(ChainSpecBuilder::mainnet().cancun_activated().build());
+        provider.add_account(sender, ExtendedAccount::new(0, U256::from(1_000_000)));
+        // PUSH1 0x2a, PUSH1 0x07, SSTORE, STOP: slot 7 changes from zero to 42.
+        provider.add_account(
+            contract,
+            ExtendedAccount::new(1, U256::ZERO)
+                .with_bytecode(Bytes::from_static(&[0x60, 0x2a, 0x60, 0x07, 0x55, 0x00])),
+        );
+        let parent = Header {
+            number: 0,
+            gas_limit: 1_000_000,
+            base_fee_per_gas: Some(0),
+            ..Default::default()
+        };
+        let parent_hash = parent.hash_slow();
+        provider.add_block(parent_hash, Block { header: parent, body: BlockBody::default() });
+        let header = Header {
+            parent_hash,
+            number: 1,
+            timestamp: 12,
+            gas_limit: 1_000_000,
+            base_fee_per_gas: Some(0),
+            excess_blob_gas: Some(0),
+            blob_gas_used: Some(0),
+            parent_beacon_block_root: Some(B256::ZERO),
+            ..Default::default()
+        };
+        let hash = header.hash_slow();
+        provider.add_block(
+            hash,
+            Block {
+                header,
+                body: BlockBody {
+                    transactions: vec![tx],
+                    withdrawals: Some(Default::default()),
+                    ..Default::default()
+                },
+            },
+        );
+        // This fixture supplies parent state and block data, with no stored or precomputed BAL.
+        let api = build_test_eth_api(provider);
+        let runtime = Runtime::test();
+        let debug = crate::DebugApi::new(
+            api.clone(),
+            BlockingTaskGuard::new(1),
+            &runtime,
+            futures::stream::empty(),
+        );
+        let at = BlockId::hash(hash);
+        let raw = debug.raw_block_access_list(at).await.unwrap();
+        let bal = api.get_block_access_list(at).await.unwrap().expect("known block is replayed");
+        assert_eq!(raw.as_ref(), alloy_rlp::encode(&bal));
+        let changed = bal
+            .iter()
+            .find(|account| account.address == contract)
+            .expect("the contract touched by SSTORE is recorded");
+        let slot = changed
+            .storage_changes
+            .iter()
+            .find(|change| change.slot == U256::from(7))
+            .expect("executing the transaction records slot 7");
+        assert_eq!(slot.changes.len(), 1);
+        assert_eq!(slot.changes[0].block_access_index.get(), 1);
+        assert_eq!(slot.changes[0].new_value, U256::from(42));
+        let sender_changes = bal
+            .iter()
+            .find(|account| account.address == sender)
+            .expect("the transaction sender is recorded");
+        assert_eq!(sender_changes.nonce_changes.last().unwrap().new_nonce, 1);
+    }
 }

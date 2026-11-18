@@ -47,6 +47,9 @@ pub struct SnapshotManifest {
     pub reth_version: Option<String>,
     /// Available snapshot components.
     pub components: BTreeMap<String, ComponentManifest>,
+    /// Chain-specific metadata preserved for downstream snapshot consumers.
+    #[serde(default, flatten)]
+    pub extensions: BTreeMap<String, serde_json::Value>,
 }
 
 /// Manifest entry for a single snapshot component.
@@ -671,6 +674,7 @@ pub fn generate_manifest(
         base_url: base_url.map(str::to_owned),
         reth_version: Some(reth_node_core::version::version_metadata().short_version.to_string()),
         components,
+        extensions: Default::default(),
     })
 }
 
@@ -751,7 +755,7 @@ fn state_source_files(source_datadir: &Path) -> Result<Vec<PlannedFile>> {
         return collect_files_recursive(source_datadir, Path::new("db"));
     }
 
-    eyre::bail!("Could not find source state DB directory under {}", source_datadir.display())
+    eyre::bail!("Could not find source state DB directory under {}", source_datadir.display());
 }
 
 fn rocksdb_source_files(source_datadir: &Path) -> Result<Vec<PlannedFile>> {
@@ -916,6 +920,25 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    #[test]
+    fn manifest_preserves_extensions() {
+        let manifest: SnapshotManifest = serde_json::from_str(
+            r#"{
+                "block": 1,
+                "chain_id": 1,
+                "storage_version": 1,
+                "timestamp": 0,
+                "components": {},
+                "consensus": { "archive": "consensus.tar.zst" }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            manifest.extensions.get("consensus"),
+            Some(&serde_json::json!({ "archive": "consensus.tar.zst" }))
+        );
+    }
+
     fn test_manifest() -> SnapshotManifest {
         let mut components = BTreeMap::new();
         components.insert(
@@ -956,6 +979,7 @@ mod tests {
             base_url: Some("https://example.com".to_string()),
             reth_version: None,
             components,
+            extensions: Default::default(),
         }
     }
 
@@ -1008,6 +1032,7 @@ mod tests {
             base_url: Some("https://example.com".to_string()),
             reth_version: None,
             components,
+            extensions: Default::default(),
         };
 
         let urls = m.archive_urls_for_distance(SnapshotComponentType::RocksdbIndices, Some(10));
@@ -1066,6 +1091,7 @@ mod tests {
             base_url: Some("https://example.com".to_string()),
             reth_version: None,
             components,
+            extensions: Default::default(),
         }
     }
 
@@ -1156,6 +1182,7 @@ mod tests {
             base_url: Some("https://example.com".to_string()),
             reth_version: None,
             components,
+            extensions: Default::default(),
         };
         let urls = m.archive_urls(SnapshotComponentType::StorageChangesets);
         assert_eq!(urls.len(), 49);
@@ -1236,6 +1263,7 @@ mod tests {
             base_url: Some("https://example.com".to_string()),
             reth_version: None,
             components,
+            extensions: Default::default(),
         };
 
         assert_eq!(manifest.output_size_for_distance(SnapshotComponentType::State, None), 1_000);
@@ -1296,6 +1324,7 @@ mod tests {
             base_url: Some("https://example.com".to_string()),
             reth_version: None,
             components,
+            extensions: Default::default(),
         };
 
         let state = m.snapshot_archives_for_distance(SnapshotComponentType::State, None);

@@ -16,7 +16,8 @@ use alloy_rpc_types_engine::{
     PayloadId, PayloadStatus,
 };
 use alloy_rpc_types_eth::{
-    state::StateOverride, BlockOverrides, EIP1186AccountProofResponse, Filter, Log, SyncStatus,
+    state::StateOverride, BlockOverrides, EIP1186AccountProofResponse, Filter, Index, Log,
+    SyncStatus,
 };
 use alloy_serde::JsonStorageKey;
 use jsonrpsee::{core::RpcResult, proc_macros::rpc, RpcModule};
@@ -305,6 +306,10 @@ pub trait EngineApi<Engine: EngineTypes> {
     #[method(name = "exchangeCapabilities")]
     async fn exchange_capabilities(&self, capabilities: Vec<String>) -> RpcResult<Vec<String>>;
 
+    /// Report blob availability for the requested blob versioned hashes.
+    #[method(name = "hasBlobs")]
+    async fn has_blobs(&self, versioned_hashes: Vec<B256>) -> RpcResult<Vec<bool>>;
+
     /// Fetch blobs for the consensus layer from the blob store.
     #[method(name = "getBlobsV1")]
     async fn get_blobs_v1(
@@ -394,6 +399,22 @@ pub trait EngineEthApi<TxReq: RpcObject, B: RpcObject, R: RpcObject> {
     /// Returns all transaction receipts for a given block.
     #[method(name = "getBlockReceipts")]
     async fn block_receipts(&self, block_id: BlockId) -> RpcResult<Option<Vec<R>>>;
+
+    /// Returns the EIP-2718 encoded transaction by block hash and transaction index position.
+    #[method(name = "getRawTransactionByBlockHashAndIndex")]
+    async fn raw_transaction_by_block_hash_and_index(
+        &self,
+        hash: B256,
+        index: Index,
+    ) -> RpcResult<Option<Bytes>>;
+
+    /// Returns the EIP-2718 encoded transaction by block number and transaction index position.
+    #[method(name = "getRawTransactionByBlockNumberAndIndex")]
+    async fn raw_transaction_by_block_number_and_index(
+        &self,
+        number: BlockNumberOrTag,
+        index: Index,
+    ) -> RpcResult<Option<Bytes>>;
 
     /// Sends signed transaction, returning its hash.
     #[method(name = "sendRawTransaction")]

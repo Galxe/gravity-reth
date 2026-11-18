@@ -448,9 +448,18 @@ pub struct DownloadCommand<C: ChainSpecParser> {
     list: bool,
 }
 
+/// Resolved context for a completed modular snapshot download.
+#[derive(Debug)]
+pub struct PreparedSnapshotDownload {
+    /// Selected manifest, including chain-specific metadata.
+    pub manifest: SnapshotManifest,
+    /// Chain-resolved directory containing the downloaded snapshot.
+    pub data_dir: PathBuf,
+}
+
 impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> DownloadCommand<C> {
     /// Runs the download command in single-archive or manifest mode.
-    pub async fn execute<N>(self) -> Result<()> {
+    pub async fn execute<N>(self) -> Result<Option<PreparedSnapshotDownload>> {
         let chain = self.env.chain.chain();
         let chain_id = chain.id();
 
@@ -458,7 +467,7 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> DownloadCo
         if self.list {
             let entries = fetch_snapshot_api_entries(chain_id).await?;
             print_snapshot_listing(&entries, chain_id);
-            return Ok(());
+            return Ok(None);
         }
 
         let data_dir = self.env.datadir.clone().resolve_datadir(chain);
@@ -492,7 +501,7 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> DownloadCo
             .await?;
             info!(target: "reth::cli", "Snapshot downloaded and extracted successfully");
 
-            return Ok(());
+            return Ok(None);
         }
 
         let manifest = self.load_manifest(chain_id).await?;
@@ -532,7 +541,7 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> DownloadCo
 
         self.finalize_modular_download(&selections, &manifest, preset, target_dir, &data_dir.db())?;
 
-        Ok(())
+        Ok(Some(PreparedSnapshotDownload { manifest, data_dir: data_dir.data_dir().to_path_buf() }))
     }
 
     /// Loads the manifest and resolves its effective base URL.
@@ -1053,6 +1062,7 @@ mod tests {
             base_url: Some("https://example.com".to_string()),
             reth_version: None,
             components,
+            extensions: Default::default(),
         }
     }
 

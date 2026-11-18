@@ -1,8 +1,9 @@
 use crate::{
     providers::{ProviderNodeTypes, StaticFileProvider},
-    HashingWriter, ProviderFactory, TrieWriter,
+    HashingWriter, ProviderFactory, StaticFileProviderFactory, StaticFileSegment, StaticFileWriter,
+    TrieWriter,
 };
-use alloy_primitives::B256;
+use alloy_primitives::{B256, U256};
 use reth_chainspec::{ChainSpec, MAINNET};
 use reth_db::{
     test_utils::{create_test_rw_db, create_test_static_files_dir, TempDatabase},
@@ -10,8 +11,8 @@ use reth_db::{
 };
 use reth_errors::ProviderResult;
 use reth_ethereum_engine_primitives::EthEngineTypes;
-use reth_node_types::{NodeTypes, NodeTypesWithDBAdapter};
-use reth_primitives_traits::{Account, StorageEntry};
+use reth_node_types::{HeaderTy, NodeTypes, NodeTypesWithDBAdapter};
+use reth_primitives_traits::{Account, SealedHeader, StorageEntry};
 use reth_trie::StateRoot;
 use reth_trie_db::DatabaseStateRoot;
 use std::sync::Arc;
@@ -96,4 +97,22 @@ pub fn insert_genesis<N: ProviderNodeTypes<ChainSpec = ChainSpec>>(
     provider.commit()?;
 
     Ok(root)
+}
+
+/// Appends headers to the static files and publishes the committed writer.
+pub fn insert_headers<N: ProviderNodeTypes>(
+    factory: &ProviderFactory<N>,
+    headers: &[SealedHeader<HeaderTy<N>>],
+) {
+    // DatabaseProvider::commit only commits the RocksDB transaction. Publish static-file
+    // headers through their writer so readers can resolve the updated segment index.
+    let static_files = factory.static_file_provider();
+    let mut writer =
+        static_files.latest_writer(StaticFileSegment::Headers).expect("failed to create writer");
+    for header in headers {
+        writer
+            .append_header(header.header(), U256::ZERO, &header.hash())
+            .expect("failed to append header");
+    }
+    writer.commit().expect("failed to commit");
 }
