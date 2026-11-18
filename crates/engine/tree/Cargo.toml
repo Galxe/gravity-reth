@@ -19,6 +19,7 @@ reth-db.workspace = true
 reth-engine-primitives.workspace = true
 reth-errors.workspace = true
 reth-execution-types.workspace = true
+reth-execution-cache.workspace = true
 reth-evm = { workspace = true, features = ["metrics"] }
 reth-network-p2p.workspace = true
 reth-payload-builder.workspace = true
@@ -149,6 +150,7 @@ test-utils = [
     "reth-node-ethereum/test-utils",
     "reth-evm-ethereum/test-utils",
     "reth-tasks/test-utils",
+    "reth-execution-cache/test-utils",
 ]
 failpoints = ["fail/failpoints", "reth-db/failpoints"]
 

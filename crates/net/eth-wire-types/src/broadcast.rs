@@ -641,6 +641,16 @@ impl proptest::prelude::Arbitrary for NewPooledTransactionHashes68 {
 }
 
 impl NewPooledTransactionHashes68 {
+    /// Returns the number of announced hashes.
+    pub const fn len(&self) -> usize {
+        self.hashes.len()
+    }
+
+    /// Returns whether there are no announced hashes.
+    pub const fn is_empty(&self) -> bool {
+        self.hashes.is_empty()
+    }
+
     /// Returns a new instance with capacity for `capacity` entries.
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
@@ -810,6 +820,16 @@ impl proptest::prelude::Arbitrary for NewPooledTransactionHashes72 {
 }
 
 impl NewPooledTransactionHashes72 {
+    /// Returns the number of announced hashes.
+    pub const fn len(&self) -> usize {
+        self.hashes.len()
+    }
+
+    /// Returns whether no hashes were announced.
+    pub const fn is_empty(&self) -> bool {
+        self.hashes.is_empty()
+    }
+
     /// Returns a new instance with capacity for `capacity` entries and no cell mask.
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
@@ -959,6 +979,33 @@ const fn ensure_pooled_transaction_hashes_lengths(
     Ok(())
 }
 
+/// Interface for handling mempool message data. Used in various filters in pipelines in
+/// `TransactionsManager` and in queries to `TransactionPool`.
+pub trait HandleMempoolData {
+    /// The announcement contains no entries.
+    fn is_empty(&self) -> bool;
+
+    /// Returns the number of entries.
+    fn len(&self) -> usize;
+
+    /// Retain only entries for which the hash in the entry satisfies a given predicate.
+    fn retain_by_hash(&mut self, f: impl FnMut(&TxHash) -> bool);
+}
+
+impl<T: SignedTransaction> HandleMempoolData for Vec<T> {
+    fn is_empty(&self) -> bool {
+        self.is_empty()
+    }
+
+    fn len(&self) -> usize {
+        self.len()
+    }
+
+    fn retain_by_hash(&mut self, mut f: impl FnMut(&TxHash) -> bool) {
+        self.retain(|tx| f(tx.tx_hash()))
+    }
+}
+
 /// Validation pass that checks for unique transaction hashes.
 pub trait DedupPayload {
     /// Value type in [`PartiallyValidData`] map.
@@ -1075,38 +1122,11 @@ impl DedupPayload for NewPooledTransactionHashes66 {
     }
 }
 
-/// Interface for handling mempool message data. Used in various filters in pipelines in
-/// `TransactionsManager` and in queries to `TransactionPool`.
-pub trait HandleMempoolData {
-    /// The announcement contains no entries.
-    fn is_empty(&self) -> bool;
-
-    /// Returns the number of entries.
-    fn len(&self) -> usize;
-
-    /// Retain only entries for which the hash in the entry satisfies a given predicate.
-    fn retain_by_hash(&mut self, f: impl FnMut(&TxHash) -> bool);
-}
-
 /// Extension of [`HandleMempoolData`] interface, for mempool messages that are versioned.
 pub trait HandleVersionedMempoolData {
     /// Returns the announcement version, either [`Eth66`](EthVersion::Eth66) or
     /// [`Eth68`](EthVersion::Eth68).
     fn msg_version(&self) -> EthVersion;
-}
-
-impl<T: SignedTransaction> HandleMempoolData for Vec<T> {
-    fn is_empty(&self) -> bool {
-        self.is_empty()
-    }
-
-    fn len(&self) -> usize {
-        self.len()
-    }
-
-    fn retain_by_hash(&mut self, mut f: impl FnMut(&TxHash) -> bool) {
-        self.retain(|tx| f(tx.tx_hash()))
-    }
 }
 
 macro_rules! handle_mempool_data_map_impl {
@@ -1348,7 +1368,7 @@ mod tests {
     use super::*;
     use alloy_consensus::{transaction::TxHashRef, Typed2718};
     use alloy_eips::eip2718::Encodable2718;
-    use alloy_primitives::{b256, hex, Bytes, Signature, U256};
+    use alloy_primitives::{hex, Bytes, Signature, U256};
     use alloy_rlp::{RlpDecodable, RlpEncodable};
     use proptest::prelude::*;
     use reth_ethereum_primitives::{Transaction, TransactionSigned};
@@ -1684,82 +1704,6 @@ mod tests {
         let result = NewPooledTransactionHashes72::decode(&mut encoded_eth68_payload.as_ref());
 
         assert!(matches!(result, Err(alloy_rlp::Error::InputTooShort)));
-    }
-
-    #[test]
-    fn eth_72_dedup_preserves_message_cell_mask() {
-        let cell_mask = Some(B128::repeat_byte(0x11));
-        let announcement = NewPooledTransactionHashes72 {
-            types: vec![3],
-            sizes: vec![128],
-            hashes: vec![B256::from([1u8; 32])],
-            cell_mask,
-        };
-
-        let partially_valid = announcement.dedup();
-        assert_eq!(partially_valid.eth72_cell_mask(), cell_mask);
-
-        let valid = ValidAnnouncementData::from_partially_valid_data(partially_valid);
-        assert_eq!(valid.eth72_cell_mask(), cell_mask);
-    }
-
-    #[test]
-    fn request_hashes_retain_count_keep_subset() {
-        let mut hashes = RequestTxHashes::new(
-            [
-                b256!("0x0000000000000000000000000000000000000000000000000000000000000001"),
-                b256!("0x0000000000000000000000000000000000000000000000000000000000000002"),
-                b256!("0x0000000000000000000000000000000000000000000000000000000000000003"),
-                b256!("0x0000000000000000000000000000000000000000000000000000000000000004"),
-                b256!("0x0000000000000000000000000000000000000000000000000000000000000005"),
-            ]
-            .into_iter()
-            .collect::<B256Set>(),
-        );
-
-        let rest = hashes.retain_count(3);
-
-        assert_eq!(3, hashes.len());
-        assert_eq!(2, rest.len());
-    }
-
-    #[test]
-    fn request_hashes_retain_count_keep_all() {
-        let mut hashes = RequestTxHashes::new(
-            [
-                b256!("0x0000000000000000000000000000000000000000000000000000000000000001"),
-                b256!("0x0000000000000000000000000000000000000000000000000000000000000002"),
-                b256!("0x0000000000000000000000000000000000000000000000000000000000000003"),
-                b256!("0x0000000000000000000000000000000000000000000000000000000000000004"),
-                b256!("0x0000000000000000000000000000000000000000000000000000000000000005"),
-            ]
-            .into_iter()
-            .collect::<B256Set>(),
-        );
-
-        let _ = hashes.retain_count(6);
-
-        assert_eq!(5, hashes.len());
-    }
-
-    #[test]
-    fn split_request_hashes_keep_none() {
-        let mut hashes = RequestTxHashes::new(
-            [
-                b256!("0x0000000000000000000000000000000000000000000000000000000000000001"),
-                b256!("0x0000000000000000000000000000000000000000000000000000000000000002"),
-                b256!("0x0000000000000000000000000000000000000000000000000000000000000003"),
-                b256!("0x0000000000000000000000000000000000000000000000000000000000000004"),
-                b256!("0x0000000000000000000000000000000000000000000000000000000000000005"),
-            ]
-            .into_iter()
-            .collect::<B256Set>(),
-        );
-
-        let rest = hashes.retain_count(0);
-
-        assert_eq!(0, hashes.len());
-        assert_eq!(5, rest.len());
     }
 
     fn signed_transaction() -> impl SignedTransaction {

@@ -1,6 +1,9 @@
 #![allow(missing_docs)]
 
-use alloy_primitives::{B256, U256};
+use alloy_primitives::{
+    map::{FbBuildHasher, HashMap},
+    B256, U256,
+};
 use criterion::{measurement::WallTime, *};
 use rand::SeedableRng;
 use reth_eth_wire::EthVersion;
@@ -16,9 +19,11 @@ use reth_network::{
     },
 };
 use reth_network_peers::PeerId;
+use reth_primitives_traits::SignedTransaction;
 use reth_provider::test_utils::{ExtendedAccount, MockEthProvider};
-use reth_transaction_pool::{test_utils::TransactionGenerator, PoolTransaction, TransactionPool};
-use std::collections::HashMap;
+use reth_transaction_pool::{
+    test_utils::TransactionGenerator, EthPooledTransaction, PoolTransaction, TransactionPool,
+};
 use tokio::runtime::Runtime as TokioRuntime;
 
 criterion_group!(
@@ -28,27 +33,29 @@ criterion_group!(
 );
 
 pub fn benchmark_fetch_pending_hashes(group: &mut BenchmarkGroup<'_, WallTime>, peers_num: usize) {
-    let mut tx_fetcher = TransactionFetcher::<EthNetworkPrimitives>::default();
-    let mut peers = HashMap::default();
-
-    for _i in 0..peers_num {
-        // NOTE: the worst case, each tx in the cache belongs to a different peer.
-        let peer = PeerId::random();
-        let hash = B256::random();
-
-        let (mut peer_data, _) = new_mock_session(peer, EthVersion::Eth66);
-        peer_data.seen_transactions_mut().insert(hash);
-        peers.insert(peer, peer_data);
-
-        buffer_hash_to_tx_fetcher(&mut tx_fetcher, hash, peer, 0, None);
-    }
-
     let group_id = format!("fetch pending hashes, peers num: {peers_num}");
-
     group.bench_function(group_id, |b| {
-        b.iter(|| {
-            tx_fetcher.on_fetch_pending_hashes(&peers, |_| true);
-        });
+        b.iter_batched(
+            || {
+                let mut fetcher = TransactionFetcher::<EthNetworkPrimitives>::default();
+                let mut peers = HashMap::<_, _, FbBuildHasher<64>>::default();
+                let mut sessions = Vec::with_capacity(peers_num);
+                for _ in 0..peers_num {
+                    let peer = PeerId::random();
+                    let hash = B256::random();
+                    let (mut metadata, session) = new_mock_session(peer, EthVersion::Eth66);
+                    metadata.seen_transactions_mut().insert(hash);
+                    peers.insert(peer, metadata);
+                    sessions.push(session);
+                    buffer_hash_to_tx_fetcher(&mut fetcher, hash, peer, None);
+                }
+                (fetcher, peers, sessions)
+            },
+            |(mut fetcher, peers, _sessions)| {
+                std::hint::black_box(fetcher.dispatch(&peers, 256));
+            },
+            BatchSize::SmallInput,
+        );
     });
 }
 
@@ -82,7 +89,15 @@ pub fn tx_fetch_bench(c: &mut Criterion) {
                             ..Default::default()
                         };
 
-                        let provider = MockEthProvider::default();
+                        let mut genesis = reth_chainspec::MAINNET.genesis.clone();
+                        genesis.gas_limit = 30_000_000;
+                        let chain_spec =
+                            reth_chainspec::ChainSpecBuilder::mainnet().genesis(genesis).build();
+                        let provider = MockEthProvider::default().with_chain_spec(chain_spec);
+                        provider.add_header(
+                            provider.chain_spec.genesis_hash(),
+                            provider.chain_spec.genesis_header().clone(),
+                        );
                         let num_peers = 10;
                         let net = Testnet::create_with(num_peers, provider.clone()).await;
 
@@ -99,21 +114,27 @@ pub fn tx_fetch_bench(c: &mut Criterion) {
 
                         let num_tx_per_peer = 10;
 
-                        for i in 1..num_peers {
-                            let peer = &handle.peers()[i];
-                            let peer_pool = peer.pool().unwrap();
-
-                            for _ in 0..num_tx_per_peer {
-                                let mut tx_gen =
-                                    TransactionGenerator::new(rand::rngs::StdRng::seed_from_u64(0));
-
-                                let tx = tx_gen.gen_eip1559_pooled();
-                                let sender = tx.sender();
+                        let mut tx_gen = TransactionGenerator::with_num_signers(
+                            rand::rngs::StdRng::seed_from_u64(0),
+                            num_tx_per_peer * (num_peers - 1),
+                        );
+                        let signers = tx_gen.signer_keys.clone();
+                        for i in 0..num_peers - 1 {
+                            let peer_pool = handle.peers()[i].pool().unwrap();
+                            for j in 0..num_tx_per_peer {
+                                // Unique senders with nonce zero keep every generated tx pending.
+                                let signer = signers[i * num_tx_per_peer + j];
+                                let mut tx = tx_gen.transaction();
+                                tx.signer = signer;
+                                let tx = EthPooledTransaction::try_from_consensus(
+                                    tx.into_eip1559().try_into_recovered().unwrap(),
+                                )
+                                .unwrap();
                                 provider.add_account(
-                                    sender,
-                                    ExtendedAccount::new(0, U256::from(100_000_000)),
+                                    tx.sender(),
+                                    ExtendedAccount::new(0, U256::from(10u128.pow(18))),
                                 );
-                                peer_pool.add_external_transaction(tx.clone()).await.unwrap();
+                                peer_pool.add_external_transaction(tx).await.unwrap();
                             }
                         }
 

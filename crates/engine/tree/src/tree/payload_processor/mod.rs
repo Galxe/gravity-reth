@@ -19,6 +19,7 @@ use executor::WorkloadExecutor;
 use multiproof::{SparseTrieUpdate, *};
 use parking_lot::RwLock;
 use prewarm::PrewarmMetrics;
+use rayon::prelude::*;
 use reth_engine_primitives::ExecutableTxIterator;
 use reth_evm::{
     execute::{ExecutableTxFor, WithTxEnv},
@@ -47,6 +48,7 @@ use std::sync::{
 };
 use tracing::{debug, instrument};
 
+pub mod bal_prewarm_pool;
 mod configured_sparse_trie;
 pub mod executor;
 pub mod multiproof;
@@ -283,16 +285,20 @@ where
     ) {
         let (prewarm_tx, prewarm_rx) = mpsc::channel();
         let (execute_tx, execute_rx) = mpsc::channel();
+        let executor = self.executor.clone();
         self.executor.spawn_blocking(move || {
             let (transactions, convert) = transactions.into_parts();
-            for raw in transactions {
-                let tx = convert.convert(raw).map(WithTxEnv::new);
-                // only send Ok(_) variants to prewarming task
-                if let Ok(tx) = &tx {
-                    let _ = prewarm_tx.send(tx.clone());
-                }
-                let _ = execute_tx.send(tx);
-            }
+            convert_ordered_windows(
+                transactions.into_iter(),
+                |raw| convert.convert(raw).map(WithTxEnv::new),
+                executor.rayon_pool(),
+                |tx| {
+                    if let Ok(tx) = &tx {
+                        let _ = prewarm_tx.send(tx.clone());
+                    }
+                    execute_tx.send(tx).is_ok()
+                },
+            );
         });
 
         (prewarm_rx, execute_rx)
@@ -870,5 +876,78 @@ mod tests {
             root_from_task, root_from_regular,
             "State root mismatch: task={root_from_task}, base={root_from_regular}"
         );
+    }
+}
+
+/// Prioritizes the first few conversions, then converts ordered, growing parallel windows.
+/// Returning false from `emit` stops recovery when the execution consumer has gone away.
+fn convert_ordered_windows<Raw: Send, Tx: Send, Err: Send>(
+    mut transactions: impl Iterator<Item = Raw> + Send,
+    convert: impl Fn(Raw) -> Result<Tx, Err> + Send + Sync,
+    pool: &rayon::ThreadPool,
+    mut emit: impl FnMut(Result<Tx, Err>) -> bool,
+) {
+    for tx in transactions.by_ref().take(4) {
+        if !emit(convert(tx)) {
+            return
+        }
+    }
+    let mut window = 64usize;
+    loop {
+        let chunk = transactions.by_ref().take(window).collect::<Vec<_>>();
+        if chunk.is_empty() {
+            break
+        }
+        window = window.saturating_mul(2);
+        let converted = if chunk.len() < 32 {
+            chunk.into_iter().map(&convert).collect::<Vec<_>>()
+        } else {
+            pool.install(|| chunk.into_par_iter().map(&convert).collect::<Vec<_>>())
+        };
+        for tx in converted {
+            if !emit(tx) {
+                return
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod conversion_window_tests {
+    use super::convert_ordered_windows;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn parallel_windows_preserve_transaction_order_and_errors() {
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(2).build().unwrap();
+        let mut output = Vec::new();
+        convert_ordered_windows(
+            0..1025,
+            |tx| if tx == 71 { Err(tx) } else { Ok(tx) },
+            &pool,
+            |tx| {
+                output.push(tx);
+                true
+            },
+        );
+        let expected =
+            (0..1025).map(|tx| if tx == 71 { Err(tx) } else { Ok(tx) }).collect::<Vec<_>>();
+        assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn disconnected_consumer_stops_transaction_conversion() {
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(2).build().unwrap();
+        let count = AtomicUsize::new(0);
+        convert_ordered_windows(
+            0..1025,
+            |tx| {
+                count.fetch_add(1, Ordering::Relaxed);
+                Ok::<_, ()>(tx)
+            },
+            &pool,
+            |_| false,
+        );
+        assert_eq!(count.load(Ordering::Relaxed), 1);
     }
 }

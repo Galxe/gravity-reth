@@ -797,6 +797,133 @@ mod tests {
         commit.join().unwrap();
     }
 
+    #[tokio::test]
+    async fn multi_proof_matches_individual_nested_proofs_and_preserves_duplicates() {
+        use alloy_primitives::keccak256;
+        use reth_primitives_traits::Account;
+        use reth_rpc_eth_api::helpers::EthState;
+        use reth_storage_api::{
+            BlockWriter, StageCheckpointWriter, StateWriter, StorageLocation, TrieWriterV2,
+        };
+        use reth_trie_common::{HashedPostState, HashedStorage};
+        use reth_trie_db::nested_hash::NestedStateRoot;
+
+        let address = Address::repeat_byte(0x31);
+        let absent = Address::repeat_byte(0x32);
+        let slot = B256::with_last_byte(7);
+        let factory = create_test_provider_factory();
+        let writer = factory.provider_rw().unwrap();
+        let mut state = HashedPostState::default();
+        state.accounts.insert(
+            keccak256(address),
+            Some(Account { balance: U256::from(42), nonce: 3, ..Default::default() }),
+        );
+        state.storages.insert(
+            keccak256(address),
+            HashedStorage {
+                wiped: false,
+                storage: std::iter::once((keccak256(slot), U256::from(11))).collect(),
+            },
+        );
+        let (root, updates) =
+            NestedStateRoot::new(writer.tx_ref(), None).calculate(&state).unwrap();
+        writer.write_hashed_state(&state.into_sorted()).unwrap();
+        writer.write_trie_updatesv2(&updates).unwrap();
+        let genesis = reth_ethereum_primitives::Block {
+            header: Header { state_root: root, ..Default::default() },
+            body: Default::default(),
+        }
+        .seal_slow();
+        writer
+            .insert_block(genesis.clone().try_recover().unwrap(), StorageLocation::Database)
+            .unwrap();
+        writer.update_pipeline_stages(0, false).unwrap();
+        writer.commit().unwrap();
+        let provider =
+            BlockchainProvider::with_latest(factory, genesis.clone_sealed_header()).unwrap();
+        let api = build_test_eth_api(provider.rpc_provider());
+        let targets = vec![(address, vec![slot, slot]), (absent, vec![slot]), (address, vec![])];
+        let proofs = EthState::get_multi_proof(&api, targets.clone(), None).unwrap().await.unwrap();
+        assert_eq!(proofs.len(), targets.len());
+        for ((address, slots), proof) in targets.into_iter().zip(proofs.iter()) {
+            let individual = EthState::get_proof(
+                &api,
+                address,
+                slots.into_iter().map(Into::into).collect(),
+                None,
+            )
+            .unwrap()
+            .await
+            .unwrap();
+            assert_eq!(*proof, individual);
+        }
+        assert_eq!(proofs[0].balance, U256::from(42));
+        assert_eq!(proofs[0].storage_proof.len(), 2);
+        assert_eq!(proofs[0].storage_proof[0].value, U256::from(11));
+        assert_eq!(proofs[1].storage_hash, B256::ZERO);
+        let oversized =
+            vec![(address, vec![]); reth_rpc_server_types::constants::DEFAULT_MAX_PROOF_SLOTS + 1];
+        assert!(EthState::get_multi_proof(&api, oversized, None).is_err());
+    }
+
+    #[tokio::test]
+    async fn simulate_bal_hash_resets_each_block_across_amsterdam() {
+        use alloy_rpc_types_eth::simulate::{SimBlock, SimulatePayload};
+        let provider = MockEthProvider::default().with_chain_spec(
+            ChainSpecBuilder::mainnet().osaka_activated().with_amsterdam_at(24).build(),
+        );
+        let header = Header {
+            number: 0,
+            timestamp: 0,
+            gas_limit: 30_000_000,
+            base_fee_per_gas: Some(0),
+            excess_blob_gas: Some(0),
+            blob_gas_used: Some(0),
+            parent_beacon_block_root: Some(B256::ZERO),
+            ..Default::default()
+        };
+        provider.add_block(header.hash_slow(), Block { header, body: BlockBody::default() });
+        let api = build_test_eth_api(provider);
+        let from = Address::with_last_byte(0x41);
+        let contract = Address::with_last_byte(0x42);
+        let state_overrides = StateOverride::from_iter([
+            (from, AccountOverride::default().with_nonce(0)),
+            (
+                contract,
+                AccountOverride::default().with_code(alloy_primitives::bytes!("5f545f5260205ff3")),
+            ),
+        ]);
+        let call_block = SimBlock::default()
+            .with_state_overrides(state_overrides)
+            .call(TransactionRequest::default().with_from(from).with_to(contract));
+        for trace_transfers in [false, true] {
+            let mut payload = SimulatePayload::default()
+                .extend(SimBlock::default())
+                .extend(call_block.clone())
+                .extend(call_block.clone())
+                .extend(SimBlock::default());
+            payload.trace_transfers = trace_transfers;
+            let result =
+                EthCall::simulate_v1(&api, payload, Some(BlockId::latest())).await.unwrap();
+            assert_eq!(result.len(), 4);
+            assert_eq!(result[0].inner.header.block_access_list_hash, None);
+            let bal_hash =
+                result[1].inner.header.block_access_list_hash.expect("Amsterdam BAL hash");
+            assert!(result[1].calls[0].status);
+            assert!(result[2].calls[0].status);
+            assert_eq!(result[2].inner.header.block_access_list_hash, Some(bal_hash));
+            let empty_hash =
+                result[3].inner.header.block_access_list_hash.expect("empty block BAL hash");
+            assert_ne!(bal_hash, empty_hash);
+            for pair in result.windows(2) {
+                assert_eq!(pair[1].inner.header.parent_hash, pair[0].inner.header.hash);
+            }
+            for block in &result {
+                assert_eq!(block.inner.header.hash, block.inner.header.inner.hash_slow());
+            }
+        }
+    }
+
     #[test]
     fn access_list_completes_with_one_blocking_worker() {
         use reth_rpc_eth_api::helpers::EthCall;

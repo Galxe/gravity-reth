@@ -5,7 +5,8 @@ use alloy_primitives::{Address, Bytes, B256, U64};
 use alloy_rpc_types_debug::ExecutionWitness;
 use alloy_rpc_types_eth::{Account, AccountInfo, Bundle, Index, StateContext};
 use alloy_rpc_types_trace::geth::{
-    BlockTraceResult, GethDebugTracingCallOptions, GethDebugTracingOptions, GethTrace, TraceResult,
+    BlockTraceResult, ChainBlockTraceResult, GethDebugTracingCallOptions, GethDebugTracingOptions,
+    GethTrace, TraceResult,
 };
 use jsonrpsee::{core::RpcResult, proc_macros::rpc};
 use reth_trie_common::{updates::TrieUpdates, HashedPostState};
@@ -47,6 +48,16 @@ pub trait DebugApi<TxReq: RpcObject> {
     /// Clears all transactions from the transaction pool.
     #[method(name = "clearTxpool")]
     async fn debug_clear_txpool(&self) -> RpcResult<()>;
+
+    /// Subscribes to block traces, excluding the start and including the end block.
+    #[subscription(name = "subscribe" => "subscription", unsubscribe = "unsubscribe", item = ChainBlockTraceResult)]
+    async fn debug_subscribe(
+        &self,
+        subscription: String,
+        start_exclusive: BlockNumberOrTag,
+        end_inclusive: BlockNumberOrTag,
+        opts: Option<GethDebugTracingOptions>,
+    ) -> jsonrpsee::core::SubscriptionResult;
 
     /// Returns the structured logs created during the execution of EVM between two blocks
     /// (excluding start) as a JSON object.
