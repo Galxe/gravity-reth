@@ -44,10 +44,7 @@ use reth_rpc::{
 use reth_rpc_api::servers::*;
 use reth_rpc_engine_api::RethEngineApi;
 use reth_rpc_eth_api::{
-    helpers::{
-        pending_block::PendingEnvBuilder, Call, EthApiSpec, EthTransactions, LoadPendingBlock,
-        TraceExt,
-    },
+    helpers::{pending_block::PendingEnvBuilder, Call, EthApiSpec, EthTransactions, TraceExt},
     node::RpcNodeCoreAdapter,
     EthApiServer, EthApiTypes, FullEthApiServer, FullEthApiTypes, RpcBlock, RpcConvert,
     RpcConverter, RpcHeader, RpcNodeCore, RpcReceipt, RpcTransaction, RpcTxReq,
@@ -298,7 +295,7 @@ impl<N, Provider, Pool, Network, EvmConfig, Consensus>
         Provider: Clone,
         Pool: Clone,
         Network: Clone,
-        EvmConfig: ConfigureEvmForRead + Clone,
+        EvmConfig: ConfigureEvmForRead,
         RpcNodeCoreAdapter<Provider, Pool, Network, EvmConfig>:
             RpcNodeCore<Provider: ChainSpecProvider<ChainSpec = ChainSpec>, Evm = EvmConfig>,
         RpcConverter<Ethereum, EvmConfig, EthReceiptConverter<ChainSpec>>: RpcConvert,
@@ -316,7 +313,7 @@ where
         + CanonStateSubscriptions<Primitives = N>
         + ForkChoiceSubscriptions<Header = N::BlockHeader>
         + ChangeSetReader,
-    Pool: TransactionPool + Clone + 'static,
+    Pool: TransactionPool + 'static,
     Network: NetworkInfo + Peers + Clone + 'static,
     EvmConfig: ConfigureEvmForRead<Primitives = N> + 'static,
     Consensus: FullConsensus<N> + Clone + 'static,
@@ -521,7 +518,7 @@ where
         + 'static,
     Pool: Send + Sync + Clone + 'static,
     Network: Clone + 'static,
-    EthApi: FullEthApiTypes + 'static,
+    EthApi: FullEthApiTypes,
     EvmConfig: ConfigureEvmForRead<Primitives = N>,
 {
     /// Creates a new, empty instance.
@@ -624,7 +621,7 @@ where
     pub fn admin_api(&self) -> AdminApi<Network, Provider::ChainSpec, Pool>
     where
         Network: Peers,
-        Pool: TransactionPool + Clone + 'static,
+        Pool: TransactionPool + 'static,
     {
         AdminApi::new(self.network.clone(), self.provider.chain_spec(), self.pool.clone())
     }
@@ -638,7 +635,7 @@ where
     pub fn register_admin(&mut self) -> &mut Self
     where
         Network: Peers,
-        Pool: TransactionPool + Clone + 'static,
+        Pool: TransactionPool + 'static,
     {
         let adminapi = self.admin_api();
         self.modules.insert(RethRpcModule::Admin, adminapi.into_rpc().into());
@@ -738,7 +735,7 @@ where
     /// If called outside of the tokio runtime.
     pub fn register_net(&mut self) -> &mut Self
     where
-        EthApi: EthApiSpec + 'static,
+        EthApi: EthApiSpec,
     {
         let netapi = self.net_api();
         self.modules.insert(RethRpcModule::Net, netapi.into_rpc().into());
@@ -803,7 +800,7 @@ where
     /// If called outside of the tokio runtime. See also [`Self::eth_api`]
     pub fn bundle_api(&self) -> EthBundle<EthApi>
     where
-        EthApi: EthTransactions + LoadPendingBlock + Call,
+        EthApi: EthTransactions + Call,
     {
         let eth_api = self.eth_api().clone();
         EthBundle::new(eth_api, self.blocking_pool_guard.clone())
@@ -833,7 +830,7 @@ where
     /// If called outside of the tokio runtime. See also [`Self::eth_api`]
     pub fn net_api(&self) -> NetApi<Network, EthApi>
     where
-        EthApi: EthApiSpec + 'static,
+        EthApi: EthApiSpec,
     {
         let eth_api = self.eth_api().clone();
         NetApi::new(self.network.clone(), eth_api)
@@ -858,7 +855,7 @@ where
         + CanonStateSubscriptions<Primitives = N>
         + ForkChoiceSubscriptions<Header = N::BlockHeader>
         + ChangeSetReader,
-    Pool: TransactionPool + Clone + 'static,
+    Pool: TransactionPool + 'static,
     Network: NetworkInfo + Peers + Clone + 'static,
     EthApi: FullEthApiServer,
     EvmConfig: ConfigureEvmForRead<Primitives = N> + 'static,
@@ -1974,11 +1971,7 @@ impl TransportRpcModules {
     /// it's the caller responsibility to remove both `subscribe` and `unsubscribe` methods for
     /// subscriptions.
     pub fn remove_http_method(&mut self, method_name: &'static str) -> bool {
-        if let Some(http_module) = &mut self.http {
-            http_module.remove_method(method_name).is_some()
-        } else {
-            false
-        }
+        self.http.as_mut().is_some_and(|module| module.remove_method(method_name).is_some())
     }
 
     /// Removes the given methods from the configured http methods.
@@ -1996,11 +1989,7 @@ impl TransportRpcModules {
     /// it's the caller responsibility to remove both `subscribe` and `unsubscribe` methods for
     /// subscriptions.
     pub fn remove_ws_method(&mut self, method_name: &'static str) -> bool {
-        if let Some(ws_module) = &mut self.ws {
-            ws_module.remove_method(method_name).is_some()
-        } else {
-            false
-        }
+        self.ws.as_mut().is_some_and(|module| module.remove_method(method_name).is_some())
     }
 
     /// Removes the given methods from the configured ws methods.
@@ -2018,11 +2007,7 @@ impl TransportRpcModules {
     /// it's the caller responsibility to remove both `subscribe` and `unsubscribe` methods for
     /// subscriptions.
     pub fn remove_ipc_method(&mut self, method_name: &'static str) -> bool {
-        if let Some(ipc_module) = &mut self.ipc {
-            ipc_module.remove_method(method_name).is_some()
-        } else {
-            false
-        }
+        self.ipc.as_mut().is_some_and(|module| module.remove_method(method_name).is_some())
     }
 
     /// Removes the given methods from the configured ipc methods.

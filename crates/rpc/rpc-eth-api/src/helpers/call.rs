@@ -58,7 +58,7 @@ pub type SimulatedBlocksResult<N, E> = Result<Vec<SimulatedBlock<RpcBlock<N>>>, 
 
 /// Execution related functions for the [`EthApiServer`](crate::EthApiServer) trait in
 /// the `eth_` namespace.
-pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthApiTypes {
+pub trait EthCall: EstimateCall + LoadBlock + FullEthApiTypes {
     /// Uses the execution provider for internal configuration reads.
     fn with_execution_provider(&self) -> Self {
         self.clone()

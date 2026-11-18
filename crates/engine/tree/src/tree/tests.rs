@@ -1346,7 +1346,7 @@ fn test_make_executed_block_canonical_sets_safe_and_finalized() {
     );
 
     // Call make_executed_block_canonical
-    test_harness.tree.make_executed_block_canonical(block.clone());
+    test_harness.tree.make_executed_block_canonical(block);
 
     // Verify safe block is set correctly
     let safe_num_hash = test_harness.tree.canonical_in_memory_state.get_safe_num_hash();
@@ -1630,4 +1630,213 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for EngineSpanParents {
             self.0.lock().unwrap().push(ctx.span(id).unwrap().parent().map(|parent| parent.id()));
         }
     }
+}
+
+/// Source #27247: a stale persisted hash cannot serve as a proposed branch's canonical prefix.
+#[test]
+fn test_forkchoice_rejects_stale_persisted_prefix_hash() {
+    let mut harness = TestHarness::new(MAINNET.clone());
+    let old: Vec<_> = harness.block_builder.get_executed_blocks(0..3).collect();
+    harness = harness.with_blocks(old.clone());
+    let first =
+        harness.block_builder.get_executed_block_with_number(1, old[0].recovered_block().hash());
+    let second =
+        harness.block_builder.get_executed_block_with_number(2, first.recovered_block().hash());
+    harness.tree.canonical_in_memory_state.update_chain(NewCanonicalChain::Reorg {
+        new: vec![first.clone()],
+        old: old[1..].iter().map(|b| b.block.clone()).collect(),
+    });
+    let state = ForkchoiceState {
+        head_block_hash: second.recovered_block().hash(),
+        safe_block_hash: old[1].recovered_block().hash(),
+        finalized_block_hash: old[0].recovered_block().hash(),
+    };
+    let proposed = NewCanonicalChain::Commit { new: vec![second] };
+    assert!(!harness.tree.is_consistent_forkchoice_state(state, Some(&proposed)).unwrap());
+    assert!(harness
+        .tree
+        .is_consistent_forkchoice_state(
+            ForkchoiceState { safe_block_hash: first.recovered_block().hash(), ..state },
+            Some(&proposed),
+        )
+        .unwrap());
+}
+
+/// Ports the source RPC atomicity matrix to the actual retained tree fixture (no SDK harness).
+#[tokio::test]
+async fn invalid_forkchoice_preserves_canonical_state() {
+    let mut harness = TestHarness::new(MAINNET.clone());
+    let old: Vec<_> = harness.block_builder.get_executed_blocks(0..4).collect();
+    harness = harness.with_blocks(old.clone());
+    let first =
+        harness.block_builder.get_executed_block_with_number(1, old[0].recovered_block().hash());
+    let second =
+        harness.block_builder.get_executed_block_with_number(2, first.recovered_block().hash());
+    harness.tree.state.tree_state.insert_executed(first.clone());
+    harness.tree.state.tree_state.insert_executed(second.clone());
+    harness.tree.config = harness
+        .tree
+        .config
+        .with_always_process_payload_attributes_on_canonical_head(true)
+        .with_unwind_canonical_header(true);
+    let original_head = old[3].recovered_block().num_hash();
+    let original_marker = old[0].recovered_block().clone_sealed_header();
+    harness.tree.canonical_in_memory_state.set_safe(original_marker.clone());
+    harness.tree.canonical_in_memory_state.set_finalized(original_marker.clone());
+    let hash = |index: usize| old[index].recovered_block().hash();
+    for state in [
+        ForkchoiceState {
+            head_block_hash: second.recovered_block().hash(),
+            safe_block_hash: hash(2),
+            finalized_block_hash: hash(0),
+        },
+        ForkchoiceState {
+            head_block_hash: second.recovered_block().hash(),
+            safe_block_hash: second.recovered_block().hash(),
+            finalized_block_hash: hash(1),
+        },
+        ForkchoiceState {
+            head_block_hash: hash(3),
+            safe_block_hash: B256::random(),
+            finalized_block_hash: hash(1),
+        },
+        ForkchoiceState {
+            head_block_hash: hash(2),
+            safe_block_hash: hash(3),
+            finalized_block_hash: hash(0),
+        },
+    ] {
+        let outcome = harness.tree.on_forkchoice_updated(state, None).unwrap().outcome;
+        assert_matches!(
+            outcome.await,
+            Err(reth_engine_primitives::BeaconForkChoiceUpdateError::ForkchoiceUpdateError(
+                ForkchoiceUpdateError::InvalidState
+            ))
+        );
+        assert_eq!(harness.tree.state.tree_state.current_canonical_head, original_head);
+        assert_eq!(
+            harness.tree.canonical_in_memory_state.get_canonical_head().num_hash(),
+            original_head
+        );
+        assert_eq!(
+            harness.tree.canonical_in_memory_state.get_safe_num_hash(),
+            Some(original_marker.num_hash())
+        );
+        assert_eq!(
+            harness.tree.canonical_in_memory_state.get_finalized_num_hash(),
+            Some(original_marker.num_hash())
+        );
+        assert!(harness.action_rx.try_recv().is_err(), "invalid FCU wrote a persistence marker");
+    }
+    let accepted = ForkchoiceState {
+        head_block_hash: second.recovered_block().hash(),
+        safe_block_hash: second.recovered_block().hash(),
+        finalized_block_hash: first.recovered_block().hash(),
+    };
+    // Invalid attributes must not roll back an otherwise valid head/safe/finalized update.
+    let attrs = alloy_rpc_types_engine::PayloadAttributes { timestamp: 0, ..Default::default() };
+    let outcome = harness.tree.on_forkchoice_updated(accepted, Some(attrs)).unwrap().outcome;
+    assert_matches!(
+        outcome.await,
+        Err(reth_engine_primitives::BeaconForkChoiceUpdateError::ForkchoiceUpdateError(
+            ForkchoiceUpdateError::UpdatedInvalidPayloadAttributes
+        ))
+    );
+    assert_eq!(harness.tree.state.tree_state.current_canonical_head.hash, accepted.head_block_hash);
+    assert_eq!(
+        harness.tree.canonical_in_memory_state.get_safe_num_hash().unwrap().hash,
+        accepted.safe_block_hash
+    );
+    assert_eq!(
+        harness.tree.canonical_in_memory_state.get_finalized_num_hash().unwrap().hash,
+        accepted.finalized_block_hash
+    );
+}
+
+/// Source #26983: reaching the tracked head applies its markers without waiting for another FCU.
+#[test]
+fn test_backfill_reaching_sync_target_head_updates_finalized() {
+    let mut harness = TestHarness::new(MAINNET.clone());
+    let blocks: Vec<_> = harness.block_builder.get_executed_blocks(0..3).collect();
+    let initial = blocks[0].recovered_block().num_hash();
+    let target = blocks[2].recovered_block().num_hash();
+    harness = harness.with_blocks(blocks);
+    harness.tree.state.tree_state.set_canonical_head(initial);
+    let state = ForkchoiceState {
+        head_block_hash: target.hash,
+        safe_block_hash: target.hash,
+        finalized_block_hash: target.hash,
+    };
+    harness.tree.state.forkchoice_state_tracker.set_latest(state, ForkchoiceStatus::Syncing);
+    harness
+        .tree
+        .on_backfill_sync_finished(ControlFlow::Continue { block_number: target.number })
+        .unwrap();
+    assert_eq!(harness.tree.state.tree_state.current_canonical_head, target);
+    assert_eq!(harness.tree.canonical_in_memory_state.get_finalized_num_hash(), Some(target));
+    assert_eq!(harness.tree.canonical_in_memory_state.get_safe_num_hash(), Some(target));
+    assert_eq!(harness.tree.state.forkchoice_state_tracker.last_valid_state(), Some(state));
+    assert!(harness.tree.state.forkchoice_state_tracker.sync_target_state().is_none());
+    assert!(
+        harness.from_tree_rx.try_recv().is_err(),
+        "already reached target was downloaded again"
+    );
+}
+
+#[test]
+fn backfill_unwind_does_not_apply_invalidated_sync_markers() {
+    let mut harness = TestHarness::new(MAINNET.clone());
+    let blocks: Vec<_> = harness.block_builder.get_executed_blocks(0..3).collect();
+    let target = blocks[2].recovered_block().num_hash();
+    let initial = blocks[0].recovered_block().clone_sealed_header();
+    let bad_block = blocks[2].recovered_block().sealed_block().block_with_parent();
+    harness = harness.with_blocks(blocks);
+    harness.tree.canonical_in_memory_state.set_safe(initial.clone());
+    harness.tree.canonical_in_memory_state.set_finalized(initial.clone());
+    harness.tree.state.forkchoice_state_tracker.set_latest(
+        ForkchoiceState {
+            head_block_hash: target.hash,
+            safe_block_hash: target.hash,
+            finalized_block_hash: target.hash,
+        },
+        ForkchoiceStatus::Syncing,
+    );
+    harness
+        .tree
+        .on_backfill_sync_finished(ControlFlow::Unwind {
+            target: 0,
+            bad_block: Box::new(bad_block),
+        })
+        .unwrap();
+    assert_eq!(
+        harness.tree.canonical_in_memory_state.get_safe_num_hash(),
+        Some(initial.num_hash())
+    );
+    assert_eq!(
+        harness.tree.canonical_in_memory_state.get_finalized_num_hash(),
+        Some(initial.num_hash())
+    );
+    assert!(harness.tree.state.forkchoice_state_tracker.last_valid_state().is_none());
+}
+
+/// Recovery/input errors may invalidate a block; provider and internal failures must stay fatal.
+#[test]
+fn input_error_classification_preserves_provider_and_internal_failures() {
+    use super::error::{InsertBlockErrorKind, InsertBlockValidationError};
+    use reth_errors::{BlockExecutionError, BlockValidationError, ProviderError};
+    let recovery = BlockValidationError::other(std::io::Error::other("signature recovery failed"));
+    assert!(matches!(
+        InsertBlockErrorKind::Execution(recovery.into()).ensure_validation_error(),
+        Ok(InsertBlockValidationError::Validation(_))
+    ));
+    assert!(matches!(
+        InsertBlockErrorKind::Provider(ProviderError::HeaderNotFound(B256::ZERO.into()))
+            .ensure_validation_error(),
+        Err(InsertBlockFatalError::Provider(_))
+    ));
+    assert!(matches!(
+        InsertBlockErrorKind::Execution(BlockExecutionError::msg("internal execution failure"))
+            .ensure_validation_error(),
+        Err(InsertBlockFatalError::BlockExecutionError(_))
+    ));
 }

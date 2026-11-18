@@ -5,11 +5,11 @@ use alloy_eips::BlockId;
 use alloy_evm::{call::CallError, overrides::StateOverrideError};
 use alloy_primitives::{Address, Bytes, B256, U256};
 use alloy_rpc_types_eth::{error::EthRpcErrorCode, request::TransactionInputError, BlockError};
-use alloy_sol_types::{ContractError, RevertReason};
+use alloy_sol_types::RevertReason;
 use alloy_transport::{RpcError, TransportErrorKind};
 pub use api::{AsEthApiError, FromEthApiError, FromEvmError, IntoEthApiError};
 use core::time::Duration;
-use reth_errors::{BlockExecutionError, BlockValidationError, RethError};
+use reth_errors::{BlockExecutionError, BlockValidationError, ProviderError, RethError};
 use reth_primitives_traits::transaction::{error::InvalidTransactionError, signed::RecoveryError};
 use reth_revm::db::bal::EvmDatabaseError;
 use reth_rpc_convert::{CallFeesError, EthTxEnvError, TransactionConversionError};
@@ -534,7 +534,6 @@ impl From<BlockExecutionError> for EthApiError {
 
 impl From<reth_errors::ProviderError> for EthApiError {
     fn from(error: reth_errors::ProviderError) -> Self {
-        use reth_errors::ProviderError;
         match error {
             ProviderError::HeaderNotFound(hash) => Self::HeaderNotFound(hash.into()),
             ProviderError::BlockHashNotFound(hash) | ProviderError::UnknownBlockHash(hash) => {
@@ -918,7 +917,6 @@ impl From<InvalidTransaction> for RpcInvalidTransactionError {
 
 impl From<InvalidTransactionError> for RpcInvalidTransactionError {
     fn from(err: InvalidTransactionError) -> Self {
-        use InvalidTransactionError;
         // This conversion is used to convert any transaction errors that could occur inside the
         // txpool (e.g. `eth_sendRawTransaction`) to their corresponding RPC
         match err {
@@ -982,7 +980,7 @@ impl std::fmt::Display for RevertError {
         {
             let error = reason.to_string();
             let mut error = error.as_str();
-            if matches!(reason, RevertReason::ContractError(ContractError::Revert(_))) {
+            if reason.is_revert() {
                 // we strip redundant `revert: ` prefix from the revert reason
                 error = error.trim_start_matches("revert: ");
             }
@@ -1255,8 +1253,6 @@ mod tests {
 
     #[test]
     fn pruned_state_errors_use_history_unavailable_code() {
-        use reth_errors::ProviderError;
-
         let err = EthApiError::from(ProviderError::InsufficientChangesets {
             requested: 1,
             available: 43..=48,

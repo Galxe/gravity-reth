@@ -35,6 +35,10 @@ pub use static_file::StaticFileSegment;
 
 pub use reth_execution_types::*;
 
+/// Opt-in in-memory block access list storage.
+pub mod bal;
+pub use bal::{BalConfig, InMemoryBalStore};
+
 pub mod bundle_state;
 
 /// Re-export `OriginalValuesKnown`

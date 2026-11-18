@@ -32,6 +32,7 @@ jobs:
       contents: read
     env:
       RUST_BACKTRACE: 1
+      CARGO_PROFILE_DEV_DEBUG: 0
       GRETH_DISABLE_PIPE_EXECUTION: 1
     strategy:
       matrix:
@@ -61,6 +62,8 @@ jobs:
       - uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
+          prefix-key: v1-rust-integration-targets
+          cache-bin: false
           cache-on-failure: true
       - name: Run tests
         run: |

@@ -446,12 +446,10 @@ where
     // gas price.
     let tx_type = tx.as_ref().output_tx_type();
 
-    let from = if let Some(from) = tx.as_ref().from() {
-        from
-    } else {
+    let from = tx.as_ref().from().unwrap_or_else(|| {
         tx.as_mut().set_from(Address::ZERO);
         Address::ZERO
-    };
+    });
 
     let state_nonce = db.basic(from).map_err(Into::into)?.map(|acc| acc.nonce).unwrap_or_default();
     if tx.as_ref().nonce().is_none() {

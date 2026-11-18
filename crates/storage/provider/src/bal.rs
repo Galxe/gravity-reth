@@ -1,5 +1,4 @@
-use alloy_eip7928::BAL_RETENTION_PERIOD_SLOTS;
-use alloy_eips::NumHash;
+use alloy_eips::{eip7928::BAL_RETENTION_PERIOD_SLOTS, NumHash};
 use alloy_primitives::{map::B256Map, BlockHash, BlockNumber, Bytes};
 use parking_lot::RwLock;
 use reth_prune_types::PruneMode;
@@ -401,6 +400,21 @@ mod tests {
         store.insert(NumHash::new(2, hash), sealed_bal(bal.clone())).unwrap();
 
         assert_eq!(store.get_by_hashes(&[hash]).unwrap(), vec![Some(bal)]);
+    }
+
+    #[test]
+    fn reinserting_retained_hash_does_not_leave_stale_pruning_index() {
+        let store = InMemoryBalStore::new(BalConfig::with_in_memory_retention_distance(2));
+        let hash = B256::repeat_byte(1);
+        store.insert(NumHash::new(7, hash), sealed_bal(Bytes::from_static(b"old"))).unwrap();
+        let replacement = Bytes::from_static(b"new");
+        store.insert(NumHash::new(8, hash), sealed_bal(replacement.clone())).unwrap();
+
+        // Number7 expires here, while the replacement at number8 must remain available.
+        assert_eq!(store.prune(10).unwrap(), 0);
+        assert_eq!(store.get_by_hash(hash).unwrap(), Some(replacement));
+        assert_eq!(store.prune(11).unwrap(), 1);
+        assert_eq!(store.get_by_hash(hash).unwrap(), None);
     }
 
     #[tokio::test]

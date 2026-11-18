@@ -994,11 +994,19 @@ impl<N: NodePrimitives<SignedTx: SignedTransaction>> NewCanonicalChain<N> {
     /// Returns the new tip for [`Self::Reorg`] and [`Self::Commit`] variants which commit at least
     /// 1 new block.
     pub fn tip(&self) -> &RecoveredBlock<N::Block> {
+        self.new_blocks().last().expect("non empty blocks").recovered_block()
+    }
+
+    /// Blocks proposed for addition to the canonical chain.
+    pub fn new_blocks(&self) -> &[ExecutedBlockWithTrieUpdates<N>] {
         match self {
-            Self::Commit { new } | Self::Reorg { new, .. } => {
-                new.last().expect("non empty blocks").recovered_block()
-            }
+            Self::Commit { new } | Self::Reorg { new, .. } => new,
         }
+    }
+
+    /// Whether the proposed new branch contains the hash, excluding its unchanged prefix.
+    pub fn contains(&self, hash: B256) -> bool {
+        self.new_blocks().iter().any(|block| block.recovered_block().hash() == hash)
     }
 }
 

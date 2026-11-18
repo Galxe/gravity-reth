@@ -19,6 +19,8 @@ jobs:
     permissions:
       contents: read
     timeout-minutes: 90
+    env:
+      RUST_NIGHTLY: nightly-2026-10-31
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -38,7 +40,9 @@ jobs:
           npx playwright install --with-deps chromium
 
       - name: Install Rust nightly
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_NIGHTLY }}
 
       - name: Build docs
         run: cd docs/vocs && bash scripts/build-cargo-docs.sh

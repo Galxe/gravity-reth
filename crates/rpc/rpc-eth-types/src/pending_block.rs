@@ -62,8 +62,8 @@ impl<B: Block, R> PendingBlockEnvOrigin<B, R> {
     /// even if the pending block changes before the state is loaded.
     pub fn state_block_id(&self) -> BlockId {
         match self {
-            Self::ActualPending(block, _) => BlockId::Hash(block.hash().into()),
-            Self::DerivedFromLatest(latest) => BlockId::Hash(latest.hash().into()),
+            Self::ActualPending(block, _) => BlockId::hash(block.hash()),
+            Self::DerivedFromLatest(latest) => BlockId::hash(latest.hash()),
         }
     }
 

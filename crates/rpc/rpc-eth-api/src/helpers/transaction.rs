@@ -142,7 +142,7 @@ pub trait EthTransactions: LoadTransaction<Provider: BlockReaderIdExt> {
         timeout_ms: Option<u64>,
     ) -> impl Future<Output = Result<RpcReceipt<Self::NetworkTypes>, Self::Error>> + Send
     where
-        Self: LoadReceipt + 'static,
+        Self: LoadReceipt,
     {
         let this = self.clone();
         let configured_timeout = self.send_raw_transaction_sync_timeout();
@@ -166,8 +166,7 @@ pub trait EthTransactions: LoadTransaction<Provider: BlockReaderIdExt> {
                             receipt,
                             this.converter(),
                         )
-                        .transpose()
-                        .map_err(Self::Error::from)?
+                        .transpose()?
                     {
                         return Ok(receipt);
                     }
@@ -285,7 +284,7 @@ pub trait EthTransactions: LoadTransaction<Provider: BlockReaderIdExt> {
         hash: B256,
     ) -> impl Future<Output = Result<Option<RpcReceipt<Self::NetworkTypes>>, Self::Error>> + Send
     where
-        Self: LoadReceipt + 'static,
+        Self: LoadReceipt,
     {
         async move {
             match self.load_transaction_and_receipt(hash).await? {
@@ -508,7 +507,7 @@ pub trait EthTransactions: LoadTransaction<Provider: BlockReaderIdExt> {
         mut request: RpcTxReq<Self::NetworkTypes>,
     ) -> impl Future<Output = Result<B256, Self::Error>> + Send
     where
-        Self: EthApiSpec + LoadBlock + EstimateCall + LoadFee,
+        Self: EthApiSpec + EstimateCall + LoadFee,
     {
         async move {
             ensure_no_conflicting_fee_fields(request.as_ref())?;
@@ -599,7 +598,7 @@ pub trait EthTransactions: LoadTransaction<Provider: BlockReaderIdExt> {
         mut request: RpcTxReq<Self::NetworkTypes>,
     ) -> impl Future<Output = Result<FillTransaction<TxTy<Self::Primitives>>, Self::Error>> + Send
     where
-        Self: EthApiSpec + LoadBlock + EstimateCall + LoadFee,
+        Self: EthApiSpec + EstimateCall + LoadFee,
     {
         async move {
             ensure_no_conflicting_fee_fields(request.as_ref())?;
@@ -874,9 +873,7 @@ pub trait LoadTransaction: SpawnBlocking + FullEthApiTypes + RpcNodeCoreExt {
         async move {
             Ok(self.transaction_by_hash(transaction_hash).await?.map(|tx| match tx {
                 tx @ TransactionSource::Pool(_) => (tx, BlockId::pending()),
-                tx @ TransactionSource::Block { block_hash, .. } => {
-                    (tx, BlockId::Hash(block_hash.into()))
-                }
+                tx @ TransactionSource::Block { block_hash, .. } => (tx, BlockId::hash(block_hash)),
             }))
         }
     }

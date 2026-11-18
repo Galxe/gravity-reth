@@ -1521,6 +1521,10 @@ where
 
         trace!(target: "engine::tree", "fcu head hash is already canonical");
 
+        if !self.is_consistent_forkchoice_state(state, None)? {
+            return Ok(Some(TreeOutcome::new(OnForkChoiceUpdated::invalid_state())));
+        }
+
         // Update the safe and finalized blocks and ensure their values are valid
         if let Err(outcome) = self.ensure_consistent_forkchoice_state(state) {
             // safe or finalized hashes are invalid
@@ -1570,6 +1574,10 @@ where
             if self.engine_kind.is_opstack() ||
                 self.config.always_process_payload_attributes_on_canonical_head()
             {
+                if !self.is_consistent_forkchoice_state(state, None)? {
+                    return Ok(Some(TreeOutcome::new(OnForkChoiceUpdated::invalid_state())));
+                }
+
                 // We need to effectively unwind the _canonical_ chain to the FCU's head, which is
                 // part of the canonical chain. We need to update the latest block state to reflect
                 // the canonical ancestor. This ensures that state providers and the transaction
@@ -1603,6 +1611,9 @@ where
 
         // Ensure we can apply a new chain update for the head block
         if let Some(chain_update) = self.on_new_head(state.head_block_hash)? {
+            if !self.is_consistent_forkchoice_state(state, Some(&chain_update))? {
+                return Ok(Some(TreeOutcome::new(OnForkChoiceUpdated::invalid_state())));
+            }
             let tip = chain_update.tip().clone_sealed_header();
             self.on_canonical_chain_update(chain_update);
 
@@ -2122,6 +2133,9 @@ where
 
             // update the tracked canonical head
             self.canonical_in_memory_state.set_canonical_head(new_head);
+            if !ctrl.is_unwind() {
+                self.on_canonicalized_sync_target(backfill_num_hash.hash);
+            }
         }
 
         // check if we need to run backfill again by comparing the most recent backfill target
@@ -3465,6 +3479,47 @@ where
                 self.provider.block_hash(number)?
             };
         Ok((canonical_hash == Some(hash)).then_some(header))
+    }
+
+    /// Checks direct FCU markers against the proposed branch before any canonical update.
+    /// Zero hashes preserve their markers. Headers left on disk after a reorg must still match
+    /// the current canonical prefix; a hash lookup alone does not establish chain membership.
+    fn is_consistent_forkchoice_state(
+        &self,
+        state: ForkchoiceState,
+        chain_update: Option<&NewCanonicalChain<N>>,
+    ) -> ProviderResult<bool> {
+        let canonical_prefix_tip = match chain_update {
+            Some(update) => {
+                update.new_blocks().first().expect("non empty chain").recovered_block().number() - 1
+            }
+            None => {
+                let Some(head) = self.find_canonical_header(state.head_block_hash)? else {
+                    return Ok(false)
+                };
+                head.number()
+            }
+        };
+        for hash in [state.finalized_block_hash, state.safe_block_hash] {
+            if hash.is_zero() || chain_update.is_some_and(|update| update.contains(hash)) {
+                continue
+            }
+            let Some(header) = self.find_canonical_header(hash)? else { return Ok(false) };
+            if header.number() > canonical_prefix_tip {
+                return Ok(false)
+            }
+            let canonical_hash = if let Some(hash) =
+                self.canonical_in_memory_state.hash_by_number(header.number())
+            {
+                Some(hash)
+            } else {
+                self.provider.block_hash(header.number())?
+            };
+            if canonical_hash != Some(hash) {
+                return Ok(false)
+            }
+        }
+        Ok(true)
     }
 
     /// Updates the tracked finalized block if we have it.

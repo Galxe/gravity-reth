@@ -44,7 +44,7 @@ pub trait RpcNodeCore: Clone + Send + Sync + Unpin + 'static {
     /// The transaction pool of the node.
     type Pool: TransactionPool<Transaction: PoolTransaction<Consensus = TxTy<Self::Primitives>>>;
     /// The node's EVM configuration, defining settings for the Ethereum Virtual Machine.
-    type Evm: ConfigureEvmForRead<Primitives = Self::Primitives> + Send + Sync + 'static;
+    type Evm: ConfigureEvmForRead<Primitives = Self::Primitives> + 'static;
     /// Network API.
     type Network: NetworkInfo + Clone;
 
@@ -105,7 +105,7 @@ where
         + Unpin
         + Clone
         + 'static,
-    Evm: ConfigureEvmForRead + Clone + 'static,
+    Evm: ConfigureEvmForRead + 'static,
     Pool: TransactionPool<Transaction: PoolTransaction<Consensus = TxTy<Evm::Primitives>>>
         + Unpin
         + 'static,
