@@ -21,7 +21,11 @@ const fn main() {}
 /// resolves the latest header on construction, so tests must seed the genesis block or
 /// the validator panics with `BestBlockNotFound`.
 fn provider_with_genesis_block() -> MockEthProvider {
-    let provider = MockEthProvider::default();
+    // Pool validation uses the tip gas limit; mainnet genesis (5,000) cannot fit test txs.
+    let mut genesis = reth_chainspec::MAINNET.genesis.clone();
+    genesis.gas_limit = 30_000_000;
+    let chain_spec = reth_chainspec::ChainSpecBuilder::mainnet().genesis(genesis).build();
+    let provider = MockEthProvider::default().with_chain_spec(chain_spec);
     let genesis_hash = provider.chain_spec.genesis_hash();
     let genesis_header = provider.chain_spec.genesis_header().clone();
     provider.add_block(genesis_hash, Block::new(genesis_header, Default::default()));

@@ -35,13 +35,14 @@ use reth_rpc_eth_types::{
     cache::db::StateProviderTraitObjWrapper,
     error::{AsEthApiError, FromEthApiError},
     simulate::{self, EthSimulateError},
+    utils::CallManyBudget,
     EthApiError, StateCacheDb,
 };
 use reth_storage_api::{BlockIdReader, ProviderBlock, ProviderTx, StateProviderBox};
 use reth_tasks::{cancel::is_cancelled, CancelOnDrop};
 use revm::{
     context::Block,
-    context_interface::{result::ResultAndState, Transaction},
+    context_interface::{result::ResultAndState, Cfg, Transaction},
     Database, DatabaseCommit,
 };
 use revm_inspectors::{access_list::AccessListInspector, transfer::TransferInspector};
@@ -163,11 +164,17 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                     // Always disable EIP-3607
                     evm_env.cfg_env.disable_eip3607 = true;
 
+                    // EIP-7825's transaction gas cap is only active with Amsterdam's
+                    // regular/state-gas accounting, and only in validation mode. Without
+                    // validation the whole gas limit is execution gas.
+                    if !validation || !evm_env.cfg_env.is_amsterdam_eip8037_enabled() {
+                        evm_env.cfg_env.tx_gas_limit_cap = Some(u64::MAX);
+                    }
+
                     if !validation {
                         // If not explicitly required, we disable nonce check <https://github.com/paradigmxyz/reth/issues/16108>
                         evm_env.cfg_env.disable_nonce_check = true;
                         evm_env.cfg_env.disable_base_fee = true;
-                        evm_env.cfg_env.tx_gas_limit_cap = Some(u64::MAX);
                         evm_env.block_env.inner_mut().basefee = 0;
                     }
 
@@ -305,8 +312,10 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
         }
     }
 
-    /// Simulate arbitrary number of transactions at an arbitrary blockchain index, with the
-    /// optionality of state overrides
+    /// Simulate transactions at an arbitrary blockchain index, with the optionality of state
+    /// overrides.
+    ///
+    /// The request is bounded by [`CallManyBudget`]: its calls share the RPC gas cap.
     fn call_many(
         &self,
         bundles: Vec<Bundle<RpcTxReq<<Self::RpcConvert as RpcConvert>::Network>>>,
@@ -319,6 +328,8 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
             if bundles.is_empty() {
                 return Err(EthApiError::InvalidParams(String::from("bundles are empty.")).into());
             }
+
+            let mut budget = CallManyBudget::for_bundles(&bundles, this.call_gas_limit())?;
 
             let permit = this
                 .acquire_owned_blocking_io()
@@ -410,7 +421,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                         let overrides =
                             EvmOverrides::new(state_override.take(), block_overrides.clone());
 
-                        let (current_evm_env, prepared_tx) = this
+                        let (current_evm_env, mut prepared_tx) = this
                             .prepare_call_env(evm_env.clone(), tx, &mut db, overrides)
                             .map_err(|err| {
                                 Self::Error::from_eth_err(EthApiError::call_many_error(
@@ -419,15 +430,24 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                                     err.into(),
                                 ))
                             })?;
+                        budget.admit(&mut prepared_tx)?;
                         let res = this.transact(&mut db, current_evm_env, prepared_tx).map_err(
                             |err| {
                                 Self::Error::from_eth_err(EthApiError::call_many_error(
                                     bundle_index,
                                     tx_index,
-                                    err.into(),
+                                    budget.map_call_err(err).into(),
                                 ))
                             },
                         )?;
+
+                        budget.charge(&res.result).map_err(|err| {
+                            Self::Error::from_eth_err(EthApiError::call_many_error(
+                                bundle_index,
+                                tx_index,
+                                err.into(),
+                            ))
+                        })?;
 
                         match Self::Error::ensure_success(res.result) {
                             Ok(output) => {
@@ -479,7 +499,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
     /// [`BlockId`].
     fn create_access_list_with(
         &self,
-        mut evm_env: EvmEnvFor<Self::Evm>,
+        evm_env: EvmEnvFor<Self::Evm>,
         at: BlockId,
         request: RpcTxReq<<Self::RpcConvert as RpcConvert>::Network>,
         state_override: Option<StateOverride>,
@@ -487,54 +507,21 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
     where
         Self: Trace,
     {
-        self.spawn_blocking_io_fut(async move |this| {
-            let this = this.with_view()?;
-            let state = this.state_at_block_id(at).await?;
-            let mut db = State::builder().with_database(StateProviderDatabase::new(state)).build();
-
-            if let Some(state_overrides) = state_override {
-                apply_state_overrides(state_overrides, &mut db)
-                    .map_err(Self::Error::from_eth_err)?;
-            }
-
-            // Read fields from request before consuming it in create_txn_env
-            let request_has_gas_limit = request.as_ref().gas_limit().is_some();
+        self.spawn_with_state_at_block(at, |this, mut db| {
             let initial = request.as_ref().access_list().cloned().unwrap_or_default();
-
-            let mut tx_env = this.create_txn_env(&evm_env, request, &mut db)?;
-
-            // we want to disable this in eth_createAccessList, since this is common practice used
-            // by other node impls and providers <https://github.com/foundry-rs/foundry/issues/4388>
-            evm_env.cfg_env.disable_block_gas_limit = true;
-
-            // The basefee should be ignored for eth_createAccessList
-            // See:
-            // <https://github.com/ethereum/go-ethereum/blob/8990c92aea01ca07801597b00c0d83d4e2d9b811/internal/ethapi/api.go#L1476-L1476>
-            evm_env.cfg_env.disable_base_fee = true;
-
-            // Disabled because eth_createAccessList is sometimes used with non-eoa senders
-            evm_env.cfg_env.disable_eip3607 = true;
-
-            // Disable additional fee charges (e.g. L2 operator fees),
-            // consistent with prepare_call_env and estimate_gas_with.
-            evm_env.cfg_env.disable_fee_charge = true;
-
-            // Disable EIP-7825 transaction gas limit cap so that the gas limit
-            // fallback (block gas limit) is not rejected when it exceeds the
-            // per-tx cap (2^24 ≈ 16.7M post-Osaka).
-            evm_env.cfg_env.tx_gas_limit_cap = Some(u64::MAX);
-
-            if !request_has_gas_limit && tx_env.gas_price() > 0 {
-                let cap = this.caller_gas_allowance(&mut db, &evm_env, &tx_env)?;
-                // no gas limit was provided in the request, so we need to cap the request's gas
-                // limit
-                tx_env.set_gas_limit(cap.min(evm_env.block_env.gas_limit()));
-            }
-
-            let mut inspector = AccessListInspector::new(initial);
-
-            let result = this.inspect(&mut db, evm_env.clone(), tx_env.clone(), &mut inspector)?;
-            let access_list = inspector.into_access_list();
+            let (evm_env, mut tx_env) = this.prepare_call_env(
+                evm_env,
+                request,
+                &mut db,
+                EvmOverrides::state(state_override),
+            )?;
+            let mut evm = this.evm_config().evm_with_env_and_inspector(
+                &mut db,
+                evm_env,
+                AccessListInspector::new(initial),
+            );
+            let result = evm.transact(tx_env.clone())?;
+            let access_list = core::mem::take(evm.inspector_mut()).into_access_list();
             let gas_used = result.result.tx_gas_used();
             tx_env.set_access_list(access_list.clone());
             if let Err(err) = Self::Error::ensure_success(result.result) {
@@ -546,7 +533,8 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
             }
 
             // transact again to get the exact gas used
-            let result = this.transact(&mut db, evm_env, tx_env)?;
+            evm.disable_inspector();
+            let result = evm.transact(tx_env)?;
             let gas_used = result.result.tx_gas_used();
             let error = Self::Error::ensure_success(result.result).err().map(|e| e.to_string());
 
@@ -585,7 +573,32 @@ pub trait Call:
         _evm_env: &EvmEnvFor<Self::Evm>,
         tx_env: &TxEnvFor<Self::Evm>,
     ) -> Result<u64, Self::Error> {
-        alloy_evm::call::caller_gas_allowance(&mut db, tx_env).map_err(Self::Error::from_eth_err)
+        let balance = db
+            .basic(tx_env.caller())
+            .map_err(|err| Self::Error::from_eth_err(Into::<EthApiError>::into(err)))?
+            .map(|account| account.balance)
+            .unwrap_or_default();
+        let value = tx_env.value();
+        let blob_fee = if tx_env.tx_type() == 3 {
+            U256::from(tx_env.total_blob_gas()) * U256::from(tx_env.max_fee_per_blob_gas())
+        } else {
+            U256::ZERO
+        };
+        let available = balance
+            .checked_sub(value)
+            .and_then(|remaining| remaining.checked_sub(blob_fee))
+            .ok_or_else(|| {
+                EthApiError::from(
+                    reth_rpc_eth_types::RpcInvalidTransactionError::InsufficientFunds {
+                        cost: value.saturating_add(blob_fee),
+                        balance,
+                    },
+                )
+            })?;
+        Ok(available
+            .checked_div(U256::from(tx_env.gas_price()))
+            .unwrap_or_default()
+            .saturating_to())
     }
 
     /// Executes the closure with the state that corresponds to the given [`BlockId`].
@@ -931,8 +944,14 @@ pub trait Call:
                 request.as_mut().set_gas_limit(global_gas_cap);
             }
         } else {
-            // cap request's gas limit to call gas limit
-            request.as_mut().set_gas_limit(self.call_gas_limit());
+            // An omitted gas limit must also fit the active fork's transaction gas cap.
+            let spec_cap = evm_env.cfg_env.tx_gas_limit_cap();
+            let gas_cap = self.call_gas_limit();
+            request.as_mut().set_gas_limit(if gas_cap == 0 {
+                spec_cap
+            } else {
+                gas_cap.min(spec_cap)
+            });
         }
 
         // Disable block gas limit check to allow executing transactions with higher gas limit (call
@@ -948,8 +967,12 @@ pub trait Call:
         // <https://github.com/ethereum/go-ethereum/blob/ee8e83fa5f6cb261dad2ed0a7bbcde4930c41e6c/internal/ethapi/api.go#L985>
         evm_env.cfg_env.disable_base_fee = true;
 
-        // Disable EIP-7825 transaction gas limit to support larger transactions
-        evm_env.cfg_env.tx_gas_limit_cap = Some(u64::MAX);
+        // Disable EIP-7825 transaction gas limit to support larger transactions. Under Amsterdam's
+        // EIP-8037 it only caps execution gas, the rest going to the state gas reservoir, so keep
+        // it to execute the call like a transaction.
+        if !evm_env.cfg_env.is_amsterdam_eip8037_enabled() {
+            evm_env.cfg_env.tx_gas_limit_cap = Some(u64::MAX);
+        }
 
         // Disable additional fee charges, e.g. opstack operator fee charge
         // See:
@@ -981,7 +1004,11 @@ pub trait Call:
             if tx_env.gas_price() > 0 {
                 // If gas price is specified, cap transaction gas limit with caller allowance
                 trace!(target: "rpc::eth::call", ?tx_env, "Applying gas limit cap with caller allowance");
-                let cap = self.caller_gas_allowance(db, &evm_env, &tx_env)?;
+                let mut cap = self.caller_gas_allowance(db, &evm_env, &tx_env)?;
+                // The allowance must not raise the already applied RPC gas cap.
+                if self.call_gas_limit() != 0 {
+                    cap = cap.min(tx_env.gas_limit());
+                }
                 // ensure we cap gas_limit to the block's
                 tx_env.set_gas_limit(cap.min(evm_env.block_env.gas_limit()));
             }

@@ -21,7 +21,7 @@ use std::{
     io,
     pin::Pin,
     task::{ready, Context, Poll},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio_stream::Stream;
 use tracing::{debug, trace};
@@ -65,6 +65,9 @@ const PING_TIMEOUT: Duration = Duration::from_secs(15);
 /// [`PING_INTERVAL`] determines the amount of time to wait between sending `p2p` ping messages
 /// when the peer is responsive.
 const PING_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Maximum number of incoming pings that can arrive in a burst.
+const PING_TOKEN_BUCKET_CAPACITY: u8 = 5;
 
 /// [`MAX_P2P_CAPACITY`] is the maximum number of messages that can be buffered to be sent in the
 /// `p2p` stream.
@@ -280,6 +283,9 @@ pub struct P2PStream<S> {
     /// The state machine used for keeping track of the peer's ping status.
     pinger: Pinger,
 
+    /// Per-connection limit for incoming ping bursts.
+    ping_token_bucket: PingTokenBucket,
+
     /// The supported capability for this stream.
     shared_capabilities: SharedCapabilities,
 
@@ -313,6 +319,7 @@ impl<S> P2PStream<S> {
             compress_scratch: Vec::new(),
             decoder: snap::raw::Decoder::new(),
             pinger: Pinger::new(PING_INTERVAL, PING_TIMEOUT),
+            ping_token_bucket: PingTokenBucket::new(Instant::now()),
             shared_capabilities,
             outgoing_messages: VecDeque::new(),
             outgoing_message_buffer_capacity: MAX_P2P_CAPACITY,
@@ -360,6 +367,39 @@ impl<S> P2PStream<S> {
     pub fn send_ping(&mut self) {
         self.outgoing_messages.push_back(Bytes::from_static(SNAPPY_PING_MESSAGE));
         self.needs_control_flush = true;
+    }
+}
+
+/// Per-connection bucket that restores one incoming ping token per second.
+#[derive(Debug)]
+struct PingTokenBucket {
+    tokens: u8,
+    last_refill: Instant,
+}
+
+impl PingTokenBucket {
+    const fn new(now: Instant) -> Self {
+        Self { tokens: PING_TOKEN_BUCKET_CAPACITY, last_refill: now }
+    }
+
+    fn try_take(&mut self, now: Instant) -> bool {
+        let refill = now.saturating_duration_since(self.last_refill).as_secs();
+        if refill > 0 {
+            self.tokens = u64::from(self.tokens)
+                .saturating_add(refill)
+                .min(u64::from(PING_TOKEN_BUCKET_CAPACITY)) as u8;
+            self.last_refill += Duration::from_secs(refill);
+        }
+
+        if self.tokens == 0 {
+            return false
+        }
+
+        if self.tokens == PING_TOKEN_BUCKET_CAPACITY {
+            self.last_refill = now;
+        }
+        self.tokens -= 1;
+        true
     }
 }
 
@@ -464,6 +504,8 @@ where
             return Poll::Ready(None)
         }
 
+        let mut ping_batch_time = None;
+
         // we should loop here to ensure we don't return Poll::Pending if we have a message to
         // return behind any pings we need to respond to
         while let Poll::Ready(res) = this.inner.poll_next_unpin(cx) {
@@ -498,6 +540,30 @@ where
                 if let Ok(reason) = DisconnectReason::decode(&mut &bytes[1..]) {
                     return Poll::Ready(Some(Err(P2PStreamError::Disconnected(reason))))
                 }
+            }
+
+            if id == P2PMessageID::Ping as u8 || id == P2PMessageID::Pong as u8 {
+                validate_ping_pong_payload(&mut this.decoder, id, &bytes[1..])?;
+
+                if id == P2PMessageID::Ping as u8 {
+                    // Use the timestamp of the first ping for every ping in this poll, so buffered
+                    // pings form one burst. The tradeoff is that a poll that takes more than one
+                    // second can reject a later ping. Considered acceptable.
+                    let now = *ping_batch_time.get_or_insert_with(Instant::now);
+                    if !this.ping_token_bucket.try_take(now) {
+                        return Poll::Ready(Some(Err(P2PStreamError::TooManyPings)))
+                    }
+
+                    trace!("Received Ping, Sending Pong");
+                    this.send_pong();
+                    // This is required because the `Sink` may not be polled externally, and if
+                    // that happens, the pong will never be sent.
+                    cx.waker().wake_by_ref();
+                } else {
+                    // if we were waiting for a pong, this will reset the pinger state
+                    this.pinger.on_pong()?;
+                }
+                continue
             }
 
             // first check that the compressed message length does not exceed the max
@@ -535,23 +601,12 @@ where
             })?;
 
             match id {
-                _ if id == P2PMessageID::Ping as u8 => {
-                    trace!("Received Ping, Sending Pong");
-                    this.send_pong();
-                    // This is required because the `Sink` may not be polled externally, and if
-                    // that happens, the pong will never be sent.
-                    cx.waker().wake_by_ref();
-                }
                 _ if id == P2PMessageID::Hello as u8 => {
                     // we have received a hello message outside of the handshake, so we will return
                     // an error
                     return Poll::Ready(Some(Err(P2PStreamError::HandshakeError(
                         P2PHandshakeError::HelloNotInHandshake,
                     ))))
-                }
-                _ if id == P2PMessageID::Pong as u8 => {
-                    // if we were waiting for a pong, this will reset the pinger state
-                    this.pinger.on_pong()?
                 }
                 _ if id == P2PMessageID::Disconnect as u8 => {
                     // At this point, the `decompress_buf` contains the snappy decompressed
@@ -610,6 +665,22 @@ pub(crate) fn log_prefix(bytes: &[u8]) -> &[u8] {
     &bytes[..bytes.len().min(MAX_LOGGED_PAYLOAD_SIZE)]
 }
 
+fn validate_ping_pong_payload(
+    decoder: &mut snap::raw::Decoder,
+    message_id: u8,
+    compressed_payload: &[u8],
+) -> Result<(), P2PStreamError> {
+    if snap::raw::decompress_len(compressed_payload)? != 1 {
+        return Err(P2PStreamError::InvalidPingPongPayload(message_id))
+    }
+    let mut payload = [0u8; 1];
+    decoder.decompress(compressed_payload, &mut payload)?;
+    if payload != [EMPTY_LIST_CODE] {
+        return Err(P2PStreamError::InvalidPingPongPayload(message_id))
+    }
+    Ok(())
+}
+
 impl<S> Sink<Bytes> for P2PStream<S>
 where
     S: Sink<Bytes, Error = io::Error> + Unpin,
@@ -665,6 +736,7 @@ where
         }
 
         let this = self.project();
+        *this.needs_flush = true;
 
         // all messages sent in this stream are subprotocol messages, so we need to switch the
         // message id based on the offset

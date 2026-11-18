@@ -618,12 +618,15 @@ where
         let mut hashed_storage_cursor =
             self.hashed_cursor_factory.hashed_storage_cursor(self.hashed_address)?;
 
-        // short circuit on empty storage
-        if hashed_storage_cursor.is_storage_empty()? {
+        // Changed prefixes still need to walk cached nodes to record removals.
+        if self.previous_state.is_none() &&
+            (!retain_updates || self.prefix_set.is_empty()) &&
+            hashed_storage_cursor.is_storage_empty()?
+        {
             return Ok(StorageRootProgress::Complete(
                 EMPTY_ROOT_HASH,
                 0,
-                StorageTrieUpdates::deleted(),
+                StorageTrieUpdates::default(),
             ))
         }
 
@@ -734,6 +737,38 @@ impl TrieType {
         match self {
             Self::State => "state",
             Self::Storage => "storage",
+        }
+    }
+}
+
+#[cfg(test)]
+mod empty_storage_updates_tests {
+    use super::*;
+    use crate::{
+        hashed_cursor::noop::NoopHashedCursorFactory, trie_cursor::noop::NoopTrieCursorFactory,
+    };
+
+    #[test]
+    fn empty_storage_does_not_mark_the_trie_deleted() {
+        for changed_prefix in [false, true] {
+            let prefixes = if changed_prefix {
+                crate::prefix_set::PrefixSetMut::from([Nibbles::unpack(B256::ZERO)]).freeze()
+            } else {
+                Default::default()
+            };
+            let (root, walked, updates) = StorageRoot::new_hashed(
+                NoopTrieCursorFactory::default(),
+                NoopHashedCursorFactory::default(),
+                B256::ZERO,
+                prefixes,
+                #[cfg(feature = "metrics")]
+                TrieRootMetrics::new(TrieType::Storage),
+            )
+            .root_with_updates()
+            .unwrap();
+            assert_eq!(root, EMPTY_ROOT_HASH);
+            assert_eq!(walked, 0);
+            assert_eq!(updates, StorageTrieUpdates::default());
         }
     }
 }

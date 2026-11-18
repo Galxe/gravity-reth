@@ -27,7 +27,6 @@ use reth_transaction_pool::test_utils::testing_pool;
 use secp256k1::SecretKey;
 use std::time::Duration;
 use tokio::task;
-use url::Host;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_establish_connections() {
@@ -562,21 +561,20 @@ async fn test_always_accept_incoming_connections_from_trusted_peers() {
     let peer1 = new_random_peer(10, vec![]).await;
     let peer2 = new_random_peer(0, vec![]).await;
 
-    //  setup the peer with max_inbound = 1, and add other_peer_3 as trust nodes
-    let trusted_peer2 = TrustedPeer {
-        host: Host::Ipv4(peer2.local_addr().ip().to_string().parse().unwrap()),
-        tcp_port: peer2.local_addr().port(),
-        udp_port: peer2.local_addr().port(),
-        id: *peer2.peer_id(),
-    };
-
-    let peer = new_random_peer(0, vec![trusted_peer2.clone()]).await;
+    // Trust the identity without an address so the receiver does not dial it first.
+    let mut peers_config = PeersConfig::test().with_max_inbound(0);
+    // Distinct localhost peers share one IP; this test covers identity/capacity, not IP throttling.
+    peers_config.incoming_ip_throttle_duration = Duration::ZERO;
+    let peer = new_random_peer_with_config(peers_config).await;
 
     let handle = peer.handle().clone();
     let peer1_handle = peer1.handle().clone();
     let peer2_handle = peer2.handle().clone();
 
+    handle.add_trusted_peer_id(*peer2_handle.peer_id());
     tokio::task::spawn(peer);
+    // Requests on the handle channel are processed in order: wait until trust is installed.
+    let _ = handle.get_peer_by_id(*peer2_handle.peer_id()).await.unwrap();
     tokio::task::spawn(peer1);
     tokio::task::spawn(peer2);
 
@@ -590,8 +588,7 @@ async fn test_always_accept_incoming_connections_from_trusted_peers() {
     assert_eq!(peer_id, *handle.peer_id());
     assert_eq!(reason, Some(DisconnectReason::TooManyPeers));
 
-    let peer_id = events.next_session_established().await.unwrap();
-    assert_eq!(peer_id, *peer1_handle.peer_id());
+    assert_eq!(handle.num_connected_peers(), 0);
 
     // outbound connection from `peer2` should succeed
     peer2_handle.add_peer(*handle.peer_id(), handle.local_addr());
@@ -645,10 +642,15 @@ async fn new_random_peer(
     max_in_bound: usize,
     trusted_nodes: Vec<TrustedPeer>,
 ) -> NetworkManager<EthNetworkPrimitives> {
-    let secret_key = SecretKey::new(&mut rand_08::thread_rng());
     let peers_config =
         PeersConfig::test().with_max_inbound(max_in_bound).with_trusted_nodes(trusted_nodes);
+    new_random_peer_with_config(peers_config).await
+}
 
+async fn new_random_peer_with_config(
+    peers_config: PeersConfig,
+) -> NetworkManager<EthNetworkPrimitives> {
+    let secret_key = SecretKey::new(&mut rand_08::thread_rng());
     let config = NetworkConfigBuilder::new(secret_key, Runtime::test())
         .listener_port(0)
         .disable_discovery()
