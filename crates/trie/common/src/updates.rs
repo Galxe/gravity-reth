@@ -170,6 +170,24 @@ impl TrieUpdates {
         }
     }
 
+    /// Finalizes updates with explicit removed legacy storage-node paths for destroyed accounts.
+    ///
+    /// Unlike [`Self::finalize`], this does not add a whole-storage wipe. Regenerated storage
+    /// nodes remain present and take precedence over removed paths when updates are sorted.
+    pub fn finalize_with_destroyed_storage_nodes(
+        &mut self,
+        hash_builder: HashBuilder,
+        removed_keys: HashSet<Nibbles>,
+        destroyed_storage_trie_nodes: B256Map<Vec<Nibbles>>,
+    ) {
+        let (_, updated_nodes) = hash_builder.split();
+        self.account_nodes.extend(exclude_empty_from_pair(updated_nodes));
+        self.removed_nodes.extend(exclude_empty(removed_keys));
+        for (address, removed_nodes) in destroyed_storage_trie_nodes {
+            self.storage_tries.entry(address).or_default().removed_nodes.extend(removed_nodes);
+        }
+    }
+
     /// Converts trie updates into [`TrieUpdatesSorted`].
     pub fn into_sorted(mut self) -> TrieUpdatesSorted {
         self.drain_into_sorted()
@@ -1342,5 +1360,36 @@ mod sorted_merge_tests {
                 expected.storage_tries.get(&B256::ZERO).cloned().unwrap_or_default()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod materialized_destroyed_storage_tests {
+    use super::*;
+    use alloc::vec;
+
+    #[test]
+    fn test_finalize_keeps_storage_updates_after_destroyed_node_removal() {
+        let hashed_address = B256::with_last_byte(1);
+        let path = Nibbles::from_nibbles_unchecked([0x01]);
+        let node = BranchNodeCompact::default();
+        let mut updates = TrieUpdates {
+            storage_tries: B256Map::from_iter([(
+                hashed_address,
+                StorageTrieUpdates {
+                    storage_nodes: HashMap::from_iter([(path, node.clone())]),
+                    ..Default::default()
+                },
+            )]),
+            ..Default::default()
+        };
+        updates.finalize_with_destroyed_storage_nodes(
+            HashBuilder::default(),
+            Default::default(),
+            B256Map::from_iter([(hashed_address, vec![path])]),
+        );
+        let updates = updates.into_sorted();
+        assert!(!updates.storage_tries[&hashed_address].is_deleted);
+        assert_eq!(updates.storage_tries[&hashed_address].storage_nodes, vec![(path, Some(node))]);
     }
 }

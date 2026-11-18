@@ -619,9 +619,16 @@ impl TreeConfig {
         self
     }
 
-    /// Whether or not to use state root task
+    /// Returns whether the configured host has enough parallelism for the state-root task.
+    pub const fn has_enough_parallelism(&self) -> bool {
+        self.has_enough_parallelism
+    }
+
+    /// Returns whether engine validation should use the state-root task.
+    ///
+    /// Explicit serial fallback and legacy-root configuration take precedence over parallelism.
     pub const fn use_state_root_task(&self) -> bool {
-        self.has_enough_parallelism && !self.legacy_state_root
+        self.has_enough_parallelism && !self.legacy_state_root && !self.state_root_fallback
     }
 
     /// Returns whether cache metrics recording is disabled.

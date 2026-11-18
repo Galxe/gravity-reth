@@ -747,7 +747,8 @@ mod tests {
         ])
         .args;
         assert!(args.tree_config().state_root_fallback());
-        assert!(args.tree_config().use_state_root_task());
+        assert!(args.tree_config().has_enough_parallelism());
+        assert!(!args.tree_config().use_state_root_task());
 
         let legacy = CommandParser::<EngineArgs>::parse_from([
             "reth",

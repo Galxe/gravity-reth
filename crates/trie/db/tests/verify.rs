@@ -164,3 +164,98 @@ fn address_scan_covers_hashed_only_and_legacy_trie_only_orphans() {
         );
     }
 }
+
+#[test]
+fn destroyed_account_storage_emits_node_removals() {
+    use reth_trie::{
+        prefix_set::{PrefixSetMut, TriePrefixSets},
+        trie_cursor::TrieCursorFactory,
+    };
+    use reth_trie_db::{DatabaseStateRoot, DatabaseStorageTrieCursor, DatabaseTrieCursorFactory};
+    let temp = create_test_rw_db();
+    let db = temp.db();
+    let address = B256::with_last_byte(1);
+    let tx = db.tx_mut().unwrap();
+    tx.put::<tables::HashedAccounts>(address, Account::default()).unwrap();
+    for bytes in [
+        &[0x30, 0xaf, 0x56, 0x10][..],
+        &[0x30, 0xaf, 0x56, 0x90][..],
+        &[0x30, 0xaf, 0x65][..],
+        &[0x30, 0xaf, 0x6f][..],
+        &[0x30, 0xaf, 0x8f][..],
+        &[0x31][..],
+    ] {
+        tx.put::<tables::HashedStorages>(
+            address,
+            StorageEntry { key: B256::right_padding_from(bytes), value: U256::ONE },
+        )
+        .unwrap();
+    }
+    tx.commit().unwrap();
+    let state = db.tx_with_snapshot(db.snapshot(true).unwrap()).unwrap();
+    let initial = StateRoot::from_tx(&state).root_with_updates().unwrap().1;
+    let (_, _, initial_storage) =
+        reth_trie::StorageRoot::from_tx_hashed(&state, address).root_with_updates().unwrap();
+    let mut expected_paths =
+        initial_storage.storage_nodes_ref().keys().copied().collect::<Vec<_>>();
+    expected_paths.sort_unstable();
+    assert!(!expected_paths.is_empty());
+
+    // Commit legacy caches before changing hashed state; native RocksDB reads exclude its batch.
+    let tx = db.tx_mut().unwrap();
+    for (path, node) in initial.account_nodes {
+        tx.put::<tables::AccountsTrie>(StoredNibbles(path), node).unwrap();
+    }
+    for (address, storage) in initial.storage_tries {
+        for (path, node) in storage.storage_nodes {
+            tx.put::<tables::StoragesTrie>(
+                address,
+                StorageTrieEntry { nibbles: StoredNibblesSubKey(path), node },
+            )
+            .unwrap();
+        }
+    }
+    tx.commit().unwrap();
+    let tx = db.tx_mut().unwrap();
+    tx.clear::<tables::HashedAccounts>().unwrap();
+    tx.clear::<tables::HashedStorages>().unwrap();
+    tx.commit().unwrap();
+
+    let state = db.tx_with_snapshot(db.snapshot(true).unwrap()).unwrap();
+    let prefixes = TriePrefixSets {
+        account_prefix_set: PrefixSetMut::from([Nibbles::unpack(address)]).freeze(),
+        destroyed_accounts: [address].into_iter().collect(),
+        ..Default::default()
+    };
+    let (_, default_updates) =
+        StateRoot::from_tx(&state).with_prefix_sets(prefixes.clone()).root_with_updates().unwrap();
+    assert!(default_updates.storage_tries[&address].is_deleted());
+    let (root, updates) = StateRoot::from_tx(&state)
+        .with_prefix_sets(prefixes)
+        .with_materialized_destroyed_storage_nodes(true)
+        // Changing factories must preserve the opted-in mode.
+        .with_trie_cursor_factory(DatabaseTrieCursorFactory::new(&state))
+        .with_hashed_cursor_factory(DatabaseHashedCursorFactory::new(&state))
+        .root_with_updates()
+        .unwrap();
+    assert_eq!(root, alloy_consensus::EMPTY_ROOT_HASH);
+    let storage = &updates.storage_tries[&address];
+    assert!(!storage.is_deleted());
+    let mut removed = storage.removed_nodes_ref().iter().copied().collect::<Vec<_>>();
+    removed.sort_unstable();
+    assert_eq!(removed, expected_paths);
+
+    let tx = db.tx_mut().unwrap();
+    let mut cursor = DatabaseStorageTrieCursor::new(
+        tx.cursor_dup_write::<tables::StoragesTrie>().unwrap(),
+        address,
+    );
+    cursor.write_storage_trie_updates(storage).unwrap();
+    drop(cursor);
+    tx.commit().unwrap();
+    let state = db.tx_with_snapshot(db.snapshot(true).unwrap()).unwrap();
+    let mut cursor = DatabaseTrieCursorFactory::new(&state).storage_trie_cursor(address).unwrap();
+    assert!(reth_trie::trie_cursor::TrieCursor::seek(&mut cursor, Nibbles::default())
+        .unwrap()
+        .is_none());
+}

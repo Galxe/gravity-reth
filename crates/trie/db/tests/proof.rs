@@ -6,7 +6,7 @@ use alloy_rlp::EMPTY_STRING_CODE;
 use reth_chainspec::{Chain, ChainSpec, HOLESKY, MAINNET};
 use reth_primitives_traits::Account;
 use reth_provider::test_utils::{create_test_provider_factory, insert_genesis};
-use reth_trie::{proof::Proof, AccountProof, Nibbles, StorageProof};
+use reth_trie::{proof::Proof, AccountProof, MultiProofTargets, Nibbles, StorageProof, TrieInput};
 use reth_trie_db::DatabaseProof;
 use std::{
     str::FromStr,
@@ -93,6 +93,21 @@ fn testspec_proofs() {
             "proof for {target:?} does not match"
         );
         assert_eq!(account_proof.verify(root), Ok(()));
+        // Exercise both legacy overlay entrypoints against the same independent geth vectors.
+        let overlay =
+            Proof::overlay_account_proof(provider.tx_ref(), TrieInput::default(), target, &[])
+                .unwrap();
+        assert_eq!(overlay.proof, expected_proof);
+        assert_eq!(overlay.verify(root), Ok(()));
+        let multiproof = Proof::overlay_multiproof(
+            provider.tx_ref(),
+            TrieInput::default(),
+            MultiProofTargets::account(keccak256(target)),
+        )
+        .unwrap();
+        let from_multi = multiproof.account_proof(target, &[]).unwrap();
+        assert_eq!(from_multi.proof, expected_proof);
+        assert_eq!(from_multi.verify(root), Ok(()));
     }
 }
 
