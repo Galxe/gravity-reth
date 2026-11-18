@@ -160,27 +160,32 @@ where
             self;
         let hash = env.hash;
 
-        // Perform all cache operations atomically under the lock
-        execution_cache.update_with_guard(|cached| {
-
-            // consumes the `SavedCache` held by the prewarming task, which releases its usage guard
+        let (previous, rejected) = execution_cache.update_with_guard(|cached| {
+            let reused = cached.as_ref().is_some_and(|previous| previous.shares_cache_with(&saved_cache));
+            // Consume the prewarmer's checkout before publishing the new cache.
             let (caches, cache_metrics) = saved_cache.split();
             let new_cache = SavedCache::new(hash, caches, cache_metrics);
 
-            // Insert state into cache while holding the lock
+            // No reader may observe a partially updated cache.
             if new_cache.cache().insert_state(&state).is_err() {
-                // Clear the cache on error to prevent having a polluted cache
-                *cached = None;
                 debug!(target: "engine::caching", "cleared execution cache on update error");
-                return;
+                return (cached.take(), Some(new_cache));
             }
 
             new_cache.update_metrics();
             debug!(target: "engine::caching", parent_hash=?new_cache.executed_block_hash(), "Updated execution cache");
-
-            // Replace the shared cache with the new one; the previous cache (if any) is dropped.
-            *cached = Some(new_cache);
+            let previous = cached.replace(new_cache);
+            if reused {
+                // The replacement still owns these allocations. Release the extra checkout
+                // before unlocking; this cannot free the shared Moka contents.
+                drop(previous);
+                (None, None)
+            } else {
+                (previous, None)
+            }
         });
+        // Destruction of an obsolete or rejected allocation may be expensive.
+        drop((previous, rejected));
 
         metrics.cache_saving_duration.set(start.elapsed().as_secs_f64());
     }
@@ -460,4 +465,156 @@ pub(crate) struct PrewarmMetrics {
     pub(crate) cache_saving_duration: Gauge,
     /// Counter for transaction execution errors during prewarming
     pub(crate) transaction_errors: Counter,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tree::{
+        cached_state::{CachedStateMetrics, ExecutionCacheBuilder, SlotStatus},
+        payload_processor::ExecutionCache,
+    };
+    use alloy_primitives::{Address, U256};
+    use reth_chainspec::ChainSpec;
+    use reth_ethereum_primitives::EthPrimitives;
+    use reth_evm_ethereum::EthEvmConfig;
+    use reth_provider::test_utils::MockEthProvider;
+    use std::sync::{atomic::AtomicBool, Weak};
+
+    fn saved_cache(hash: B256) -> SavedCache {
+        SavedCache::new(
+            hash,
+            ExecutionCacheBuilder::default().build_caches(1_000_000),
+            CachedStateMetrics::zeroed(),
+        )
+    }
+
+    fn save(slot: &ExecutionCache, saved: SavedCache, state: BundleState, duration: Gauge) {
+        let ctx = PrewarmContext {
+            env: ExecutionEnv { hash: B256::repeat_byte(2), ..Default::default() },
+            evm_config: EthEvmConfig::new(Arc::new(ChainSpec::default())),
+            saved_cache: saved,
+            provider: StateProviderBuilder::<EthPrimitives, _>::new(
+                MockEthProvider::default(),
+                B256::ZERO,
+                None,
+            ),
+            metrics: PrewarmMetrics { cache_saving_duration: duration, ..Default::default() },
+            terminate_execution: Arc::new(AtomicBool::new(false)),
+            precompile_cache_disabled: true,
+            precompile_cache_map: PrecompileCacheMap::default(),
+        };
+        let (task, _) = PrewarmCacheTask::new(
+            WorkloadExecutor::with_num_cpu_threads(1),
+            slot.clone(),
+            ctx,
+            None,
+        );
+        task.save_cache(state);
+    }
+
+    struct SaveObserver {
+        cache: ExecutionCache,
+        observed: Arc<AtomicBool>,
+    }
+
+    impl metrics::GaugeFn for SaveObserver {
+        fn increment(&self, _: f64) {}
+        fn decrement(&self, _: f64) {}
+        fn set(&self, _: f64) {
+            let saved = self
+                .cache
+                .get_cache_for(B256::repeat_byte(2))
+                .expect("cache must be reusable before save_cache returns");
+            assert_eq!(
+                saved.cache().get_storage(&Address::ZERO, &B256::ZERO),
+                SlotStatus::Value(U256::from(7))
+            );
+            self.observed.store(true, Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn save_cache_releases_checkout_before_duration_metric() {
+        let slot = ExecutionCache::default();
+        let saved = saved_cache(B256::repeat_byte(1));
+        saved.cache().insert_storage(Address::ZERO, B256::ZERO, Some(U256::from(7)));
+        slot.update_with_guard(|cached| *cached = Some(saved.clone()));
+        let observed = Arc::new(AtomicBool::new(false));
+        let observer = Arc::new(SaveObserver { cache: slot.clone(), observed: observed.clone() });
+        save(&slot, saved, BundleState::default(), Gauge::from_arc(observer));
+        assert!(observed.load(Ordering::Relaxed));
+    }
+
+    struct CacheDropProbe {
+        slot: Weak<parking_lot::RwLock<Option<SavedCache>>>,
+        result: Sender<bool>,
+    }
+
+    impl AsRef<[u8]> for CacheDropProbe {
+        fn as_ref(&self) -> &[u8] {
+            &[0xef, 0x01, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        }
+    }
+
+    impl Drop for CacheDropProbe {
+        fn drop(&mut self) {
+            let unlocked = self.slot.upgrade().is_some_and(|slot| slot.try_read().is_some());
+            let _ = self.result.send(unlocked);
+        }
+    }
+
+    fn observe_drop(saved: &SavedCache, slot: &ExecutionCache) -> Receiver<bool> {
+        let (tx, rx) = channel();
+        let bytes = alloy_primitives::bytes::Bytes::from_owner(CacheDropProbe {
+            slot: Arc::downgrade(&slot.inner),
+            result: tx,
+        });
+        let code = revm::bytecode::Bytecode::new_eip7702_raw(bytes.into()).unwrap();
+        saved
+            .cache()
+            .insert_code_for_test(B256::repeat_byte(3), reth_primitives_traits::Bytecode(code));
+        rx
+    }
+
+    #[test]
+    fn save_cache_drops_replaced_allocation_after_unlock() {
+        let slot = ExecutionCache::default();
+        let previous = saved_cache(B256::repeat_byte(1));
+        let dropped = observe_drop(&previous, &slot);
+        slot.update_with_guard(|cached| *cached = Some(previous));
+        save(&slot, saved_cache(B256::ZERO), BundleState::default(), Gauge::noop());
+        assert!(dropped.recv_timeout(std::time::Duration::from_secs(5)).unwrap());
+        assert!(slot.get_cache_for(B256::repeat_byte(2)).is_some());
+    }
+
+    #[test]
+    fn save_cache_drops_rejected_allocations_after_unlock() {
+        use reth_revm::db::{AccountStatus, BundleAccount};
+        for shared in [false, true] {
+            let slot = ExecutionCache::default();
+            let previous = saved_cache(B256::repeat_byte(1));
+            let previous_drop = observe_drop(&previous, &slot);
+            let saved = if shared { previous.clone() } else { saved_cache(B256::ZERO) };
+            let rejected_drop = (!shared).then(|| observe_drop(&saved, &slot));
+            slot.update_with_guard(|cached| *cached = Some(previous));
+            // A modified, non-destroyed account without current info is an invalid cache update.
+            let mut state = BundleState::default();
+            state.state.insert(
+                Address::ZERO,
+                BundleAccount {
+                    info: None,
+                    original_info: None,
+                    storage: Default::default(),
+                    status: AccountStatus::Changed,
+                },
+            );
+            save(&slot, saved, state, Gauge::noop());
+            assert!(previous_drop.recv_timeout(std::time::Duration::from_secs(5)).unwrap());
+            if let Some(rejected_drop) = rejected_drop {
+                assert!(rejected_drop.recv_timeout(std::time::Duration::from_secs(5)).unwrap());
+            }
+            assert!(slot.get_cache_for(B256::repeat_byte(2)).is_none());
+        }
+    }
 }

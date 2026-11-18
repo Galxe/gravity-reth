@@ -180,6 +180,36 @@ mod tests {
     }
 
     #[test]
+    fn distance_derived_receipt_ranges_reopen_and_keep_existing_sizes() -> eyre::Result<()> {
+        use reth_static_file_types::blocks_per_file_for_prune_distance;
+        for (distance, expected_size) in
+            [(0, 1_000), (20_000, 5_000), (u64::MAX, DEFAULT_BLOCKS_PER_STATIC_FILE)]
+        {
+            let (dir, _) = create_test_static_files_dir();
+            let size = blocks_per_file_for_prune_distance(distance);
+            let receipt = Receipt { cumulative_gas_used: 123, ..Default::default() };
+            {
+                let provider = StaticFileProvider::<EthPrimitives>::read_write(&dir)?
+                    .with_blocks_per_file([(StaticFileSegment::Receipts, Some(size))])?;
+                let mut writer = provider.latest_writer(StaticFileSegment::Receipts)?;
+                writer.increment_block(0)?;
+                writer.append_receipt(0, &receipt)?;
+                writer.commit()?;
+            }
+            // Reopening with another profile must inherit the existing filename range.
+            let provider = StaticFileProvider::<EthPrimitives>::read_write(&dir)?
+                .with_blocks_per_file([(StaticFileSegment::Receipts, Some(expected_size + 1))])?;
+            let jar =
+                provider.get_segment_provider_from_block(StaticFileSegment::Receipts, 0, None)?;
+            assert_eq!(jar.user_header().expected_block_start(), 0);
+            assert_eq!(jar.user_header().expected_block_end(), expected_size - 1);
+            drop(jar);
+            assert_eq!(provider.receipt(0)?, Some(receipt));
+        }
+        Ok(())
+    }
+
+    #[test]
     fn test_snap() {
         // Ranges
         let row_count = 100u64;

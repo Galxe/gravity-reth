@@ -309,6 +309,14 @@ pub(crate) struct ExecutionCache {
 }
 
 impl ExecutionCache {
+    #[cfg(test)]
+    pub(super) fn insert_code_for_test(&self, hash: B256, code: Bytecode) {
+        use mini_moka::sync::ConcurrentCacheExt;
+        self.code_cache.insert(hash, Some(code));
+        // Flush deferred write bookkeeping so the fixture observes the cache allocation's drop.
+        self.code_cache.sync();
+    }
+
     /// Get storage value from hierarchical cache.
     ///
     /// Returns a `SlotStatus` indicating whether:
@@ -535,6 +543,14 @@ impl SavedCache {
     /// Returns the hash for this cache
     pub(crate) const fn executed_block_hash(&self) -> B256 {
         self.hash
+    }
+
+    /// Returns whether these saved values belong to the same checkout lineage.
+    ///
+    /// Clones share the usage guard and their Moka allocations. Independently constructed
+    /// wrappers are conservatively treated as distinct, even if their caches were cloned.
+    pub(crate) fn shares_cache_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.usage_guard, &other.usage_guard)
     }
 
     /// Splits the cache into its caches and metrics, consuming it.
