@@ -1111,11 +1111,8 @@ mod tests {
     }
 
     fn eth_shared_capabilities() -> SharedCapabilities {
-        SharedCapabilities::try_new(
-            vec![EthVersion::Eth68.into()],
-            vec![Capability::eth(EthVersion::Eth68)],
-        )
-        .unwrap()
+        SharedCapabilities::try_new(vec![EthVersion::Eth68.into()], vec![Capability::eth_68()])
+            .unwrap()
     }
 
     #[tokio::test]

@@ -88,7 +88,7 @@ impl Discv5 {
 
     /// Adds the node to the table, if it is not already present.
     pub fn add_node(&self, node_record: Enr<SecretKey>) -> Result<(), Error> {
-        let EnrCombinedKeyWrapper(enr) = node_record.into();
+        let EnrCombinedKeyWrapper(enr) = node_record.try_into().map_err(Error::InvalidEnr)?;
         self.discv5.add_enr(enr).map_err(Error::AddNodeFailed)
     }
 
@@ -196,7 +196,7 @@ impl Discv5 {
             ..
         } = discv5_config;
 
-        let EnrCombinedKeyWrapper(enr) = enr.into();
+        let EnrCombinedKeyWrapper(enr) = enr.try_into().map_err(Error::InvalidEnr)?;
         let sk = discv5::enr::CombinedKey::secp256k1_from_bytes(&mut sk.secret_bytes()).unwrap();
         let mut discv5 = match discv5::Discv5::new(enr, sk, discv5_config) {
             Ok(discv5) => discv5,

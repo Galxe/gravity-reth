@@ -39,10 +39,13 @@
 //! Archive processing is modeled around `ModularDownloadJob`, which schedules work, and
 //! `ArchiveProcessor`, which owns the explicit retry state machine for one archive.
 //! `ArchiveMode` decides whether that archive should be fetched through the cache or streamed
-//! directly:
+//! directly.
 //!
-//! - reuse verified plain output files when possible,
-//! - otherwise fetch and extract the archive,
+//! Before any archive is scheduled, `PlannedDownloads::partition_reusable` hashes the existing
+//! output files once and skips archives whose outputs already verify. Each remaining archive is
+//! processed as follows:
+//!
+//! - fetch and extract the archive,
 //! - verify the declared output files,
 //! - retry the entire archive attempt if extraction succeeded but verification failed.
 //!
@@ -90,6 +93,8 @@ mod source;
 mod tui;
 mod verify;
 
+pub use planning::{DownloadPlan, DownloadPlanArchive};
+
 use crate::common::EnvironmentArgs;
 use archive::run_modular_downloads;
 use clap::{builder::RangedU64ValueParser, Parser};
@@ -97,7 +102,7 @@ use config_gen::{config_for_selections, write_config};
 use extract::stream_and_extract;
 use eyre::Result;
 use manifest::{ComponentSelection, SnapshotComponentType, SnapshotManifest};
-use planning::{collect_planned_archives, summarize_download_startup};
+use planning::{collect_planned_archives, PlannedDownloads};
 use progress::{DownloadProgress, DownloadRequestLimiter};
 use reth_chainspec::{EthChainSpec, EthereumHardfork, EthereumHardforks, MAINNET};
 use reth_cli::chainspec::ChainSpecParser;
@@ -116,6 +121,7 @@ use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
     sync::{Arc, OnceLock},
+    time::Duration,
 };
 use tracing::info;
 use tui::{run_selector, SelectorOutput};
@@ -440,12 +446,24 @@ pub struct DownloadCommand<C: ChainSpecParser> {
     #[arg(long, default_value_t = MAX_CONCURRENT_DOWNLOADS)]
     download_concurrency: usize,
 
+    /// Override the delay between retry attempts (for example, 500ms or 5s).
+    ///
+    /// Applies to requests, extraction, output verification, and segmented downloads.
+    /// By default, retries wait five seconds; segmented requests use adaptive backoff.
+    /// This does not change the number of attempts.
+    #[arg(long, value_name = "DURATION", value_parser = reth_cli_util::parse_duration_from_secs_or_ms)]
+    retry_backoff: Option<Duration>,
+
     /// List available snapshots and exit.
     ///
     /// Queries the snapshots API and prints all available snapshots for the selected chain,
     /// including block number, size, and manifest URL.
     #[arg(long, alias = "list-snapshots", conflicts_with_all = ["url", "manifest_url", "manifest_path"])]
     list: bool,
+
+    /// Print the selected modular archive plan as JSON and exit without downloading.
+    #[arg(long, conflicts_with_all = ["url", "list"])]
+    print_plan_json: bool,
 }
 
 /// Resolved context for a completed modular snapshot download.
@@ -471,6 +489,9 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> DownloadCo
         }
 
         let data_dir = self.env.datadir.clone().resolve_datadir(chain);
+        let static_files_dir = data_dir.static_files();
+        let static_files_dir = (static_files_dir != data_dir.data_dir().join("static_files"))
+            .then_some(static_files_dir);
 
         let cancel_token = CancellationToken::new();
         let _cancel_guard = cancel_token.drop_guard();
@@ -479,7 +500,7 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> DownloadCo
         if let Some(ref url) = self.url {
             let target_dir = data_dir.data_dir();
             if self.force {
-                clear_existing_datadir(target_dir)?;
+                clear_existing_datadir(target_dir, static_files_dir.as_deref())?;
             }
             fs::create_dir_all(target_dir)?;
 
@@ -493,10 +514,11 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> DownloadCo
             stream_and_extract(
                 url,
                 data_dir.data_dir(),
-                None,
+                static_files_dir.as_deref(),
                 self.resumable,
                 Some(request_limiter),
                 cancel_token.clone(),
+                self.retry_backoff,
             )
             .await?;
             info!(target: "reth::cli", "Snapshot downloaded and extracted successfully");
@@ -504,6 +526,51 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> DownloadCo
             return Ok(None);
         }
 
+        let ResolvedDownload { manifest, selections, preset, planned } =
+            self.resolve_download(chain_id).await?;
+        if self.print_plan_json {
+            DownloadPlan::from_planned(&manifest, &planned).write_json(std::io::stdout().lock())?;
+            return Ok(None)
+        }
+
+        let target_dir = data_dir.data_dir();
+        if self.force {
+            clear_existing_datadir(target_dir, static_files_dir.as_deref())?;
+        }
+        fs::create_dir_all(target_dir)?;
+        let downloads = {
+            let (target_dir, static_files_dir) =
+                (target_dir.to_path_buf(), static_files_dir.clone());
+            reth_tasks::spawn_blocking(move || {
+                planned.partition_reusable(&target_dir, static_files_dir.as_deref())
+            })
+            .await??
+        };
+        info!(target: "reth::cli", reusable = downloads.reused.len(), needs_download = downloads.pending.len(), "Startup integrity summary (plain output files)");
+        info!(target: "reth::cli", archives = downloads.total_archives(), download_total = %DownloadProgress::format_size(downloads.total_download_size), output_total = %DownloadProgress::format_size(downloads.total_output_size), "Downloading all archives");
+        run_modular_downloads(
+            downloads,
+            target_dir,
+            static_files_dir.as_deref(),
+            self.download_concurrency.max(1),
+            cancel_token.clone(),
+            self.retry_backoff,
+        )
+        .await?;
+
+        self.finalize_modular_download(&selections, &manifest, preset, target_dir, &data_dir.db())?;
+
+        Ok(Some(PreparedSnapshotDownload { manifest, data_dir: data_dir.data_dir().to_path_buf() }))
+    }
+
+    /// Resolves the exact modular archive plan without downloading or modifying the data dir.
+    pub async fn plan(&self) -> Result<DownloadPlan> {
+        let chain_id = self.env.chain.chain().id();
+        let resolved = self.resolve_download(chain_id).await?;
+        Ok(DownloadPlan::from_planned(&resolved.manifest, &resolved.planned))
+    }
+
+    async fn resolve_download(&self, chain_id: u64) -> Result<ResolvedDownload> {
         let manifest = self.load_manifest(chain_id).await?;
         let ResolvedComponents { mut selections, preset } = self.resolve_components(&manifest)?;
 
@@ -511,37 +578,8 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> DownloadCo
             inject_archive_only_components(&mut selections, &manifest, !self.without_rocksdb);
         }
 
-        let target_dir = data_dir.data_dir();
-        let planned_downloads = collect_planned_archives(&manifest, &selections)?;
-        if self.force {
-            clear_existing_datadir(target_dir)?;
-        }
-        fs::create_dir_all(target_dir)?;
-        let startup_summary = summarize_download_startup(&planned_downloads.archives, target_dir)?;
-        info!(target: "reth::cli",
-            reusable = startup_summary.reusable,
-            needs_download = startup_summary.needs_download,
-            "Startup integrity summary (plain output files)"
-        );
-
-        info!(target: "reth::cli",
-            archives = planned_downloads.total_archives(),
-            download_total = %DownloadProgress::format_size(planned_downloads.total_download_size),
-            output_total = %DownloadProgress::format_size(planned_downloads.total_output_size),
-            "Downloading all archives"
-        );
-
-        run_modular_downloads(
-            planned_downloads,
-            target_dir,
-            self.download_concurrency.max(1),
-            cancel_token.clone(),
-        )
-        .await?;
-
-        self.finalize_modular_download(&selections, &manifest, preset, target_dir, &data_dir.db())?;
-
-        Ok(Some(PreparedSnapshotDownload { manifest, data_dir: data_dir.data_dir().to_path_buf() }))
+        let planned = collect_planned_archives(&manifest, &selections)?;
+        Ok(ResolvedDownload { manifest, selections, preset, planned })
     }
 
     /// Loads the manifest and resolves its effective base URL.
@@ -872,14 +910,14 @@ fn selection_from_prune_mode(mode: Option<PruneMode>, snapshot_block: u64) -> Co
 }
 
 /// Removes existing snapshot data that is managed by `reth download`.
-fn clear_existing_datadir(target_dir: &Path) -> Result<()> {
-    if !target_dir.try_exists()? {
-        return Ok(());
-    }
-
+fn clear_existing_datadir(target_dir: &Path, static_files_dir: Option<&Path>) -> Result<()> {
     info!(target: "reth::cli", dir = ?target_dir, "Clearing existing snapshot data");
     for entry in FORCE_REMOVED_DATADIR_PATHS {
-        let path = target_dir.join(entry);
+        let path = if *entry == "static_files" {
+            static_files_dir.map_or_else(|| target_dir.join(entry), Path::to_path_buf)
+        } else {
+            target_dir.join(entry)
+        };
         if !path.try_exists()? {
             continue;
         }
@@ -1012,6 +1050,18 @@ impl<C: ChainSpecParser> DownloadCommand<C> {
     pub fn chain_spec(&self) -> Option<&Arc<C::ChainSpec>> {
         Some(&self.env.chain)
     }
+
+    /// Returns whether this command should print its modular archive plan and exit.
+    pub const fn prints_plan_json(&self) -> bool {
+        self.print_plan_json
+    }
+}
+
+struct ResolvedDownload {
+    manifest: SnapshotManifest,
+    selections: BTreeMap<SnapshotComponentType, ComponentSelection>,
+    preset: Option<SelectionPreset>,
+    planned: PlannedDownloads,
 }
 
 const MAX_DOWNLOAD_RETRIES: u32 = 10;
@@ -1175,6 +1225,26 @@ mod tests {
     }
 
     #[test]
+    fn test_download_retry_backoff() {
+        let parse = |args: Vec<&str>| {
+            CommandParser::<DownloadCommand<EthereumChainSpecParser>>::try_parse_from(args)
+        };
+        assert_eq!(parse(vec!["reth"]).unwrap().args.retry_backoff, None);
+        for (value, expected) in [
+            ("0ms", Duration::ZERO),
+            ("250ms", Duration::from_millis(250)),
+            ("2s", Duration::from_secs(2)),
+        ] {
+            assert_eq!(
+                parse(vec!["reth", "--retry-backoff", value]).unwrap().args.retry_backoff,
+                Some(expected)
+            );
+        }
+        assert!(parse(vec!["reth", "--retry-backoff=-1s"]).is_err());
+        assert!(parse(vec!["reth", "--retry-backoff", "invalid"]).is_err());
+    }
+
+    #[test]
     fn test_download_resumable_defaults_to_true() {
         let args =
             CommandParser::<DownloadCommand<EthereumChainSpecParser>>::parse_from(["reth"]).args;
@@ -1202,6 +1272,32 @@ mod tests {
         .args;
 
         assert!(!args.resumable);
+    }
+
+    #[test]
+    fn test_download_print_plan_json_parses() {
+        let args = CommandParser::<DownloadCommand<EthereumChainSpecParser>>::parse_from([
+            "reth",
+            "--manifest-path",
+            "manifest.json",
+            "--minimal",
+            "--print-plan-json",
+        ])
+        .args;
+
+        assert!(args.prints_plan_json());
+    }
+
+    #[test]
+    fn test_download_print_plan_json_rejects_single_archive() {
+        let result = CommandParser::<DownloadCommand<EthereumChainSpecParser>>::try_parse_from([
+            "reth",
+            "--url",
+            "https://example.com/snapshot.tar.zst",
+            "--print-plan-json",
+        ]);
+
+        assert!(result.is_err());
     }
 
     #[test]

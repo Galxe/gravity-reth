@@ -960,6 +960,61 @@ mod tests {
     }
 
     #[test]
+    fn block_range_readers_reject_expired_history() {
+        use reth_static_file_types::{SegmentHeader, SegmentRangeInclusive, StaticFileSegment};
+
+        let factory = create_test_provider_factory();
+        let mut rng = generators::rng();
+        let mut parent = None;
+        for number in 0..6 {
+            let provider = factory.database_provider_rw().unwrap();
+            let block = random_block(
+                &mut rng,
+                number,
+                BlockParams { parent, tx_count: Some(1), ..Default::default() },
+            );
+            parent = Some(block.hash());
+            provider
+                .insert_block(block.try_recover().unwrap(), StorageLocation::StaticFiles)
+                .unwrap();
+            // RocksDB batch reads do not see the previous block's pending transaction counter.
+            crate::writer::UnifiedStorageWriter::commit(provider).unwrap();
+        }
+
+        let static_provider = factory.static_file_provider();
+        {
+            let mut writer =
+                static_provider.latest_writer(StaticFileSegment::Transactions).unwrap();
+            let header = writer.user_header().clone();
+            *writer.user_header_mut() = SegmentHeader::new(
+                header.expected_block_range(),
+                Some(SegmentRangeInclusive::new(3, 5)),
+                header.tx_range(),
+                StaticFileSegment::Transactions,
+            );
+            writer.inner().set_dirty();
+            writer.commit().unwrap();
+        }
+        static_provider.initialize_index().unwrap();
+        assert_eq!(static_provider.earliest_history_height(), 3);
+
+        let provider = factory.provider().unwrap();
+        for result in [
+            provider.block_range(1..=4).map(|blocks| blocks.len()),
+            provider.block_with_senders_range(1..=4).map(|blocks| blocks.len()),
+            provider.recovered_block_range(1..=4).map(|blocks| blocks.len()),
+        ] {
+            assert_matches!(
+                result,
+                Err(ProviderError::BlockExpired { requested: 1, earliest_available: 3 })
+            );
+        }
+        assert_eq!(provider.block_range(3..=5).unwrap().len(), 3);
+        assert_eq!(provider.recovered_block_range(3..=5).unwrap().len(), 3);
+        assert!(provider.block_range(RangeInclusive::new(3, 2)).unwrap().is_empty());
+    }
+
+    #[test]
     fn insert_block_with_prune_modes() {
         let block = TEST_BLOCK.clone();
 

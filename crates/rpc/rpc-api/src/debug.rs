@@ -147,10 +147,9 @@ pub trait DebugApi<TxReq: RpcObject> {
     /// to their preimages that were required during the execution of the block, including during
     /// state root recomputation.
     ///
-    /// The first argument is the block number or tag.
+    /// The first argument is the block identifier.
     #[method(name = "executionWitness")]
-    async fn debug_execution_witness(&self, block: BlockNumberOrTag)
-        -> RpcResult<ExecutionWitness>;
+    async fn debug_execution_witness(&self, block: BlockId) -> RpcResult<ExecutionWitness>;
 
     /// The `debug_executionWitnessByBlockHash` method allows for re-execution of a block with the
     /// purpose of generating an execution witness. The witness comprises of a map of all hashed
@@ -280,8 +279,8 @@ pub trait DebugApi<TxReq: RpcObject> {
         end_number: u64,
     ) -> RpcResult<()>;
 
-    /// Executes a block (bad- or canon- or side-), and returns a list of intermediate roots: the
-    /// stateroot after each transaction.
+    /// Executes a canonical or cached bad block, returning the state root after each transaction
+    /// up to the first invalid transaction.
     #[method(name = "intermediateRoots")]
     async fn debug_intermediate_roots(
         &self,

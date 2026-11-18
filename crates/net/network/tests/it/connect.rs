@@ -5,7 +5,7 @@ use alloy_primitives::map::HashSet;
 use futures::StreamExt;
 use reth_chainspec::{MAINNET, SEPOLIA};
 use reth_discv4::Discv4Config;
-use reth_eth_wire::{DisconnectReason, EthNetworkPrimitives, HeadersDirection};
+use reth_eth_wire::{DisconnectReason, EthNetworkPrimitives};
 use reth_network::{
     test_utils::{NetworkEventStream, PeerConfig, Testnet},
     BlockDownloaderProvider, NetworkConfigBuilder, NetworkEvent, NetworkEventListenerProvider,
@@ -302,13 +302,7 @@ async fn test_connect_to_trusted_peer() {
 
     let fetcher = handle.fetch_client().await.unwrap();
 
-    let headers = fetcher
-        .get_headers(HeadersRequest {
-            start: 73174u64.into(),
-            limit: 10,
-            direction: HeadersDirection::Falling,
-        })
-        .await;
+    let headers = fetcher.get_headers(HeadersRequest::falling(73174u64.into(), 10)).await;
 
     dbg!(&headers);
 

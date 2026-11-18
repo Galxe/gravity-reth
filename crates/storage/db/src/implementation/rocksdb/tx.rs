@@ -294,6 +294,10 @@ impl<K: cursor::TransactionKind> DbTx for Tx<K> {
     type Cursor<T: Table> = cursor::Cursor<K, T>;
     type DupCursor<T: DupSort> = cursor::Cursor<K, T>;
 
+    fn is_fixed_snapshot<T: Table>(&self) -> bool {
+        matches!(self.source_for_table::<T>(), DbReadSource::Snapshot(_))
+    }
+
     fn get<T: Table>(&self, key: T::Key) -> Result<Option<T::Value>, DatabaseError> {
         let encoded_key = key.encode();
         self.get_by_encoded_key::<T>(&encoded_key)

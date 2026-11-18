@@ -140,6 +140,7 @@ pub(crate) fn print_snapshot_listing(entries: &[SnapshotApiEntry], chain_id: u64
 pub(crate) async fn fetch_manifest_from_source(source: &str) -> Result<SnapshotManifest> {
     let manifest = read_manifest_source(source).await?;
     manifest.validate_blocks_per_file()?;
+    manifest.validate_output_paths()?;
     Ok(manifest)
 }
 

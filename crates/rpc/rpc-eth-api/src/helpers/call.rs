@@ -21,8 +21,11 @@ use futures::Future;
 use reth_chainspec::{ChainSpecProvider, EthChainSpec, EthereumHardforks};
 use reth_errors::{ProviderError, RethError};
 use reth_evm::{
-    block::BlockExecutor, env::BlockEnvironment, execute::BlockBuilder, ConfigureEvm,
-    ConfigureEvmForRead, Evm, EvmEnvFor, HaltReasonFor, InspectorFor, TransactionEnvMut, TxEnvFor,
+    block::{BlockExecutor, TxResult},
+    env::BlockEnvironment,
+    execute::BlockBuilder,
+    ConfigureEvm, ConfigureEvmForRead, Evm, EvmEnvFor, HaltReasonFor, InspectorFor,
+    TransactionEnvMut, TxEnvFor,
 };
 use reth_node_api::BlockBody;
 use reth_primitives_traits::{Recovered, RecoveredBlock};
@@ -386,11 +389,16 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                 let mut all_results = Vec::with_capacity(bundles.len());
 
                 if replay_block_txs {
-                    this.apply_pre_execution_changes(&block, &mut db)?;
-                    let mut executor = RpcNodeCore::evm_config(&this)
+                    let evm_config = if is_block_target_pending {
+                        RpcNodeCore::evm_config(&this).clone()
+                    } else {
+                        RpcNodeCore::evm_config(&this).chain_block_mode()
+                    };
+                    let mut executor = evm_config
                         .executor_for_block(&mut db, block.sealed_block())
                         .map_err(RethError::other)
                         .map_err(Self::Error::from_eth_err)?;
+                    executor.apply_pre_execution_changes().map_err(Self::Error::from_eth_err)?;
                     for tx in block.transactions_recovered().take(num_txs) {
                         if is_cancelled() {
                             return Err(EthApiError::InternalEthError.into())
@@ -802,11 +810,13 @@ pub trait Call:
             this.spawn_with_state_at_block(parent_block, move |this, mut db| {
                 let block_txs = block.transactions_recovered();
 
-                this.apply_pre_execution_changes(&block, &mut db)?;
-                let mut executor = RpcNodeCore::evm_config(&this)
+                let evm_config = RpcNodeCore::evm_config(&this).chain_block_mode();
+                let mut executor = evm_config
                     .executor_for_block(&mut db, block.sealed_block())
                     .map_err(RethError::other)
                     .map_err(Self::Error::from_eth_err)?;
+
+                executor.apply_pre_execution_changes().map_err(Self::Error::from_eth_err)?;
 
                 // replay all transactions prior to the targeted transaction
                 for block_tx in block_txs {
@@ -819,9 +829,13 @@ pub trait Call:
                     executor.execute_transaction(block_tx).map_err(Self::Error::from_eth_err)?;
                 }
 
-                let tx_env = RpcNodeCore::evm_config(&this).tx_env(tx);
-
-                let res = executor.evm_mut().transact(tx_env).map_err(Self::Error::from_evm_err)?;
+                if is_cancelled() {
+                    return Err(EthApiError::InternalEthError.into())
+                }
+                let res = executor
+                    .execute_transaction_without_commit(tx)
+                    .map_err(Self::Error::from_eth_err)?
+                    .into_result();
                 drop(executor);
                 f(tx_info, res, db)
             })
@@ -852,6 +866,34 @@ pub trait Call:
             .map_err(Self::Error::from_eth_err)?
             .apply_pre_execution_changes()
             .map_err(Self::Error::from_eth_err)
+    }
+
+    /// Replays the predecessors of a committed transaction through its block executor.
+    /// Applies the chain's pre-execution changes once and leaves `db` at the target's pre-state.
+    fn replay_block_transactions_until(
+        &self,
+        db: &mut StateCacheDb,
+        block: &RecoveredBlock<ProviderBlock<Self::Provider>>,
+        target_tx_hash: B256,
+    ) -> Result<usize, Self::Error> {
+        let config = self.evm_config().chain_block_mode();
+        let mut executor = config
+            .executor_for_block(db, block.sealed_block())
+            .map_err(RethError::other)
+            .map_err(Self::Error::from_eth_err)?;
+        executor.apply_pre_execution_changes().map_err(Self::Error::from_eth_err)?;
+        let mut index = 0;
+        for tx in block.transactions_recovered() {
+            if *tx.tx_hash() == target_tx_hash {
+                break
+            }
+            if is_cancelled() {
+                return Err(EthApiError::InternalEthError.into())
+            }
+            executor.execute_transaction(tx).map_err(Self::Error::from_eth_err)?;
+            index += 1;
+        }
+        Ok(index)
     }
 
     /// Replays all the transactions until the target transaction is found.
