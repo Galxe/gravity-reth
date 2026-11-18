@@ -107,6 +107,11 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(not(feature = "std"), no_std)]
 
+// Keep the original component feature edges without enabling broader revm facade features.
+use revm_bytecode as _;
+use revm_primitives as _;
+use revm_state as _;
+
 #[macro_use]
 extern crate alloc;
 

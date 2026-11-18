@@ -60,7 +60,7 @@ macro_rules! delegate_provider_impls {
                 fn witness(&self, input: reth_trie::TrieInput, target: reth_trie::HashedPostState) -> reth_storage_errors::provider::ProviderResult<Vec<alloy_primitives::Bytes>>;
             }
             HashedPostStateProvider $(where [$($generics)*])? {
-                fn hashed_post_state(&self, bundle_state: &revm_database::BundleState) -> reth_trie::HashedPostState;
+                fn hashed_post_state(&self, bundle_state: &revm::database::BundleState) -> reth_trie::HashedPostState;
             }
         );
     }

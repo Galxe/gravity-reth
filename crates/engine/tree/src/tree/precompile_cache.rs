@@ -7,8 +7,10 @@ use alloy_primitives::{
 use moka::policy::EvictionPolicy;
 use reth_evm::precompiles::{DynPrecompile, Precompile, PrecompileInput};
 use reth_primitives_traits::dashmap::DashMap;
-use revm::precompile::{PrecompileId, PrecompileOutput, PrecompileResult};
-use revm_primitives::Address;
+use revm::{
+    precompile::{PrecompileId, PrecompileOutput, PrecompileResult},
+    primitives::Address,
+};
 use std::{hash::Hash, sync::Arc};
 use tracing::error;
 
@@ -262,8 +264,8 @@ mod tests {
     use revm::{
         context::TxEnv,
         precompile::{PrecompileOutput, PrecompileStatus},
+        primitives::hardfork::SpecId,
     };
-    use revm_primitives::hardfork::SpecId;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]

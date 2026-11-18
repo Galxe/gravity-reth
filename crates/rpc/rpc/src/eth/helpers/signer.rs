@@ -121,7 +121,7 @@ mod tests {
     use alloy_primitives::{Bytes, U256};
     use alloy_rpc_types_eth::{TransactionInput, TransactionRequest};
     use reth_ethereum_primitives::TransactionSigned;
-    use revm_primitives::TxKind;
+    use revm::primitives::TxKind;
 
     fn build_signer() -> DevSigner {
         let signer: PrivateKeySigner =

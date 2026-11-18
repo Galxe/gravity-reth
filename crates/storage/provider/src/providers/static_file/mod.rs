@@ -100,6 +100,85 @@ mod tests {
         Ok(())
     }
 
+    fn assert_cached_size_matches_disk(
+        sf_rw: &StaticFileProvider<EthPrimitives>,
+        segment: StaticFileSegment,
+        block: u64,
+    ) -> eyre::Result<()> {
+        let jar_provider = sf_rw.get_segment_provider_from_block(segment, block, None)?;
+        let disk_size = fs::metadata(jar_provider.data_path())?.len() +
+            fs::metadata(jar_provider.offsets_path())?.len();
+        let mapped = jar_provider.mmap_handle();
+        assert_eyre(
+            (mapped.size() + mapped.offsets_size()) as u64,
+            disk_size,
+            "cached size mismatch",
+        )
+    }
+
+    #[test]
+    fn pruning_waits_for_old_readers_before_truncating_mapped_files() {
+        use std::{
+            sync::mpsc,
+            time::{Duration, Instant},
+        };
+        let (static_dir, _) = create_test_static_files_dir();
+        let provider = StaticFileProvider::<EthPrimitives>::read_write(&static_dir).unwrap();
+        let mut headers = Vec::new();
+        {
+            let mut writer = provider.latest_writer(StaticFileSegment::Headers).unwrap();
+            for number in 0..128 {
+                let header = Header {
+                    number,
+                    extra_data: alloy_primitives::Bytes::from(vec![number as u8; 32]),
+                    logs_bloom: alloy_primitives::Bloom::repeat_byte(0xff),
+                    ..Default::default()
+                };
+                writer.append_header(&header, U256::ZERO, &BlockHash::default()).unwrap();
+                headers.push(header);
+            }
+            writer.commit().unwrap();
+        }
+        std::thread::scope(|scope| {
+            // Keep the mapped provider inside the scope so panic unwinding releases it before
+            // the scope joins a writer blocked on cache publication.
+            let old = provider
+                .get_segment_provider_from_block(StaticFileSegment::Headers, 127, None)
+                .unwrap();
+            let path = old.data_path().to_path_buf();
+            let old_size = fs::metadata(&path).unwrap().len();
+            let (done_tx, done_rx) = mpsc::channel();
+            let provider_ref = &provider;
+            let writer = scope.spawn(move || {
+                let mut writer = provider_ref.latest_writer(StaticFileSegment::Headers).unwrap();
+                writer.prune_headers(120).unwrap();
+                writer.commit().unwrap();
+                let _ = done_tx.send(());
+            });
+            // Observe the new persisted row count, not an assumed elapsed scheduling delay.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Ok(jar) = NippyJar::<SegmentHeader>::load(&path) &&
+                    jar.rows() == 8
+                {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "pruned config was not published");
+                std::thread::yield_now();
+            }
+            assert_eq!(fs::metadata(&path).unwrap().len(), old_size);
+            assert_eq!(old.header_by_number(127).unwrap(), Some(headers[127].clone()));
+            assert!(matches!(done_rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+            drop(old);
+            done_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            writer.join().unwrap();
+            assert!(fs::metadata(&path).unwrap().len() < old_size);
+        });
+        assert_eq!(provider.header_by_number(7).unwrap(), Some(headers[7].clone()));
+        assert_eq!(provider.get_highest_static_file_block(StaticFileSegment::Headers), Some(7));
+        assert_cached_size_matches_disk(&provider, StaticFileSegment::Headers, 7).unwrap();
+    }
+
     #[test]
     fn test_snap() {
         // Ranges
@@ -233,6 +312,7 @@ mod tests {
                     expected_tip,
                     "header mismatch",
                 )?;
+                assert_cached_size_matches_disk(sf_rw, StaticFileSegment::Headers, id)?;
             }
 
             // Validate the number of files remaining in the directory
@@ -462,6 +542,7 @@ mod tests {
                 "block mismatch",
             )?;
             assert_eyre(sf_rw.get_highest_static_file_tx(segment), expected_tx_tip, "tx mismatch")?;
+            assert_cached_size_matches_disk(sf_rw, segment, last_block)?;
 
             // Verify that transactions and receipts are returned correctly. Uses
             // cumulative_gas_used & nonce as ids.

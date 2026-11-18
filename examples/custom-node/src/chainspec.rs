@@ -69,7 +69,7 @@ impl EthChainSpec for CustomChainSpec {
         self.inner.deposit_contract()
     }
 
-    fn genesis_hash(&self) -> revm_primitives::B256 {
+    fn genesis_hash(&self) -> revm::primitives::B256 {
         self.genesis_header.hash()
     }
 
@@ -93,7 +93,7 @@ impl EthChainSpec for CustomChainSpec {
         self.inner.bootnodes()
     }
 
-    fn final_paris_total_difficulty(&self) -> Option<revm_primitives::U256> {
+    fn final_paris_total_difficulty(&self) -> Option<revm::primitives::U256> {
         self.inner.get_final_paris_total_difficulty()
     }
 }

@@ -1,7 +1,7 @@
 use super::*;
 use alloy_consensus::constants::EMPTY_ROOT_HASH;
 use alloy_eips::NumHash;
-use alloy_primitives::{keccak256, Sealed, U256};
+use alloy_primitives::{keccak256, U256};
 use alloy_trie::{
     nodes::RlpNode,
     proof::{verify_proof, ProofRetainer},
@@ -484,7 +484,7 @@ async fn snap_bal_requests_read_the_injected_store_and_route_response() {
     handler
         .provider()
         .bals
-        .insert(NumHash::new(1, hash), Sealed::new_unchecked(raw.clone(), keccak256(&raw)))
+        .insert(NumHash::new(1, hash), alloy_eips::eip7928::bal::RawBal::new(raw.clone()))
         .unwrap();
     let request = SnapProtocolMessage::GetBlockAccessLists(GetBlockAccessListsMessage {
         request_id: 77,

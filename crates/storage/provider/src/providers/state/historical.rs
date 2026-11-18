@@ -472,7 +472,7 @@ impl<Provider: DBProvider + BlockNumReader + ChangesetRangeReader> StateProofPro
 impl<Provider: DBProvider + Sync> HashedPostStateProvider
     for HistoricalStateProviderRef<'_, Provider>
 {
-    fn hashed_post_state(&self, bundle_state: &revm_database::BundleState) -> HashedPostState {
+    fn hashed_post_state(&self, bundle_state: &revm::database::BundleState) -> HashedPostState {
         HashedPostState::from_bundle_state::<KeccakKeyHasher>(bundle_state.state())
     }
 }
@@ -818,7 +818,7 @@ mod tests {
         use alloy_primitives::keccak256;
         use reth_db_api::models::GravityStorageSettings;
         use reth_storage_api::StageCheckpointWriter;
-        use revm_database::BundleState;
+        use revm::database::BundleState;
 
         for changesets_in_static_files in [false, true] {
             let factory = create_test_provider_factory();

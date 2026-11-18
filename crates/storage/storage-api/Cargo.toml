@@ -12,6 +12,7 @@ description = "Reth storage provider traits and types"
 workspace = true
 
 [dependencies]
+revm.workspace = true
 # reth
 reth-db-models.workspace = true
 reth-chainspec.workspace = true
@@ -67,6 +68,7 @@ std = [
     "reth-trie-common/std",
     "revm-bytecode/std",
     "once_cell/std",
+    "revm/std",
 ]
 
 db-api = [
@@ -89,6 +91,7 @@ serde = [
     "alloy-rpc-types-engine/serde",
     "dashmap/serde",
     "revm-bytecode/serde",
+    "revm/serde",
 ]
 
 serde-bincode-compat = [

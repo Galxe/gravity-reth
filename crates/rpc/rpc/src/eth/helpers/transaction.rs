@@ -147,7 +147,7 @@ mod tests {
         test_utils::{testing_pool, TestPool, TransactionGenerator},
         PoolPooledTx, TransactionPool,
     };
-    use revm_primitives::Bytes;
+    use revm::primitives::Bytes;
     use std::time::Duration;
 
     /// A valid zero blob uses the point at infinity without loading the KZG trusted setup.

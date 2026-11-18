@@ -9,7 +9,8 @@ use crate::{
     BlockClient,
 };
 use alloy_consensus::BlockHeader;
-use alloy_primitives::{keccak256, Bytes, Sealable, Sealed, B256};
+use alloy_eip7928::bal::RawBal;
+use alloy_primitives::{Bytes, Sealable, B256};
 use core::marker::PhantomData;
 use futures::FutureExt;
 use reth_consensus::Consensus;
@@ -29,7 +30,7 @@ use std::{
 use tracing::{debug, trace};
 
 /// A sealed block with optional validated block access-list data.
-pub type SealedBlockWithAccessList<B> = SealedBlockWith<B, Option<Sealed<Bytes>>>;
+pub type SealedBlockWithAccessList<B> = SealedBlockWith<B, Option<RawBal>>;
 
 /// A Client that can fetch full blocks from the network.
 #[derive(Debug, Clone)]
@@ -1135,14 +1136,15 @@ impl<Net> Default for NoopFullBlockClient<Net> {
 fn seal_block_access_list_for_block<B: Block>(
     block: &SealedBlock<B>,
     access_list: WithPeerId<Option<Bytes>>,
-) -> Result<Option<Sealed<Bytes>>, PeerId> {
+) -> Result<Option<RawBal>, PeerId> {
     let Some(expected) = block.header().block_access_list_hash() else { return Ok(None) };
 
     let (peer, access_list) = access_list.split();
     let Some(access_list) = access_list else { return Ok(None) };
-    let computed = keccak256(access_list.as_ref());
+    let access_list = RawBal::new(access_list);
+    let computed = access_list.hash();
     if computed == expected {
-        return Ok(Some(Sealed::new_unchecked(access_list, expected)))
+        return Ok(Some(access_list))
     }
 
     debug!(
@@ -1235,9 +1237,8 @@ mod tests {
     const EMPTY_LIST_CODE: u8 = 0xc0;
     use tokio::time::{timeout, Duration};
 
-    fn sealed_access_list(access_list: Bytes) -> Sealed<Bytes> {
-        let hash = keccak256(access_list.as_ref());
-        Sealed::new_unchecked(access_list, hash)
+    fn sealed_access_list(access_list: Bytes) -> RawBal {
+        RawBal::new(access_list)
     }
 
     fn sealed_header_with_access_list_hash(access_list: &Bytes) -> SealedHeader {
@@ -1250,7 +1251,7 @@ mod tests {
 
     fn range_access_lists<B: Block>(
         blocks: &[SealedBlockWithAccessList<B>],
-    ) -> Vec<Option<Sealed<Bytes>>> {
+    ) -> Vec<Option<RawBal>> {
         blocks.iter().map(|block| block.data().clone()).collect()
     }
 

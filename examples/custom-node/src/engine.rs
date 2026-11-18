@@ -24,7 +24,7 @@ use reth_op::node::{
     engine::OpEngineValidator, payload::OpAttributes, OpBuiltPayload, OpEngineTypes,
     OpPayloadAttributes, OpPayloadBuilderAttributes,
 };
-use revm_primitives::U256;
+use revm::primitives::U256;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use thiserror::Error;
@@ -39,11 +39,11 @@ pub struct CustomExecutionData {
 }
 
 impl ExecutionPayload for CustomExecutionData {
-    fn parent_hash(&self) -> revm_primitives::B256 {
+    fn parent_hash(&self) -> revm::primitives::B256 {
         self.inner.parent_hash()
     }
 
-    fn block_hash(&self) -> revm_primitives::B256 {
+    fn block_hash(&self) -> revm::primitives::B256 {
         self.inner.block_hash()
     }
 
@@ -55,7 +55,7 @@ impl ExecutionPayload for CustomExecutionData {
         None
     }
 
-    fn parent_beacon_block_root(&self) -> Option<revm_primitives::B256> {
+    fn parent_beacon_block_root(&self) -> Option<revm::primitives::B256> {
         self.inner.parent_beacon_block_root()
     }
 
@@ -84,7 +84,7 @@ impl PayloadAttributes for CustomPayloadAttributes {
         self.inner.withdrawals()
     }
 
-    fn parent_beacon_block_root(&self) -> Option<revm_primitives::B256> {
+    fn parent_beacon_block_root(&self) -> Option<revm::primitives::B256> {
         self.inner.parent_beacon_block_root()
     }
 }
@@ -100,7 +100,7 @@ impl PayloadBuilderAttributes for CustomPayloadBuilderAttributes {
     type Error = alloy_rlp::Error;
 
     fn try_new(
-        parent: revm_primitives::B256,
+        parent: revm::primitives::B256,
         rpc_payload_attributes: Self::RpcPayloadAttributes,
         version: u8,
     ) -> Result<Self, Self::Error>
@@ -116,7 +116,7 @@ impl PayloadBuilderAttributes for CustomPayloadBuilderAttributes {
         self.inner.payload_id()
     }
 
-    fn parent(&self) -> revm_primitives::B256 {
+    fn parent(&self) -> revm::primitives::B256 {
         self.inner.parent()
     }
 
@@ -124,15 +124,15 @@ impl PayloadBuilderAttributes for CustomPayloadBuilderAttributes {
         self.inner.timestamp()
     }
 
-    fn parent_beacon_block_root(&self) -> Option<revm_primitives::B256> {
+    fn parent_beacon_block_root(&self) -> Option<revm::primitives::B256> {
         self.inner.parent_beacon_block_root()
     }
 
-    fn suggested_fee_recipient(&self) -> revm_primitives::Address {
+    fn suggested_fee_recipient(&self) -> revm::primitives::Address {
         self.inner.suggested_fee_recipient()
     }
 
-    fn prev_randao(&self) -> revm_primitives::B256 {
+    fn prev_randao(&self) -> revm::primitives::B256 {
         self.inner.prev_randao()
     }
 

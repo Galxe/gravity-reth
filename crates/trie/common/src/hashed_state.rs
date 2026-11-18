@@ -17,7 +17,7 @@ use reth_primitives_traits::Account;
 #[cfg(feature = "rayon")]
 use rayon::prelude::{IntoParallelIterator, ParallelIterator};
 
-use revm_database::{AccountStatus, BundleAccount};
+use revm::database::{AccountStatus, BundleAccount};
 
 /// Representation of in-memory hashed state.
 #[derive(PartialEq, Eq, Clone, Default, Debug)]
@@ -634,8 +634,10 @@ mod tests {
     use super::*;
     use crate::KeccakKeyHasher;
     use alloy_primitives::Bytes;
-    use revm_database::{states::StorageSlot, StorageWithOriginalValues};
-    use revm_state::{AccountInfo, Bytecode};
+    use revm::{
+        database::{states::StorageSlot, StorageWithOriginalValues},
+        state::{AccountInfo, Bytecode},
+    };
 
     #[test]
     fn hashed_state_wiped_extension() {

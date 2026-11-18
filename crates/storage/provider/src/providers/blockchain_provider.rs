@@ -42,7 +42,7 @@ use reth_storage_api::{
 };
 use reth_storage_errors::provider::ProviderResult;
 use reth_trie::{HashedPostState, KeccakKeyHasher};
-use revm_database::BundleState;
+use revm::database::BundleState;
 use std::{
     ops::{Add, RangeBounds, RangeInclusive, Sub},
     sync::Arc,
@@ -981,7 +981,7 @@ mod tests {
         self, random_block, random_block_range, random_changeset_range, random_eoa_accounts,
         random_receipt, BlockParams, BlockRangeParams,
     };
-    use revm_database::BundleState;
+    use revm::database::BundleState;
     use std::{
         ops::{Bound, Deref, Range, RangeBounds},
         sync::Arc,
@@ -2055,7 +2055,7 @@ mod tests {
         };
         use reth_trie::{HashedPostState, HashedStorage, TrieInput};
         use reth_trie_db::nested_hash::NestedStateRoot;
-        use revm_database::OriginalValuesKnown;
+        use revm::database::OriginalValuesKnown;
 
         let (provider, _, blocks, _) = provider_with_random_blocks(
             &mut generators::rng(),

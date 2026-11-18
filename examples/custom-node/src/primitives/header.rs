@@ -3,7 +3,7 @@ use alloy_primitives::{Address, BlockNumber, Bloom, Bytes, Sealable, B256, B64, 
 use alloy_rlp::{Encodable, RlpDecodable, RlpEncodable};
 use reth_codecs::Compact;
 use reth_ethereum::primitives::{serde_bincode_compat::RlpBincode, BlockHeader, InMemorySize};
-use revm_primitives::keccak256;
+use revm::primitives::keccak256;
 use serde::{Deserialize, Serialize};
 
 /// The header type of this node
