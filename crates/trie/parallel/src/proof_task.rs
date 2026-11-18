@@ -8,7 +8,7 @@
 //! Individual [`ProofTaskTx`] instances manage a dedicated [`InMemoryTrieCursorFactory`] and
 //! [`HashedPostStateCursorFactory`], which are each backed by a database transaction.
 
-use crate::root::ParallelStateRootError;
+use crate::error::StateRootTaskError;
 use alloy_primitives::{map::B256Set, B256};
 use reth_db_api::transaction::DbTx;
 use reth_execution_errors::SparseTrieError;
@@ -45,7 +45,7 @@ use tracing::debug;
 #[cfg(feature = "metrics")]
 use crate::proof_task_metrics::ProofTaskMetrics;
 
-type StorageProofResult = Result<DecodedStorageMultiProof, ParallelStateRootError>;
+type StorageProofResult = Result<DecodedStorageMultiProof, StateRootTaskError>;
 type TrieNodeProviderResult = Result<Option<RevealedNode>, SparseTrieError>;
 
 /// A task that manages sending multiproof requests to a number of tasks that have longer-running
@@ -308,18 +308,12 @@ where
         .with_branch_node_masks(input.with_branch_node_masks)
         .with_added_removed_keys(added_removed_keys)
         .storage_multiproof(input.target_slots)
-        .map_err(|e| ParallelStateRootError::Other(e.to_string()));
+        .map_err(StateRootTaskError::from);
 
         drop(span_guard);
 
-        let decoded_result = raw_proof_result.and_then(|raw_proof| {
-            raw_proof.try_into().map_err(|e: alloy_rlp::Error| {
-                ParallelStateRootError::Other(format!(
-                    "Failed to decode storage proof for {}: {}",
-                    input.hashed_address, e
-                ))
-            })
-        });
+        let decoded_result = raw_proof_result
+            .and_then(|raw_proof| raw_proof.try_into().map_err(StateRootTaskError::from));
 
         debug!(
             target: "trie::proof_task",
@@ -526,7 +520,7 @@ impl ProofTaskKind {
     fn send_provider_error(self, error: ProviderError) {
         let delivered = match self {
             Self::StorageProof(_, sender) => {
-                sender.send(Err(ParallelStateRootError::Provider(error))).is_ok()
+                sender.send(Err(StateRootTaskError::Provider(error))).is_ok()
             }
             Self::BlindedAccountNode(_, sender) | Self::BlindedStorageNode(_, _, sender) => {
                 let error: Box<dyn std::error::Error + Send + Sync> = Box::new(error);
@@ -687,7 +681,7 @@ mod tests {
             // The manager must still stop on the provider failure, rather than continuing work.
             assert_reorged_provider(&manager.run().unwrap_err(), expected);
             if kind == 0 {
-                let Err(ParallelStateRootError::Provider(error)) =
+                let Err(StateRootTaskError::Provider(error)) =
                     storage_rx.recv_timeout(Duration::from_secs(5)).unwrap()
                 else {
                     panic!("storage caller lost the original provider error")

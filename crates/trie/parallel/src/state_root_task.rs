@@ -1,6 +1,6 @@
 //! State root task interface types shared between the engine tree and the payload builder.
 
-use crate::root::ParallelStateRootError;
+use crate::error::StateRootTaskError;
 use alloy_primitives::{keccak256, B256};
 use derive_more::derive::Deref;
 use reth_trie::{updates::TrieUpdates, HashedPostState, HashedStorage};
@@ -50,7 +50,7 @@ pub struct StateRootHandle {
     updates_tx: crossbeam_channel::Sender<StateRootMessage>,
     /// Receiver for the final state root result.
     state_root_rx:
-        Option<std::sync::mpsc::Receiver<Result<StateRootComputeOutcome, ParallelStateRootError>>>,
+        Option<std::sync::mpsc::Receiver<Result<StateRootComputeOutcome, StateRootTaskError>>>,
     /// Receiver for the hashed post state.
     hashed_state_rx: Option<std::sync::mpsc::Receiver<HashedPostState>>,
 }
@@ -61,7 +61,7 @@ impl StateRootHandle {
         cached_trie_state_root: B256,
         updates_tx: crossbeam_channel::Sender<StateRootMessage>,
         state_root_rx: std::sync::mpsc::Receiver<
-            Result<StateRootComputeOutcome, ParallelStateRootError>,
+            Result<StateRootComputeOutcome, StateRootTaskError>,
         >,
         hashed_state_rx: std::sync::mpsc::Receiver<HashedPostState>,
     ) -> Self {
@@ -99,12 +99,10 @@ impl StateRootHandle {
     /// # Panics
     ///
     /// If called more than once.
-    pub fn state_root(&mut self) -> Result<StateRootComputeOutcome, ParallelStateRootError> {
-        self.state_root_rx
-            .take()
-            .expect("state_root already taken")
-            .recv()
-            .map_err(|_| ParallelStateRootError::Other("sparse trie task dropped".to_string()))?
+    pub fn state_root(&mut self) -> Result<StateRootComputeOutcome, StateRootTaskError> {
+        self.state_root_rx.take().expect("state_root already taken").recv().map_err(|error| {
+            StateRootTaskError::Provider(reth_provider::ProviderError::other(error))
+        })?
     }
 
     /// Takes the state root receiver for use with custom waiting logic (e.g., timeouts).
@@ -114,7 +112,7 @@ impl StateRootHandle {
     /// If called more than once.
     pub const fn take_state_root_rx(
         &mut self,
-    ) -> std::sync::mpsc::Receiver<Result<StateRootComputeOutcome, ParallelStateRootError>> {
+    ) -> std::sync::mpsc::Receiver<Result<StateRootComputeOutcome, StateRootTaskError>> {
         self.state_root_rx.take().expect("state_root already taken")
     }
 
@@ -183,4 +181,22 @@ pub fn evm_state_to_hashed_post_state(update: EvmState) -> HashedPostState {
     }
 
     hashed_state
+}
+
+#[cfg(test)]
+mod task_error_tests {
+    use super::*;
+
+    #[test]
+    fn dropped_root_worker_preserves_receive_error() {
+        let (updates, _) = crossbeam_channel::unbounded();
+        let (root_tx, root_rx) = std::sync::mpsc::channel();
+        let (_state_tx, state_rx) = std::sync::mpsc::channel();
+        let mut handle = StateRootHandle::new(B256::ZERO, updates, root_rx, state_rx);
+        drop(root_tx);
+        let StateRootTaskError::Provider(error) = handle.state_root().unwrap_err() else {
+            panic!("dropped root worker was not a sourced processing failure")
+        };
+        assert!(error.downcast_other_ref::<std::sync::mpsc::RecvError>().is_some());
+    }
 }

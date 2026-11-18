@@ -1,7 +1,7 @@
 use crate::{
+    error::StateRootTaskError,
     metrics::ParallelTrieMetrics,
     proof_task::{ProofTaskKind, ProofTaskManagerHandle, StorageProofInput},
-    root::ParallelStateRootError,
     stats::ParallelTrieTracker,
     StorageRootTargets,
 };
@@ -11,12 +11,10 @@ use alloy_primitives::{
 };
 use alloy_rlp::{BufMut, Encodable};
 use itertools::Itertools;
-use reth_execution_errors::StorageRootError;
 use reth_provider::{
     providers::ConsistentDbView, BlockReader, DBProvider, DatabaseProviderFactory, FactoryTx,
     ProviderError,
 };
-use reth_storage_errors::db::DatabaseError;
 use reth_trie::{
     hashed_cursor::{HashedCursorFactory, HashedPostStateCursorFactory},
     node_iter::{TrieElement, TrieNodeIter},
@@ -112,7 +110,7 @@ where
         hashed_address: B256,
         prefix_set: PrefixSet,
         target_slots: B256Set,
-    ) -> Receiver<Result<DecodedStorageMultiProof, ParallelStateRootError>> {
+    ) -> Receiver<Result<DecodedStorageMultiProof, StateRootTaskError>> {
         let input = StorageProofInput::new(
             hashed_address,
             prefix_set,
@@ -132,7 +130,7 @@ where
         self,
         hashed_address: B256,
         target_slots: B256Set,
-    ) -> Result<DecodedStorageMultiProof, ParallelStateRootError> {
+    ) -> Result<DecodedStorageMultiProof, StateRootTaskError> {
         let total_targets = target_slots.len();
         let prefix_set = PrefixSetMut::from(target_slots.iter().map(Nibbles::unpack));
         let prefix_set = prefix_set.freeze();
@@ -145,11 +143,9 @@ where
         );
 
         let receiver = self.spawn_storage_proof(hashed_address, prefix_set, target_slots);
-        let proof_result = receiver.recv().map_err(|_| {
-            ParallelStateRootError::StorageRoot(StorageRootError::Database(DatabaseError::Other(
-                format!("channel closed for {hashed_address}"),
-            )))
-        })?;
+        let proof_result = receiver
+            .recv()
+            .map_err(|error| StateRootTaskError::Provider(ProviderError::other(error)))?;
 
         debug!(
             target: "trie::parallel_proof",
@@ -167,7 +163,7 @@ where
         self,
         hashed_address: B256,
         target_slots: B256Set,
-    ) -> Result<DecodedStorageMultiProof, ParallelStateRootError> {
+    ) -> Result<DecodedStorageMultiProof, StateRootTaskError> {
         self.storage_proof(hashed_address, target_slots)
     }
 
@@ -175,7 +171,7 @@ where
     pub fn decoded_multiproof(
         self,
         targets: MultiProofTargets,
-    ) -> Result<DecodedMultiProof, ParallelStateRootError> {
+    ) -> Result<DecodedMultiProof, StateRootTaskError> {
         let mut tracker = ParallelTrieTracker::default();
 
         // Extend prefix sets with targets
@@ -276,12 +272,8 @@ where
                     let decoded_storage_multiproof = match storage_proof_receivers
                         .remove(&hashed_address)
                     {
-                        Some(rx) => rx.recv().map_err(|e| {
-                            ParallelStateRootError::StorageRoot(StorageRootError::Database(
-                                DatabaseError::Other(format!(
-                                    "channel closed for {hashed_address}: {e}"
-                                )),
-                            ))
+                        Some(rx) => rx.recv().map_err(|error| {
+                            StateRootTaskError::Provider(ProviderError::other(error))
                         })??,
                         // Since we do not store all intermediate nodes in the database, there might
                         // be a possibility of re-adding a non-modified leaf to the hash builder.
@@ -297,11 +289,7 @@ where
                             .storage_multiproof(
                                 targets.get(&hashed_address).cloned().unwrap_or_default(),
                             )
-                            .map_err(|e| {
-                                ParallelStateRootError::StorageRoot(StorageRootError::Database(
-                                    DatabaseError::Other(e.to_string()),
-                                ))
-                            })?;
+                            .map_err(StateRootTaskError::from)?;
 
                             raw_fallback_proof.try_into()?
                         }

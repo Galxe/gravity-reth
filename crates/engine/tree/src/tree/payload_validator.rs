@@ -45,7 +45,7 @@ use reth_provider::{
 use reth_revm::db::State;
 use reth_trie::{updates::TrieUpdates, HashedPostState, KeccakKeyHasher, TrieInput};
 use reth_trie_db::DatabaseHashedPostState;
-use reth_trie_parallel::root::{ParallelStateRoot, ParallelStateRootError};
+use reth_trie_parallel::{error::StateRootTaskError, root::ParallelStateRoot};
 use revm::context::Block as _;
 use std::{sync::Arc, time::Instant};
 use tracing::{debug, debug_span, error, info, trace, warn};
@@ -804,7 +804,7 @@ where
         parent_hash: B256,
         hashed_state: &HashedPostState,
         state: &EngineApiTreeState<N>,
-    ) -> Result<(B256, TrieUpdates), ParallelStateRootError> {
+    ) -> Result<(B256, TrieUpdates), StateRootTaskError> {
         let consistent_view = ConsistentDbView::new_with_latest_tip(self.provider.clone())?;
 
         let mut input = self.compute_trie_input(

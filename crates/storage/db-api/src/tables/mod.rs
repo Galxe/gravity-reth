@@ -152,6 +152,7 @@ macro_rules! tables {
             {
                 const NAME: &'static str = table_names::$name;
                 const DUPSORT: bool = tables!(@bool $($subkey)?);
+                const TABLE: Option<Tables> = Some(Tables::$name);
 
                 type Key = $key;
                 type Value = $value;

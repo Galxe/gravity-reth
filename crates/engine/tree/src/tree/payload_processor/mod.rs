@@ -33,8 +33,8 @@ use reth_provider::{
 use reth_revm::{db::BundleState, state::EvmState};
 use reth_trie::TrieInput;
 use reth_trie_parallel::{
+    error::StateRootTaskError,
     proof_task::{ProofTaskCtx, ProofTaskManager},
-    root::ParallelStateRootError,
 };
 use reth_trie_sparse::{
     provider::{TrieNodeProvider, TrieNodeProviderFactory},
@@ -382,7 +382,7 @@ where
         &self,
         sparse_trie_rx: mpsc::Receiver<SparseTrieUpdate>,
         proof_task_handle: BPF,
-        state_root_tx: mpsc::Sender<Result<StateRootComputeOutcome, ParallelStateRootError>>,
+        state_root_tx: mpsc::Sender<Result<StateRootComputeOutcome, StateRootTaskError>>,
     ) where
         BPF: TrieNodeProviderFactory + Clone + Send + Sync + 'static,
         BPF::AccountNodeProvider: TrieNodeProvider + Send + Sync,
@@ -436,7 +436,7 @@ pub struct PayloadHandle<Tx, Err> {
     // must include the receiver of the state root wired to the sparse trie
     prewarm_handle: CacheTaskHandle,
     /// Receiver for the state root
-    state_root: Option<mpsc::Receiver<Result<StateRootComputeOutcome, ParallelStateRootError>>>,
+    state_root: Option<mpsc::Receiver<Result<StateRootComputeOutcome, StateRootTaskError>>>,
     /// Stream of block transactions
     transactions: mpsc::Receiver<Result<Tx, Err>>,
 }
@@ -447,12 +447,10 @@ impl<Tx, Err> PayloadHandle<Tx, Err> {
     /// # Panics
     ///
     /// If payload processing was started without background tasks.
-    pub fn state_root(&mut self) -> Result<StateRootComputeOutcome, ParallelStateRootError> {
-        self.state_root
-            .take()
-            .expect("state_root is None")
-            .recv()
-            .map_err(|_| ParallelStateRootError::Other("sparse trie task dropped".to_string()))?
+    pub fn state_root(&mut self) -> Result<StateRootComputeOutcome, StateRootTaskError> {
+        self.state_root.take().expect("state_root is None").recv().map_err(|error| {
+            StateRootTaskError::Provider(reth_provider::ProviderError::other(error))
+        })?
     }
 
     /// Returns a state hook to be used to send state updates to this task.

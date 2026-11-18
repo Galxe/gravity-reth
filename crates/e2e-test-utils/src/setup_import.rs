@@ -519,7 +519,43 @@ mod tests {
 
     #[tokio::test]
     async fn test_import_with_node_integration() {
-        // Tests the full integration with node setup, forkchoice updates, and syncing
+        const LEGACY_ENGINE_CHILD: &str = "GRAVITY_RETH_TEST_IMPORT_LEGACY_ENGINE_CHILD";
+        // Gravity mode is process-global. Isolate this retained Engine API fixture even when
+        // cargo test runs other fixtures concurrently in the parent process.
+        if std::env::var(LEGACY_ENGINE_CHILD).ok().as_deref() != Some("1") {
+            let output = tokio::task::spawn_blocking(|| {
+                std::process::Command::new(std::env::current_exe().expect("test executable"))
+                    .args([
+                        "--exact",
+                        "setup_import::tests::test_import_with_node_integration",
+                        "--nocapture",
+                    ])
+                    .env(LEGACY_ENGINE_CHILD, "1")
+                    .output()
+            })
+            .await
+            .expect("isolated import test task panicked")
+            .expect("failed to launch isolated import test");
+            assert!(
+                output.status.success(),
+                "isolated import test failed: {}\nstdout:\n{}\nstderr:\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+            return
+        }
+
+        // The child selects retained Engine API import/FCU canonicalization before opening DBs
+        // or spawning a node. Production pipe execution remains driven by SDK events.
+        gravity_primitives::init_gravity_config(gravity_primitives::Config {
+            disable_pipe_execution: true,
+            disable_grevm: false,
+            cache_max_persist_gap: 128,
+            persist_merge_blocks: false,
+            cache_capacity: 2_000_000,
+            report_db_metrics: false,
+        });
         reth_tracing::init_test_tracing();
 
         let chain_spec = create_test_chain_spec();

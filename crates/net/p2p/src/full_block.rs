@@ -1142,19 +1142,17 @@ fn seal_block_access_list_for_block<B: Block>(
     let (peer, access_list) = access_list.split();
     let Some(access_list) = access_list else { return Ok(None) };
     let access_list = RawBal::new(access_list);
-    let computed = access_list.hash();
-    if computed == expected {
-        return Ok(Some(access_list))
-    }
-
-    debug!(
-        target: "downloaders",
-        block_hash = ?block.hash(),
-        ?computed,
-        ?expected,
-        "Received block access list with wrong hash",
-    );
-    Err(peer)
+    access_list.ensure_hash(expected).map_err(|error| {
+        debug!(
+            target: "downloaders",
+            block_hash = ?block.hash(),
+            computed = ?error.computed,
+            expected = ?error.expected,
+            "Received block access list with wrong hash",
+        );
+        peer
+    })?;
+    Ok(Some(access_list))
 }
 
 /// Wraps a block range with validated block access-list entries.
