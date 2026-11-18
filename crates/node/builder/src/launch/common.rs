@@ -74,14 +74,14 @@ use reth_provider::{
     BlockHashReader, BlockNumReader, ProviderError, ProviderFactory, ProviderResult,
     StageCheckpointReader, StaticFileProviderFactory, StorageSettingsCache,
 };
-use reth_prune::{PruneModes, PrunerBuilder};
+use reth_prune::{PruneMode, PruneModes, PrunerBuilder};
 use reth_rpc_builder::config::RethRpcServerConfig;
 use reth_rpc_layer::JwtSecret;
 use reth_stages::{
     sets::DefaultStages, stages::EraImportSource, MetricEvent, PipelineBuilder, PipelineTarget,
     StageId,
 };
-use reth_static_file::StaticFileProducer;
+use reth_static_file::{blocks_per_file_for_prune_distance, StaticFileProducer, StaticFileSegment};
 use reth_tasks::TaskExecutor;
 use reth_tracing::tracing::{debug, error, info, warn};
 use reth_transaction_pool::TransactionPool;
@@ -495,7 +495,14 @@ where
     {
         // `as_blocks_per_file_map` matches every segment exhaustively, so a new segment is a
         // compile error there instead of being silently missed here.
-        let blocks_per_file_map = self.toml_config().static_files.as_blocks_per_file_map();
+        let prune_modes = self.prune_modes();
+        let mut blocks_per_file_map = self.toml_config().static_files.as_blocks_per_file_map();
+        if blocks_per_file_map.get(StaticFileSegment::Receipts).is_none() &&
+            let Some(PruneMode::Distance(distance)) = prune_modes.receipts
+        {
+            blocks_per_file_map
+                .insert(StaticFileSegment::Receipts, blocks_per_file_for_prune_distance(distance));
+        }
         let blocks_per_file =
             blocks_per_file_map.iter().map(|(segment, &size)| (segment, Some(size)));
         let factory = ProviderFactory::new(
@@ -504,7 +511,7 @@ where
             StaticFileProvider::read_write(self.data_dir().static_files())?
                 .with_blocks_per_file(blocks_per_file)?,
         )
-        .with_prune_modes(self.prune_modes())
+        .with_prune_modes(prune_modes)
         .with_static_files_metrics();
 
         recover(&factory)?;

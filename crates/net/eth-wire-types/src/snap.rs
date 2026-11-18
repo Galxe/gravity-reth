@@ -144,6 +144,12 @@ impl AccountData {
         Self { hash, body: alloy_rlp::encode(SlimAccountBody::from(account)).into() }
     }
 
+    /// Consumes the wire value and returns its hashed key with the decoded trie account.
+    pub fn into_trie_entry(self) -> alloy_rlp::Result<(B256, TrieAccount)> {
+        let account = self.trie_account()?;
+        Ok((self.hash, account))
+    }
+
     /// Restores the full trie account committed to by a range proof.
     pub fn trie_account(&self) -> alloy_rlp::Result<TrieAccount> {
         Ok(alloy_rlp::decode_exact::<SlimAccountBody>(&self.body)?.0)
@@ -567,6 +573,12 @@ impl SnapProtocolMessage {
         if !version.supports_message_id(self.message_id() as u8) {
             return Err(SnapProtocolError::UnsupportedMessageId(self.message_id() as u8, version));
         }
+        if let (SnapVersion::V2, Self::GetStorageRanges(message)) = (version, self) {
+            let mut bytes = Vec::new();
+            bytes.push(SnapMessageId::GetStorageRanges as u8);
+            GetStorageRangesMessageV2::from(message).encode(&mut bytes);
+            return Ok(bytes.into())
+        }
         if let (SnapVersion::V2, Self::AccountRange(message)) = (version, self) {
             let accounts = message
                 .accounts
@@ -601,7 +613,9 @@ impl SnapProtocolMessage {
         if !version.supports_message_id(id) {
             return Err(SnapProtocolError::UnsupportedMessageId(id, version));
         }
-        let msg = if version == SnapVersion::V2 && id == SnapMessageId::AccountRange as u8 {
+        let msg = if version == SnapVersion::V2 && id == SnapMessageId::GetStorageRanges as u8 {
+            Self::GetStorageRanges(GetStorageRangesMessageV2::decode(&mut body)?.into())
+        } else if version == SnapVersion::V2 && id == SnapMessageId::AccountRange as u8 {
             let message = AccountRangeMessageV2::decode(&mut body)?;
             Self::AccountRange(AccountRangeMessage {
                 request_id: message.request_id,
@@ -622,6 +636,78 @@ impl SnapProtocolMessage {
             return Err(SnapProtocolError::Rlp(alloy_rlp::Error::UnexpectedLength));
         }
         Ok(msg)
+    }
+}
+
+// Native snap/2 allows an empty byte string as a storage bound. Keep this detail out of
+// the legacy public request and codec; its effective bounds are zero and the maximum hash.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct StorageRangeBoundV2(Option<B256>);
+
+impl Encodable for StorageRangeBoundV2 {
+    fn encode(&self, out: &mut dyn BufMut) {
+        match self.0 {
+            Some(hash) => hash.encode(out),
+            None => Bytes::new().encode(out),
+        }
+    }
+
+    fn length(&self) -> usize {
+        match self.0 {
+            Some(hash) => hash.length(),
+            None => Bytes::new().length(),
+        }
+    }
+}
+
+impl Decodable for StorageRangeBoundV2 {
+    fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
+        let bytes = Bytes::decode(buf)?;
+        match bytes.len() {
+            0 => Ok(Self(None)),
+            32 => Ok(Self(Some(B256::from_slice(&bytes)))),
+            _ => Err(alloy_rlp::Error::UnexpectedLength),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, RlpEncodable, RlpDecodable)]
+struct GetStorageRangesMessageV2 {
+    request_id: u64,
+    root_hash: B256,
+    account_hashes: Vec<B256>,
+    starting_hash: StorageRangeBoundV2,
+    limit_hash: StorageRangeBoundV2,
+    response_bytes: u64,
+}
+
+impl From<&GetStorageRangesMessage> for GetStorageRangesMessageV2 {
+    fn from(request: &GetStorageRangesMessage) -> Self {
+        Self {
+            request_id: request.request_id,
+            root_hash: request.root_hash,
+            account_hashes: request.account_hashes.clone(),
+            starting_hash: StorageRangeBoundV2(
+                (request.starting_hash != B256::ZERO).then_some(request.starting_hash),
+            ),
+            limit_hash: StorageRangeBoundV2(
+                (request.limit_hash != B256::repeat_byte(0xff)).then_some(request.limit_hash),
+            ),
+            response_bytes: request.response_bytes,
+        }
+    }
+}
+
+impl From<GetStorageRangesMessageV2> for GetStorageRangesMessage {
+    fn from(request: GetStorageRangesMessageV2) -> Self {
+        Self {
+            request_id: request.request_id,
+            root_hash: request.root_hash,
+            account_hashes: request.account_hashes,
+            starting_hash: request.starting_hash.0.unwrap_or(B256::ZERO),
+            limit_hash: request.limit_hash.0.unwrap_or(B256::repeat_byte(0xff)),
+            response_bytes: request.response_bytes,
+        }
     }
 }
 
@@ -1249,5 +1335,68 @@ mod tests {
             SnapProtocolMessage::decode_versioned(SnapVersion::V1, &message.encode()).unwrap(),
             message
         );
+    }
+}
+
+#[cfg(test)]
+mod storage_bounds_v2_tests {
+    use super::*;
+
+    #[test]
+    fn native_empty_bounds_and_legacy_full_hash_golden_bytes() {
+        let message = SnapProtocolMessage::GetStorageRanges(GetStorageRangesMessage {
+            request_id: 1,
+            root_hash: B256::ZERO,
+            account_hashes: Vec::new(),
+            starting_hash: B256::ZERO,
+            limit_hash: B256::repeat_byte(0xff),
+            response_bytes: 1,
+        });
+        let mut native = alloc::vec![0x02, 0xe6, 0x01, 0xa0];
+        native.extend([0; 32]);
+        native.extend([0xc0, 0x80, 0x80, 0x01]);
+        assert_eq!(message.encode_versioned(SnapVersion::V2).unwrap().as_ref(), native);
+        assert_eq!(
+            SnapProtocolMessage::decode_versioned(SnapVersion::V2, &native).unwrap(),
+            message
+        );
+        let mut legacy = alloc::vec![0x02, 0xf8, 0x66, 0x01, 0xa0];
+        legacy.extend([0; 32]);
+        legacy.extend([0xc0, 0xa0]);
+        legacy.extend([0; 32]);
+        legacy.push(0xa0);
+        legacy.extend([0xff; 32]);
+        legacy.push(0x01);
+        assert_eq!(message.encode().as_ref(), legacy);
+        assert_eq!(message.encode_versioned(SnapVersion::V1).unwrap().as_ref(), legacy);
+        assert_eq!(
+            SnapProtocolMessage::decode_versioned(SnapVersion::V1, &legacy).unwrap(),
+            message
+        );
+        assert_eq!(
+            SnapProtocolMessage::decode_versioned(SnapVersion::V2, &legacy).unwrap(),
+            message
+        );
+        assert!(SnapProtocolMessage::decode_versioned(SnapVersion::V1, &native).is_err());
+    }
+
+    #[test]
+    fn native_finite_zero_limit_is_not_unbounded_and_invalid_bound_lengths_fail() {
+        let message = SnapProtocolMessage::GetStorageRanges(GetStorageRangesMessage {
+            request_id: 1,
+            root_hash: B256::ZERO,
+            account_hashes: Vec::new(),
+            starting_hash: B256::ZERO,
+            limit_hash: B256::ZERO,
+            response_bytes: 1,
+        });
+        let encoded = message.encode_versioned(SnapVersion::V2).unwrap();
+        assert_eq!(
+            SnapProtocolMessage::decode_versioned(SnapVersion::V2, &encoded).unwrap(),
+            message
+        );
+        for mut bytes in [&[1][..], &[0x81, 0x80][..], &[0xc0][..]] {
+            assert!(StorageRangeBoundV2::decode(&mut bytes).is_err());
+        }
     }
 }

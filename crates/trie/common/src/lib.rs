@@ -21,7 +21,9 @@ pub use hashed_state::*;
 
 /// Input for trie computation.
 mod input;
-pub use input::TrieInput;
+pub use input::{TrieInput, TrieInputSorted};
+
+mod utils;
 
 /// The implementation of hash builder.
 pub mod hash_builder;

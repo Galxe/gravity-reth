@@ -595,8 +595,9 @@ impl ExecutionCache {
         self.inner.write().take();
     }
 
-    /// Updates the cache with a closure that has exclusive access to the guard.
-    /// This ensures that all cache operations happen atomically.
+    /// Runs a closure with exclusive access to the stored cache.
+    ///
+    /// Returns its result after releasing the lock, so removed caches can be dropped outside it.
     ///
     /// ## CRITICAL SAFETY REQUIREMENT
     ///
@@ -608,12 +609,12 @@ impl ExecutionCache {
     ///
     /// Violating this requirement can result in cache corruption, incorrect state data,
     /// and potential consensus failures.
-    pub(crate) fn update_with_guard<F>(&self, update_fn: F)
+    pub(crate) fn update_with_guard<F, R>(&self, update_fn: F) -> R
     where
-        F: FnOnce(&mut Option<SavedCache>),
+        F: FnOnce(&mut Option<SavedCache>) -> R,
     {
         let mut guard = self.inner.write();
-        update_fn(&mut guard);
+        update_fn(&mut guard)
     }
 }
 

@@ -64,17 +64,18 @@ const MAX_BLOB_LIMIT: usize = 128;
 /// L1 implementation.
 pub struct EngineApi<Provider, PayloadT: PayloadTypes, Pool, Validator, ChainSpec> {
     inner: Arc<EngineApiInner<Provider, PayloadT, Pool, Validator, ChainSpec>>,
-    // Optional transport-only read backend. Absence never pretends that all BALs are pruned.
+    // Optional read backend for JSON V2 and Amsterdam SSZ bodies. SSZ requires explicit support.
     payload_body_bal_store: Option<BalStoreHandle>,
 }
 
 impl<Provider, PayloadT: PayloadTypes, Pool, Validator, ChainSpec>
     EngineApi<Provider, PayloadT, Pool, Validator, ChainSpec>
 {
-    /// Configures a real read backend for Amsterdam SSZ payload bodies.
+    /// Configures a real read backend for JSON V2 and Amsterdam SSZ payload bodies.
     ///
     /// No store is installed by default. Configure this before sharing the API with transports;
-    /// clones retain this handle. Existing JSON body methods keep their original behavior.
+    /// clones retain this handle. JSON V2 body methods also return available BALs from this store;
+    /// V1 and unconfigured V2 methods keep their original behavior.
     pub fn with_payload_body_bal_store(mut self, store: BalStoreHandle) -> Self {
         self.payload_body_bal_store = Some(store);
         self
@@ -734,27 +735,15 @@ where
         start: BlockNumber,
         count: u64,
     ) -> EngineApiResult<ExecutionPayloadBodiesV2> {
-        let payload_bodies = self
-            .get_payload_bodies_by_range_with(start, count, |block| {
-                let block_hash = block.header().hash_slow();
-                (
-                    block_hash,
-                    ExecutionPayloadBodyV2 {
-                        transactions: block.body().encoded_2718_transactions(),
-                        withdrawals: block
-                            .body()
-                            .withdrawals()
-                            .cloned()
-                            .map(Withdrawals::into_inner),
-                        block_access_list: None,
-                    },
-                )
-            })
-            .await?;
-
-        Ok(payload_bodies
+        Ok(self
+            .get_payload_bodies_by_range_with_timestamps(
+                start,
+                count,
+                self.has_payload_body_bal_store(),
+            )
+            .await?
             .into_iter()
-            .map(|payload_body| payload_body.map(|(_, payload_body)| payload_body))
+            .map(|body| body.map(|(_, body)| body))
             .collect())
     }
 
@@ -951,15 +940,12 @@ where
         &self,
         hashes: Vec<BlockHash>,
     ) -> EngineApiResult<ExecutionPayloadBodiesV2> {
-        let payload_bodies = self
-            .get_payload_bodies_by_hash_with(hashes, |block| ExecutionPayloadBodyV2 {
-                transactions: block.body().encoded_2718_transactions(),
-                withdrawals: block.body().withdrawals().cloned().map(Withdrawals::into_inner),
-                block_access_list: None,
-            })
-            .await?;
-
-        Ok(payload_bodies)
+        Ok(self
+            .get_payload_bodies_by_hash_with_timestamps(hashes, self.has_payload_body_bal_store())
+            .await?
+            .into_iter()
+            .map(|body| body.map(|(_, body)| body))
+            .collect())
     }
 
     /// Metrics version of `get_payload_bodies_by_hash_v2`
@@ -1795,6 +1781,20 @@ mod tests {
                 reth_payload_primitives::EngineObjectValidationError::UnsupportedFork
             ))
         );
+        assert_eq!(
+            api.get_payload_bodies_by_hash_v2(vec![hash]).await.unwrap()[0]
+                .as_ref()
+                .unwrap()
+                .block_access_list,
+            None
+        );
+        assert_eq!(
+            api.get_payload_bodies_by_range_v2(1, 3).await.unwrap()[0]
+                .as_ref()
+                .unwrap()
+                .block_access_list,
+            None
+        );
         let api = api.with_payload_body_bal_store(store);
         for include_bal in [false, true] {
             let by_hash = api
@@ -1819,13 +1819,36 @@ mod tests {
                 .unwrap()
                 .is_empty());
         }
-        // The explicitly injected SSZ read backend does not change existing JSON V2 semantics.
+        let expected = api
+            .get_payload_bodies_by_hash_with_timestamps(vec![B256::ZERO, hash, hash], true)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|body| body.map(|(_, body)| body))
+            .collect::<Vec<_>>();
         assert_eq!(
-            api.get_payload_bodies_by_hash_v2(vec![hash]).await.unwrap()[0]
+            api.get_payload_bodies_by_hash_v2(vec![B256::ZERO, hash, hash]).await.unwrap(),
+            expected
+        );
+        assert_eq!(
+            api.get_payload_bodies_by_range_v2(1, 3).await.unwrap(),
+            vec![expected[1].clone()]
+        );
+        assert!(api.get_payload_bodies_by_range_v2(2, 3).await.unwrap().is_empty());
+        assert_eq!(
+            api.get_payload_bodies_by_hash_v1(vec![hash]).await.unwrap()[0]
                 .as_ref()
                 .unwrap()
-                .block_access_list,
-            None
+                .transactions,
+            expected[1].as_ref().unwrap().transactions
+        );
+        assert_eq!(
+            api.get_payload_bodies_by_hash_v2(vec![B256::ZERO; 1024]).await.unwrap().len(),
+            1024
+        );
+        assert_matches!(
+            api.get_payload_bodies_by_hash_v2(vec![B256::ZERO; 1025]).await,
+            Err(EngineApiError::PayloadRequestTooLarge { len: 1025 })
         );
         assert_eq!(
             api.get_payload_bodies_by_hash_v1(vec![B256::ZERO; 1024]).await.unwrap().len(),

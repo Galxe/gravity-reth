@@ -1136,6 +1136,11 @@ impl SavedCache {
         self.hash
     }
 
+    /// Returns whether the two saved values share the same cache allocation, regardless of hash.
+    pub fn shares_cache_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.caches.0, &other.caches.0)
+    }
+
     /// Returns true if the cache is available for use (no other tasks are currently using it).
     pub fn is_available(&self) -> bool {
         self.caches.usage_count() == 1

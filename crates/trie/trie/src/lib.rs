@@ -75,3 +75,6 @@ pub mod verify;
 /// Opt-in parallel verification over a shared immutable legacy trie view.
 #[cfg(not(target_family = "wasm"))]
 pub mod parallel_verify;
+
+/// Opt-in computation of old legacy trie node values for changed paths.
+pub mod changesets;

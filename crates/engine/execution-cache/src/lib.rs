@@ -14,6 +14,9 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 
+/// Cross-block caches for pure precompile results.
+pub mod precompile_cache;
+
 mod cached_state;
 pub use cached_state::*;
 
@@ -122,8 +125,9 @@ impl PayloadExecutionCache {
         elapsed
     }
 
-    /// Updates the cache with a closure that has exclusive access to the guard.
-    /// This ensures that all cache operations happen atomically.
+    /// Runs a closure with exclusive access to the stored cache.
+    ///
+    /// Returns its result after releasing the lock, so removed caches can be dropped outside it.
     ///
     /// ## CRITICAL SAFETY REQUIREMENT
     ///
@@ -135,12 +139,12 @@ impl PayloadExecutionCache {
     ///
     /// Violating this requirement can result in cache corruption, incorrect state data,
     /// and potential consensus failures.
-    pub fn update_with_guard<F>(&self, update_fn: F)
+    pub fn update_with_guard<F, R>(&self, update_fn: F) -> R
     where
-        F: FnOnce(&mut Option<SavedCache>),
+        F: FnOnce(&mut Option<SavedCache>) -> R,
     {
         let mut guard = self.inner.lock();
-        update_fn(&mut guard);
+        update_fn(&mut guard)
     }
 }
 
