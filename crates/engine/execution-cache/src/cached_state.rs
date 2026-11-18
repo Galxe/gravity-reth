@@ -19,7 +19,6 @@ use reth_trie::{
     MultiProofTargets, StorageMultiProof, StorageProof, TrieInput,
 };
 use std::{
-    cell::Cell,
     fmt,
     sync::{
         atomic::{AtomicU64, AtomicUsize, Ordering},
@@ -264,25 +263,26 @@ impl CacheMetricSnapshot {
     }
 }
 
+// StateProvider is Sync; keep the buffered counters safe for shared provider reads.
 #[derive(Debug, Default)]
 struct CacheMetricCounts {
-    account_hits: Cell<u64>,
-    account_misses: Cell<u64>,
-    storage_hits: Cell<u64>,
-    storage_misses: Cell<u64>,
-    code_hits: Cell<u64>,
-    code_misses: Cell<u64>,
+    account_hits: AtomicU64,
+    account_misses: AtomicU64,
+    storage_hits: AtomicU64,
+    storage_misses: AtomicU64,
+    code_hits: AtomicU64,
+    code_misses: AtomicU64,
 }
 
 impl CacheMetricCounts {
     const fn new() -> Self {
         Self {
-            account_hits: Cell::new(0),
-            account_misses: Cell::new(0),
-            storage_hits: Cell::new(0),
-            storage_misses: Cell::new(0),
-            code_hits: Cell::new(0),
-            code_misses: Cell::new(0),
+            account_hits: AtomicU64::new(0),
+            account_misses: AtomicU64::new(0),
+            storage_hits: AtomicU64::new(0),
+            storage_misses: AtomicU64::new(0),
+            code_hits: AtomicU64::new(0),
+            code_misses: AtomicU64::new(0),
         }
     }
 
@@ -296,17 +296,17 @@ impl CacheMetricCounts {
             CacheMetricKind::CodeHit => &self.code_hits,
             CacheMetricKind::CodeMiss => &self.code_misses,
         };
-        counter.set(counter.get() + 1);
+        counter.fetch_add(1, Ordering::Relaxed);
     }
 
-    const fn take(&self) -> CacheMetricSnapshot {
+    fn take(&self) -> CacheMetricSnapshot {
         CacheMetricSnapshot {
-            account_hits: self.account_hits.replace(0),
-            account_misses: self.account_misses.replace(0),
-            storage_hits: self.storage_hits.replace(0),
-            storage_misses: self.storage_misses.replace(0),
-            code_hits: self.code_hits.replace(0),
-            code_misses: self.code_misses.replace(0),
+            account_hits: self.account_hits.swap(0, Ordering::Relaxed),
+            account_misses: self.account_misses.swap(0, Ordering::Relaxed),
+            storage_hits: self.storage_hits.swap(0, Ordering::Relaxed),
+            storage_misses: self.storage_misses.swap(0, Ordering::Relaxed),
+            code_hits: self.code_hits.swap(0, Ordering::Relaxed),
+            code_misses: self.code_misses.swap(0, Ordering::Relaxed),
         }
     }
 }
@@ -1179,6 +1179,25 @@ mod tests {
     use reth_provider::test_utils::{ExtendedAccount, MockEthProvider};
     use reth_revm::db::{AccountStatus, BundleAccount};
     use revm_state::AccountInfo;
+
+    #[test]
+    fn buffered_metrics_count_concurrent_reads_and_drain_once() {
+        let counts = super::CacheMetricCounts::new();
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                scope.spawn(|| {
+                    for _ in 0..1_000 {
+                        counts.record(super::CacheMetricKind::AccountHit);
+                        counts.record(super::CacheMetricKind::StorageMiss);
+                    }
+                });
+            }
+        });
+        let snapshot = counts.take();
+        assert_eq!(snapshot.account_hits, 4_000);
+        assert_eq!(snapshot.storage_misses, 4_000);
+        assert!(counts.take().is_empty());
+    }
 
     #[test]
     fn test_empty_storage_cached_state_provider() {
