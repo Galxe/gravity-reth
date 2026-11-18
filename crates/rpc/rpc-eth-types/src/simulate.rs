@@ -23,8 +23,9 @@ use reth_primitives_traits::{
     BlockBody as _, BlockTy, NodePrimitives, Recovered, RecoveredBlock, SealedHeader,
 };
 use reth_rpc_convert::{RpcBlock, RpcConvert, RpcTxReq};
-use reth_rpc_server_types::result::{block_id_to_str, rpc_err};
+use reth_rpc_server_types::result::rpc_err;
 use reth_storage_api::{noop::NoopProvider, StateProvider};
+use reth_tasks::cancel::is_cancelled;
 use revm::{
     context::Block,
     context_interface::result::ExecutionResult,
@@ -61,7 +62,7 @@ pub enum EthSimulateError {
     #[error("Client adjustable limit reached")]
     GasLimitReached,
     /// Base block for the simulation was not found.
-    #[error("block not found: {}", block_id_to_str(*block))]
+    #[error("block not found: {block}")]
     BlockNotFound {
         /// The block id that was requested.
         block: BlockId,
@@ -216,7 +217,13 @@ where
         if gap > 1 {
             for i in 1..gap {
                 let filler_number = prev_number + i;
-                let filler_time = prev_timestamp + timestamp_increment;
+                let filler_time =
+                    prev_timestamp.checked_add(timestamp_increment).ok_or_else(|| {
+                        EthApiError::other(EthSimulateError::BlockTimestampInvalid {
+                            got: prev_timestamp,
+                            parent: prev_timestamp,
+                        })
+                    })?;
                 out.push(SimBlock {
                     block_overrides: Some(BlockOverrides {
                         number: Some(U256::from(filler_number)),
@@ -241,7 +248,12 @@ where
             }
             t
         } else {
-            let t = prev_timestamp + timestamp_increment;
+            let t = prev_timestamp.checked_add(timestamp_increment).ok_or_else(|| {
+                EthApiError::other(EthSimulateError::BlockTimestampInvalid {
+                    got: prev_timestamp,
+                    parent: prev_timestamp,
+                })
+            })?;
             overrides.time = Some(t);
             t
         };
@@ -318,6 +330,9 @@ where
     S: BlockBuilder<Executor: BlockExecutor<Evm: Evm<DB: Database<Error: Into<EthApiError>>>>>,
     T: RpcConvert<Primitives = S::Primitives>,
 {
+    if is_cancelled() {
+        return Err(EthApiError::InternalEthError)
+    }
     builder.apply_pre_execution_changes()?;
 
     let mut results = Vec::with_capacity(calls.len());
@@ -328,6 +343,9 @@ where
     let is_amsterdam = builder.evm().cfg_env().enable_amsterdam_eip8037;
     let tx_gas_limit_cap = builder.evm().cfg_env().tx_gas_limit_cap.unwrap_or(u64::MAX);
     for mut call in calls {
+        if is_cancelled() {
+            return Err(EthApiError::InternalEthError)
+        }
         let block_gas_remaining = if is_amsterdam {
             block_gas_limit
                 .saturating_sub(block_regular_gas_used)
@@ -756,6 +774,46 @@ mod tests {
         let parent = parent_at(10, 100);
         let err = sanitize_chain(vec![block_with_number(10)], &parent, Chain::mainnet().id(), 256)
             .unwrap_err();
+        assert!(matches!(err, EthApiError::Other(_)));
+    }
+
+    #[test]
+    fn sanitize_chain_rejects_timestamp_overflow() {
+        // A block may set any timestamp above its parent's, including `u64::MAX`. The following
+        // block then defaults to `prev + increment`, which must not wrap.
+        let parent = parent_at(0, 0);
+        let blocks: Vec<SimBlock<TransactionRequest>> = vec![
+            SimBlock {
+                block_overrides: Some(BlockOverrides {
+                    time: Some(u64::MAX),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            SimBlock::default(),
+        ];
+
+        let err = sanitize_chain(blocks, &parent, Chain::mainnet().id(), 256).unwrap_err();
+        assert!(matches!(err, EthApiError::Other(_)));
+    }
+
+    #[test]
+    fn sanitize_chain_rejects_filler_timestamp_overflow() {
+        // Same, but the wrap would happen while generating filler blocks for a number gap.
+        let parent = parent_at(0, 0);
+        let blocks = vec![
+            SimBlock {
+                block_overrides: Some(BlockOverrides {
+                    number: Some(U256::from(1)),
+                    time: Some(u64::MAX),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            block_with_number(4),
+        ];
+
+        let err = sanitize_chain(blocks, &parent, Chain::mainnet().id(), 256).unwrap_err();
         assert!(matches!(err, EthApiError::Other(_)));
     }
 

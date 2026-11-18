@@ -21,7 +21,9 @@ use alloy_consensus::{
     },
     BlockHeader,
 };
-use alloy_eips::{eip4844::env_settings::EnvKzgSettings, eip7840::BlobParams, BlockId};
+use alloy_eips::{
+    eip4844::env_settings::EnvKzgSettings, eip7840::BlobParams, merge::SLOT_DURATION_SECS, BlockId,
+};
 use reth_chainspec::{ChainSpecProvider, EthChainSpec, EthereumHardforks};
 use reth_evm::ConfigureEvm;
 use reth_primitives_traits::{
@@ -737,7 +739,7 @@ where
         {
             let is_eip7702 = if self.fork_tracker.is_prague_activated() {
                 match state.bytecode_by_hash(code_hash) {
-                    Ok(bytecode) => bytecode.unwrap_or_default().is_eip7702(),
+                    Ok(bytecode) => bytecode.is_some_and(|b| b.is_eip7702()),
                     Err(err) => {
                         return Err(TransactionValidationOutcome::Error(
                             *transaction.hash(),
@@ -972,9 +974,15 @@ where
         let tip_timestamp = self.fork_tracker.tip_timestamp();
 
         // If next block is Osaka, allow 7594 sidecars
-        if self.chain_spec().is_osaka_active_at_timestamp(tip_timestamp.saturating_add(12)) {
+        if self
+            .chain_spec()
+            .is_osaka_active_at_timestamp(tip_timestamp.saturating_add(SLOT_DURATION_SECS))
+        {
             true
-        } else if self.chain_spec().is_osaka_active_at_timestamp(tip_timestamp.saturating_add(24)) {
+        } else if self
+            .chain_spec()
+            .is_osaka_active_at_timestamp(tip_timestamp.saturating_add(2 * SLOT_DURATION_SECS))
+        {
             let current_timestamp =
                 SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs();
 
@@ -1498,11 +1506,8 @@ pub fn ensure_intrinsic_gas<T: EthPoolTransaction>(
         transaction.input(),
         transaction.is_create(),
         transaction.access_list().map(|l| l.len()).unwrap_or_default() as u64,
-        transaction
-            .access_list()
-            .map(|l| l.iter().map(|i| i.storage_keys.len()).sum::<usize>())
-            .unwrap_or_default() as u64,
-        transaction.authorization_list().map(|l| l.len()).unwrap_or_default() as u64,
+        transaction.access_list().map(|l| l.storage_keys_count()).unwrap_or_default() as u64,
+        transaction.authorization_count().unwrap_or_default(),
     );
 
     let gas_limit = transaction.gas_limit();
