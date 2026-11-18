@@ -505,7 +505,11 @@ impl<H: BlockHeader> BuildPendingEnv<H> for NextBlockEnvAttributes {
         block_overrides: Option<&BlockOverrides>,
     ) -> Self {
         let mut attributes = Self {
-            timestamp: parent.timestamp().saturating_add(12),
+            // The timestamp selects the hardfork rules, so it must be overridden before the EVM
+            // environment is derived from these attributes.
+            timestamp: block_overrides
+                .and_then(|overrides| overrides.time)
+                .unwrap_or_else(|| parent.timestamp().saturating_add(12)),
             suggested_fee_recipient: parent.beneficiary(),
             prev_randao: B256::random(),
             gas_limit: parent.gas_limit(),
@@ -531,6 +535,15 @@ mod tests {
     use alloy_consensus::Header;
     use alloy_primitives::B256;
     use reth_primitives_traits::SealedHeader;
+
+    #[test]
+    fn pending_env_uses_timestamp_override_before_fork_selection() {
+        let parent = SealedHeader::seal_slow(Header { timestamp: 100, ..Default::default() });
+        let overrides = BlockOverrides { time: Some(200), ..Default::default() };
+        let attributes = NextBlockEnvAttributes::build_pending_env(&parent, Some(&overrides));
+        assert_eq!(attributes.timestamp, 200);
+        assert_eq!(NextBlockEnvAttributes::build_pending_env(&parent, None).timestamp, 112);
+    }
 
     #[test]
     fn pending_env_defaults_parent_beacon_root() {
