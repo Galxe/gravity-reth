@@ -93,7 +93,10 @@ pub struct MockHashedCursor<T> {
 }
 
 impl<T> MockHashedCursor<T> {
-    fn new(values: Arc<BTreeMap<B256, T>>, visited_keys: Arc<Mutex<Vec<KeyVisit<B256>>>>) -> Self {
+    const fn new(
+        values: Arc<BTreeMap<B256, T>>,
+        visited_keys: Arc<Mutex<Vec<KeyVisit<B256>>>>,
+    ) -> Self {
         Self { current_key: None, values, visited_keys }
     }
 }

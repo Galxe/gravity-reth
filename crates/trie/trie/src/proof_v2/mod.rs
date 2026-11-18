@@ -8,10 +8,7 @@
 //! - Re-uses cursors across calculations
 //! - Supports generic value types with lazy evaluation
 
-use crate::{
-    hashed_cursor::{HashedCursor, HashedStorageCursor},
-    trie_cursor::{depth_first, TrieCursor, TrieStorageCursor},
-};
+use crate::trie_cursor::depth_first;
 use alloy_primitives::{keccak256, B256, U256};
 use alloy_rlp::Encodable;
 use alloy_trie::{BranchNodeCompact, TrieMask};
@@ -22,6 +19,13 @@ use reth_trie_common::{
 };
 use std::cmp::Ordering;
 use tracing::{error, instrument, trace};
+
+/// Read-only cursor factory adapters for reusable proof calculations.
+pub mod cursor;
+pub use cursor::{
+    ProofCursorFactory, RebindableHashedStorageCursor, ResettableHashedCursor,
+    ResettableTrieCursor, TrieStorageCursor,
+};
 
 mod value;
 pub use value::*;
@@ -49,6 +53,10 @@ const RLP_ENCODE_BUF_SIZE: usize = 1024;
 /// - Returns proof nodes sorted lexicographically by path
 /// - Automatically resets after each calculation
 /// - Re-uses cursors from one calculation to the next
+///
+/// All cursors and factories used by this calculator must read the same stable view for the
+/// entire calculation, including resets. Use a fixed database snapshot or immutable in-memory
+/// data; reconstructing a cursor over a live database does not itself create a consistent view.
 #[derive(Debug)]
 pub struct ProofCalculator<TC, HC, VE: LeafValueEncoder> {
     /// Trie cursor for traversing stored branch nodes.
@@ -128,8 +136,8 @@ impl<TC, HC, VE: LeafValueEncoder> ProofCalculator<TC, HC, VE> {
 
 impl<TC, HC, VE> ProofCalculator<TC, HC, VE>
 where
-    TC: TrieCursor,
-    HC: HashedCursor,
+    TC: ResettableTrieCursor,
+    HC: ResettableHashedCursor,
     VE: LeafValueEncoder<Value = HC::Value>,
 {
     /// Takes a re-usable `RlpNode` buffer from the internal free-list, or allocates a new one if
@@ -818,8 +826,8 @@ where
         Ok(())
     }
 
-    /// Wraps [`TrieCursor::seek`], skipping cached branches whose sub-tries must be recalculated
-    /// from leaves.
+    /// Wraps [`crate::trie_cursor::TrieCursor::seek`], skipping cached branches whose sub-tries
+    /// must be recalculated from leaves.
     ///
     /// A cached branch is skipped when all but at most one of its children match the prefix set.
     /// In that case those children might all be deleted, leaving a branch with a single child.
@@ -1322,7 +1330,7 @@ where
         // chunks can overlap previous chunks, so reset it if this seek needs to move backwards.
         if trie_cursor_state.needs_reset_before_seek(&sub_trie_targets.prefix) {
             trace!(target: TRACE_TARGET, "Resetting trie cursor before sub-trie");
-            self.trie_cursor.reset();
+            self.trie_cursor.reset()?;
             *trie_cursor_state = TrieCursorState::unseeked();
         }
 
@@ -1334,7 +1342,7 @@ where
 
         if hashed_cursor_state.needs_reset_before_seek(&sub_trie_targets.prefix) {
             trace!(target: TRACE_TARGET, "Resetting hashed cursor before sub-trie");
-            self.hashed_cursor.reset();
+            self.hashed_cursor.reset()?;
             *hashed_cursor_state = HashedCursorState::unseeked();
         }
 
@@ -1524,8 +1532,8 @@ where
         value_encoder: &mut VE,
         targets: &mut [ProofV2Target],
     ) -> Result<Vec<ProofTrieNodeV2>, StateProofError> {
-        self.trie_cursor.reset();
-        self.hashed_cursor.reset();
+        self.trie_cursor.reset()?;
+        self.hashed_cursor.reset()?;
         self.proof_inner(value_encoder, targets)
     }
 
@@ -1563,6 +1571,9 @@ where
         &mut self,
         value_encoder: &mut VE,
     ) -> Result<ProofTrieNodeV2, StateProofError> {
+        self.trie_cursor.reset()?;
+        self.hashed_cursor.reset()?;
+
         // Initialize the variables which track the state of the two cursors. Both indicate the
         // cursors are unseeked.
         let mut trie_cursor_state = TrieCursorState::unseeked();
@@ -1611,7 +1622,7 @@ pub type StorageProofCalculator<TC, HC> = ProofCalculator<TC, HC, StorageValueEn
 impl<TC, HC> StorageProofCalculator<TC, HC>
 where
     TC: TrieStorageCursor,
-    HC: HashedStorageCursor<Value = U256>,
+    HC: RebindableHashedStorageCursor<Value = U256>,
 {
     /// Create a new [`StorageProofCalculator`] instance.
     pub fn new_storage(trie_cursor: TC, hashed_cursor: HC) -> Self {
@@ -1632,7 +1643,10 @@ where
         hashed_address: B256,
         targets: &mut [ProofV2Target],
     ) -> Result<Vec<ProofTrieNodeV2>, StateProofError> {
-        self.hashed_cursor.set_hashed_address(hashed_address);
+        let hashed_cursor = self.hashed_cursor.set_hashed_address(hashed_address);
+        let trie_cursor = self.trie_cursor.set_hashed_address(hashed_address);
+        hashed_cursor?;
+        trie_cursor?;
 
         // Shortcut: check if storage is empty
         if self.hashed_cursor.is_storage_empty()? {
@@ -1643,10 +1657,6 @@ where
                 masks: None,
             }])
         }
-
-        // Don't call `set_hashed_address` on the trie cursor until after the previous shortcut has
-        // been checked.
-        self.trie_cursor.set_hashed_address(hashed_address);
 
         // Create a mutable storage value encoder
         let mut storage_value_encoder = StorageValueEncoder;
@@ -1662,7 +1672,10 @@ where
         &mut self,
         hashed_address: B256,
     ) -> Result<ProofTrieNodeV2, StateProofError> {
-        self.hashed_cursor.set_hashed_address(hashed_address);
+        let hashed_cursor = self.hashed_cursor.set_hashed_address(hashed_address);
+        let trie_cursor = self.trie_cursor.set_hashed_address(hashed_address);
+        hashed_cursor?;
+        trie_cursor?;
 
         if self.hashed_cursor.is_storage_empty()? {
             return Ok(ProofTrieNodeV2 {
@@ -1671,10 +1684,6 @@ where
                 masks: None,
             })
         }
-
-        // Don't call `set_hashed_address` on the trie cursor until after the previous shortcut has
-        // been checked.
-        self.trie_cursor.set_hashed_address(hashed_address);
 
         // Create a mutable storage value encoder
         let mut storage_value_encoder = StorageValueEncoder;
@@ -1969,7 +1978,10 @@ mod tests {
                     let masks = if path.is_empty() {
                         None
                     } else {
-                        proof_legacy_result.branch_node_masks.get(path).copied()
+                        BranchNodeMasks::from_optional(
+                            proof_legacy_result.branch_node_hash_masks.get(path).copied(),
+                            proof_legacy_result.branch_node_tree_masks.get(path).copied(),
+                        )
                     };
 
                     ProofTrieNode { path: *path, node, masks }
@@ -2308,10 +2320,10 @@ mod tests {
         let mut updated_storage = harness.storage().clone();
         updated_storage.insert(slot_63, val);
 
-        let updated_hashed = MockHashedCursorFactory::new(
+        let updated_hashed = ProofCursorFactory::new(MockHashedCursorFactory::new(
             BTreeMap::new(),
             std::iter::once((harness.hashed_address(), updated_storage)).collect(),
-        );
+        ));
 
         let mut prefix_set = PrefixSetMut::default();
         prefix_set.insert(Nibbles::unpack(slot_63));
@@ -2364,10 +2376,10 @@ mod tests {
         let mut updated_storage = harness.storage().clone();
         updated_storage.insert(slot_65, updated_val);
 
-        let updated_hashed = MockHashedCursorFactory::new(
+        let updated_hashed = ProofCursorFactory::new(MockHashedCursorFactory::new(
             BTreeMap::new(),
             std::iter::once((harness.hashed_address(), updated_storage)).collect(),
-        );
+        ));
 
         let mut prefix_set = PrefixSetMut::default();
         prefix_set.insert(Nibbles::unpack(slot_65));
@@ -2853,10 +2865,10 @@ mod tests {
         let mut updated_storage = harness.storage().clone();
         updated_storage.insert(key_2, updated_val);
 
-        let updated_hashed = MockHashedCursorFactory::new(
+        let updated_hashed = ProofCursorFactory::new(MockHashedCursorFactory::new(
             BTreeMap::new(),
             std::iter::once((harness.hashed_address(), updated_storage)).collect(),
-        );
+        ));
 
         let mut prefix_set = PrefixSetMut::default();
         prefix_set.insert(Nibbles::unpack(key_2));

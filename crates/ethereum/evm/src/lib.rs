@@ -61,6 +61,9 @@ use {
 pub use alloy_evm::EthEvm;
 pub use gravity::{GravityChainReader, GravityEvmConfig, ProviderChainReader};
 
+mod convert;
+pub use convert::ParallelTxEnv;
+
 mod config;
 use alloy_evm::eth::spec::EthExecutorSpec;
 pub use config::{revm_spec, revm_spec_by_timestamp_and_block_number};

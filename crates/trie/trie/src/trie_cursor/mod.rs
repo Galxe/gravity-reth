@@ -15,7 +15,7 @@ pub mod noop;
 pub mod depth_first;
 
 /// Mock trie cursor implementations.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 pub mod mock;
 
 pub use self::{depth_first::DepthFirstTrieIterator, in_memory::*, subnode::CursorSubNode};

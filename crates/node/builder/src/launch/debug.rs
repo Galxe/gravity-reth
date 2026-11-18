@@ -1,7 +1,6 @@
 use super::LaunchNode;
 use crate::{rpc::RethRpcAddOns, EngineNodeLauncher, Node, NodeHandle};
 use alloy_consensus::transaction::Either;
-use alloy_provider::network::AnyNetwork;
 use jsonrpsee::core::{DeserializeOwned, Serialize};
 use reth_chainspec::EthChainSpec;
 use reth_consensus_debug_client::{
@@ -239,19 +238,18 @@ where
         } else if let Some(url) = config.debug.rpc_consensus_url.clone() {
             info!(target: "reth::cli", "Using RPC consensus client: {}", url);
 
-            let block_provider =
-                RpcBlockProvider::<AnyNetwork, _>::new(url.as_str(), |block_response, extras| {
-                    let json = serde_json::to_value(block_response)
-                        .expect("Block serialization cannot fail");
-                    let rpc_block =
-                        serde_json::from_value(json).expect("Block deserialization cannot fail");
-                    let primitive_block = N::Types::rpc_to_primitive_block(rpc_block);
-                    <N::Types as NodeTypes>::Payload::block_to_payload(
-                        SealedBlock::new_unhashed(primitive_block),
-                        extras.bal,
-                    )
-                })
-                .await?;
+            let block_provider = RpcBlockProvider::new(url.as_str(), |block_response, extras| {
+                let json =
+                    serde_json::to_value(block_response).expect("Block serialization cannot fail");
+                let rpc_block =
+                    serde_json::from_value(json).expect("Block deserialization cannot fail");
+                let primitive_block = N::Types::rpc_to_primitive_block(rpc_block);
+                <N::Types as NodeTypes>::Payload::block_to_payload(
+                    SealedBlock::new_unhashed(primitive_block),
+                    extras.bal,
+                )
+            })
+            .await?;
 
             let rpc_consensus_client = DebugConsensusClient::new(
                 handle.node.add_ons_handle.beacon_engine_handle.clone(),
@@ -323,6 +321,7 @@ where
 
             let dev_mining_mode =
                 mining_mode.unwrap_or_else(|| handle.node.config.dev_mining_mode(pool));
+            let finality_depth = config.dev.finality_depth;
             let payload_wait_time = config.dev.payload_wait_time;
             if let (Some(wait_time), Some(block_time)) = (payload_wait_time, config.dev.block_time)
             {
@@ -339,6 +338,7 @@ where
                     dev_mining_mode,
                     payload_builder_handle,
                 )
+                .with_finality_depth(finality_depth)
                 .with_payload_wait_time_opt(payload_wait_time)
                 .run()
                 .await

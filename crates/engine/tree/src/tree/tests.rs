@@ -1538,3 +1538,16 @@ async fn fcu_restores_reorged_out_persisted_head_before_disk_cleanup() {
 async fn fcu_restores_stale_persisted_head_above_shorter_branch() {
     assert_fcu_restores_stale_persisted_head(1).await;
 }
+
+#[test]
+fn test_exceeds_backfill_run_threshold_uses_configured_value() {
+    let mut test_harness = TestHarness::new(MAINNET.clone());
+    let default_threshold = MIN_BLOCKS_FOR_PIPELINE_RUN;
+    assert!(!test_harness.tree.exceeds_backfill_run_threshold(0, default_threshold));
+    assert!(test_harness.tree.exceeds_backfill_run_threshold(0, default_threshold + 1));
+
+    test_harness.tree.config = TreeConfig::default().with_backfill_run_threshold(100);
+    assert!(!test_harness.tree.exceeds_backfill_run_threshold(10, 110));
+    assert!(test_harness.tree.exceeds_backfill_run_threshold(10, 111));
+    assert!(!test_harness.tree.exceeds_backfill_run_threshold(10, 9));
+}

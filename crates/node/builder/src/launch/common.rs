@@ -83,10 +83,7 @@ use reth_stages::{
 };
 use reth_static_file::StaticFileProducer;
 use reth_tasks::TaskExecutor;
-use reth_tracing::{
-    throttle,
-    tracing::{debug, error, info, warn},
-};
+use reth_tracing::tracing::{debug, error, info, warn};
 use reth_transaction_pool::TransactionPool;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::{
@@ -1271,18 +1268,17 @@ where
 /// Returns the metrics hooks for the node.
 pub fn metrics_hooks<N: NodeTypesWithDB>(provider_factory: &ProviderFactory<N>) -> Hooks {
     Hooks::builder()
-        .with_hook({
+        .with_background_interval(Duration::from_secs(5 * 60))
+        .with_background_hook({
             let db = provider_factory.db_ref().clone();
-            move || throttle!(Duration::from_secs(5 * 60), || db.report_metrics())
+            move || db.report_metrics()
         })
-        .with_hook({
+        .with_background_hook({
             let sfp = provider_factory.static_file_provider();
             move || {
-                throttle!(Duration::from_secs(5 * 60), || {
-                    if let Err(error) = sfp.report_metrics() {
-                        error!(%error, "Failed to report metrics from static file provider");
-                    }
-                })
+                if let Err(error) = sfp.report_metrics() {
+                    error!(%error, "Failed to report metrics from static file provider");
+                }
             }
         })
         .build()

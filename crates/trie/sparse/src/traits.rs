@@ -269,6 +269,17 @@ pub struct SparseTrieUpdates {
     pub wiped: bool,
 }
 
+impl SparseTrieUpdates {
+    /// Creates an empty update collection with reserved node capacity.
+    pub fn with_capacity(updated: usize, removed: usize) -> Self {
+        Self {
+            updated_nodes: HashMap::with_capacity_and_hasher(updated, Default::default()),
+            removed_nodes: HashSet::with_capacity_and_hasher(removed, Default::default()),
+            wiped: false,
+        }
+    }
+}
+
 /// Error type for a leaf lookup operation
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LeafLookupError {

@@ -1,7 +1,9 @@
 //! Generic value encoder types for proof calculation with lazy evaluation.
 
 use crate::{
-    hashed_cursor::HashedCursorFactory, prefix_set::PrefixSet, proof_v2::ProofCalculator,
+    hashed_cursor::HashedCursorFactory,
+    prefix_set::PrefixSet,
+    proof_v2::{ProofCalculator, ProofCursorFactory},
     trie_cursor::TrieCursorFactory,
 };
 use alloy_primitives::{map::B256Map, B256, U256};
@@ -119,13 +121,16 @@ pub struct SyncAccountDeferredValueEncoder<T, H> {
 
 impl<T, H> DeferredValueEncoder for SyncAccountDeferredValueEncoder<T, H>
 where
-    T: TrieCursorFactory,
+    T: TrieCursorFactory + Sync,
     H: HashedCursorFactory,
 {
     fn encode(self, buf: &mut Vec<u8>) -> Result<(), StateProofError> {
-        let trie_cursor = self.trie_cursor_factory.storage_trie_cursor(self.hashed_address)?;
-        let hashed_cursor =
-            self.hashed_cursor_factory.hashed_storage_cursor(self.hashed_address)?;
+        let trie_cursor = ProofCursorFactory::new(self.trie_cursor_factory.as_ref())
+            .storage_trie_cursor(self.hashed_address)?;
+        let hashed_cursor = ProofCursorFactory::new(super::cursor::HashedFactoryRef::new(
+            self.hashed_cursor_factory.as_ref(),
+        ))
+        .hashed_storage_cursor(self.hashed_address)?;
 
         let mut storage_proof_calculator = ProofCalculator::new_storage(trie_cursor, hashed_cursor);
         if let Some(prefix_set) = self.storage_prefix_sets.get(&self.hashed_address) {
@@ -145,7 +150,7 @@ where
 
 impl<T, H> LeafValueEncoder for SyncAccountValueEncoder<T, H>
 where
-    T: TrieCursorFactory,
+    T: TrieCursorFactory + Sync,
     H: HashedCursorFactory,
 {
     type Value = Account;

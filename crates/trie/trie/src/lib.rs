@@ -31,6 +31,9 @@ pub mod node_iter;
 /// Merkle proof generation.
 pub mod proof;
 
+/// Proof calculation using decoded V2 nodes and read-only cursor factories.
+pub mod proof_v2;
+
 /// Trie witness generation.
 pub mod witness;
 
@@ -60,15 +63,8 @@ pub mod metrics;
 pub mod test_utils;
 
 /// Collection of mock types for testing.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 pub mod mock;
 
 /// Verification of existing stored trie nodes against state data.
 pub mod verify;
-
-// Keep the retained upstream target-grouping regressions runnable without enabling its proof
-// backend.
-#[cfg(test)]
-#[path = "proof_v2/target.rs"]
-#[allow(dead_code)]
-mod proof_v2_target_tests;
