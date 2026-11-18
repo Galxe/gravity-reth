@@ -11,7 +11,7 @@ use reth_primitives_traits::{NodePrimitives, SignedTransaction};
 use reth_static_file_types::StaticFileSegment;
 use reth_storage_api::{DBProvider, StageCheckpointWriter, TransactionsProviderExt};
 use reth_storage_errors::provider::StaticFileWriterError;
-use revm_database::OriginalValuesKnown;
+use revm::database::OriginalValuesKnown;
 use std::sync::Arc;
 use tracing::debug;
 
@@ -254,16 +254,18 @@ mod tests {
         HashedPostState, HashedStorage, StateRoot, StorageRoot, StorageRootProgress,
     };
     use reth_trie_db::{DatabaseStateRoot, DatabaseStorageRoot};
-    use revm_database::{
-        states::{
-            bundle_state::BundleRetention, changes::PlainStorageRevert, PlainStorageChangeset,
+    use revm::{
+        database::{
+            states::{
+                bundle_state::BundleRetention, changes::PlainStorageRevert, PlainStorageChangeset,
+            },
+            BundleState, State,
         },
-        BundleState, State,
-    };
-    use revm_database_interface::{DatabaseCommit, EmptyDB};
-    use revm_state::{
-        Account as RevmAccount, AccountInfo as RevmAccountInfo, AccountStatus, EvmStorage,
-        EvmStorageSlot, TransactionId,
+        database_interface::{DatabaseCommit, EmptyDB},
+        state::{
+            Account as RevmAccount, AccountInfo as RevmAccountInfo, AccountStatus, EvmStorage,
+            EvmStorageSlot, TransactionId,
+        },
     };
     use std::{collections::BTreeMap, str::FromStr};
 

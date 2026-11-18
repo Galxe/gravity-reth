@@ -14,7 +14,7 @@ use reth_trie::{
     updates::TrieUpdates, AccountProof, HashedPostState, HashedStorage, MultiProof,
     MultiProofTargets, StorageMultiProof, StorageProof, TrieInput,
 };
-use revm_primitives::map::DefaultHashBuilder;
+use revm::primitives::map::DefaultHashBuilder;
 use std::{sync::Arc, time::Duration};
 use tracing::trace;
 

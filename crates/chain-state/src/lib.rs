@@ -8,6 +8,11 @@
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
+// Keep the original component feature edges without enabling broader revm facade features.
+use revm_database as _;
+#[cfg(feature = "revm-state")]
+use revm_state as _;
+
 mod execution_stats;
 pub use execution_stats::ExecutionTimingStats;
 

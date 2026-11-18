@@ -276,6 +276,10 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 
+// Keep the original component feature edges without enabling broader revm facade features.
+use revm_interpreter as _;
+use revm_primitives as _;
+
 pub use imbl::OrdMap;
 
 pub use crate::{

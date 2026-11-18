@@ -25,10 +25,10 @@ reth-trie.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+revm.workspace = true
 alloy-primitives = { workspace = true, features = ["rand"] }
 reth-provider = { workspace = true, features = ["test-utils"] }
 reth-revm = { workspace = true, features = ["test-utils"] }
-revm-state.workspace = true
 
 [features]
 test-utils = [

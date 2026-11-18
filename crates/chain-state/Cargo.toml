@@ -12,6 +12,7 @@ description = "Reth state related types and functionality."
 workspace = true
 
 [dependencies]
+revm.workspace = true
 # reth
 reth-chainspec.workspace = true
 reth-errors.workspace = true
@@ -72,6 +73,7 @@ serde = [
     "revm-database/serde",
     "revm-state?/serde",
     "reth-storage-api/serde",
+    "revm/serde",
 ]
 test-utils = [
     "alloy-primitives/getrandom",

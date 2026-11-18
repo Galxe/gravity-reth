@@ -1180,7 +1180,7 @@ mod tests {
     use alloy_primitives::{map::HashMap, U256};
     use reth_provider::test_utils::{ExtendedAccount, MockEthProvider};
     use reth_revm::db::{AccountStatus, BundleAccount};
-    use revm_state::AccountInfo;
+    use revm::state::AccountInfo;
 
     #[test]
     fn buffered_metrics_count_concurrent_reads_and_drain_once() {

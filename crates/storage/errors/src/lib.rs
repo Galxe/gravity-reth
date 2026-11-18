@@ -9,6 +9,10 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(not(feature = "std"), no_std)]
 
+// Keep the original component feature edges without enabling broader revm facade features.
+use revm_database_interface as _;
+use revm_state as _;
+
 extern crate alloc;
 
 /// Database error

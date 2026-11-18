@@ -12,6 +12,7 @@ description = "Reth storage provider."
 workspace = true
 
 [dependencies]
+revm.workspace = true
 # reth
 reth-chainspec.workspace = true
 reth-execution-types.workspace = true
@@ -40,7 +41,6 @@ alloy-eips.workspace = true
 alloy-primitives.workspace = true
 alloy-rpc-types-engine.workspace = true
 alloy-consensus.workspace = true
-revm-database.workspace = true
 revm-state = { workspace = true, optional = true }
 
 # tracing
@@ -74,7 +74,6 @@ reth-testing-utils.workspace = true
 reth-ethereum-engine-primitives.workspace = true
 reth-ethereum-primitives.workspace = true
 
-revm-database-interface.workspace = true
 revm-state.workspace = true
 
 tempfile.workspace = true

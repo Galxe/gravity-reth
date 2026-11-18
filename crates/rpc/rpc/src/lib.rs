@@ -25,6 +25,9 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 
+// Keep the original component feature edges without enabling broader revm facade features.
+use revm_primitives as _;
+
 mod admin;
 mod aliases;
 mod chain_config;

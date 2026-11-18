@@ -68,7 +68,7 @@ use reth_trie::{
     HashedPostStateSorted, StoredNibbles, StoredNibblesSubKey,
 };
 use reth_trie_db::{nested_hash::NestedStateRoot, DatabaseStorageTrieCursor};
-use revm_database::states::{
+use revm::database::states::{
     PlainStateReverts, PlainStorageChangeset, PlainStorageRevert, StateChangeset,
 };
 use std::{
@@ -3782,7 +3782,7 @@ mod tests {
     fn batched_receipts_keep_recent_blocks_with_log_filter() {
         use reth_ethereum_primitives::Receipt;
         use reth_prune_types::ReceiptsLogPruneConfig;
-        use revm_database::{states::reverts::Reverts, BundleState};
+        use revm::database::{states::reverts::Reverts, BundleState};
 
         let factory = create_test_provider_factory().with_prune_modes(PruneModes {
             receipts_log_filter: ReceiptsLogPruneConfig(BTreeMap::from([(
@@ -3824,8 +3824,10 @@ mod tests {
 
     #[test]
     fn merged_history_groups_repeated_keys_and_includes_wiped_slots() -> eyre::Result<()> {
-        use revm_database::{states::AccountStatus, BundleState};
-        use revm_state::AccountInfo;
+        use revm::{
+            database::{states::AccountStatus, BundleState},
+            state::AccountInfo,
+        };
 
         for changesets_in_static_files in [false, true] {
             let factory = create_test_provider_factory();

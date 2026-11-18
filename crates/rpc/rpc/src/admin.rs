@@ -13,7 +13,7 @@ use reth_network_types::PeerKind;
 use reth_rpc_api::AdminApiServer;
 use reth_rpc_server_types::ToRpcResult;
 use reth_transaction_pool::TransactionPool;
-use revm_primitives::keccak256;
+use revm::primitives::keccak256;
 
 /// `admin` API implementation.
 ///

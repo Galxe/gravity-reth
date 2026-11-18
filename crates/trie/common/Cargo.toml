@@ -12,6 +12,7 @@ description = "Commonly used types for trie usage in reth."
 workspace = true
 
 [dependencies]
+revm.workspace = true
 # alloy
 alloy-primitives.workspace = true
 alloy-rlp = { workspace = true, features = ["arrayvec"] }
@@ -95,6 +96,7 @@ std = [
     "reth-codecs?/std",
     "thiserror/std",
     "alloy-eips/std",
+    "revm/std",
 ]
 eip1186 = ["alloy-rpc-types-eth/serde", "dep:alloy-serde"]
 serde = [
@@ -111,6 +113,7 @@ serde = [
     "revm-state/serde",
     "parking_lot/serde",
     "alloy-eips/serde",
+    "revm/serde",
 ]
 reth-codec = ["dep:reth-codecs", "reth-codecs/alloy", "dep:bytes"]
 serde-bincode-compat = [
@@ -142,6 +145,7 @@ arbitrary = [
     "reth-codecs/arbitrary",
     "alloy-rpc-types-eth?/arbitrary",
     "alloy-eips/arbitrary",
+    "revm/arbitrary",
 ]
 rayon = ["dep:rayon"]
 

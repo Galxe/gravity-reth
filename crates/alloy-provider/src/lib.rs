@@ -1716,9 +1716,9 @@ where
                 Ok(None)
             } else {
                 let code_hash = if account_info.code.is_empty() {
-                    revm_primitives::KECCAK_EMPTY
+                    revm::primitives::KECCAK_EMPTY
                 } else {
-                    revm_primitives::keccak256(&account_info.code)
+                    revm::primitives::keccak256(&account_info.code)
                 };
 
                 Ok(Some(revm::state::AccountInfo {

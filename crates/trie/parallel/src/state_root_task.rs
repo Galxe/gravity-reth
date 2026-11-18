@@ -5,7 +5,7 @@ use alloy_primitives::{keccak256, B256};
 use derive_more::derive::Deref;
 use reth_trie::{updates::TrieUpdates, HashedPostState, HashedStorage};
 use reth_trie_common::MultiProofTargetsV2;
-use revm_state::EvmState;
+use revm::state::EvmState;
 use std::sync::Arc;
 use tracing::trace;
 

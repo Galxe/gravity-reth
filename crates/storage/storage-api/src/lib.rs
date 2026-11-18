@@ -9,6 +9,10 @@
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 #![cfg_attr(not(feature = "std"), no_std)]
 
+// Keep the original component feature edges without enabling broader revm facade features.
+use revm_bytecode as _;
+use revm_database as _;
+
 extern crate alloc;
 
 // Re-export used error types.

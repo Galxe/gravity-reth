@@ -666,8 +666,10 @@ mod tests {
     };
     use reth_testing_utils::generators;
     use reth_trie::{test_utils::state_root, HashedPostState, TrieInput};
-    use revm_primitives::{Address, HashMap, B256, KECCAK_EMPTY, U256};
-    use revm_state::{AccountInfo, AccountStatus, EvmState, EvmStorageSlot, TransactionId};
+    use revm::{
+        primitives::{Address, HashMap, B256, KECCAK_EMPTY, U256},
+        state::{AccountInfo, AccountStatus, EvmState, EvmStorageSlot, TransactionId},
+    };
     use std::sync::Arc;
 
     fn make_saved_cache(hash: B256) -> SavedCache {
@@ -768,7 +770,7 @@ mod tests {
                     }
                 }
 
-                let mut account = revm_state::Account::default();
+                let mut account = revm::state::Account::default();
                 account.info = AccountInfo {
                     balance: U256::from(rng.random::<u64>()),
                     nonce: rng.random::<u64>(),

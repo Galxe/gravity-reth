@@ -6,9 +6,11 @@ use alloy_primitives::{B256, U256};
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
 use proptest::test_runner::TestRunner;
 use rand::Rng;
-use revm_primitives::{Address, HashMap};
-use revm_state::{
-    Account, AccountInfo, AccountStatus, EvmState, EvmStorage, EvmStorageSlot, TransactionId,
+use revm::{
+    primitives::{Address, HashMap},
+    state::{
+        Account, AccountInfo, AccountStatus, EvmState, EvmStorage, EvmStorageSlot, TransactionId,
+    },
 };
 use std::{hint::black_box, thread};
 

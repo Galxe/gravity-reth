@@ -1,10 +1,11 @@
-use alloy_eips::{eip7928::BAL_RETENTION_PERIOD_SLOTS, NumHash};
+use alloy_eips::{
+    eip7928::{bal::RawBal, BAL_RETENTION_PERIOD_SLOTS},
+    NumHash,
+};
 use alloy_primitives::{map::B256Map, BlockHash, BlockNumber, Bytes};
 use parking_lot::RwLock;
 use reth_prune_types::PruneMode;
-use reth_storage_api::{
-    BalNotification, BalNotificationStream, BalStore, GetBlockAccessListLimit, SealedBal,
-};
+use reth_storage_api::{BalNotification, BalNotificationStream, BalStore, GetBlockAccessListLimit};
 use reth_storage_errors::provider::ProviderResult;
 use reth_tokio_util::EventSender;
 use std::{collections::BTreeMap, sync::Arc};
@@ -125,9 +126,9 @@ struct BalEntry {
 }
 
 impl BalStore for InMemoryBalStore {
-    fn insert(&self, num_hash: NumHash, bal: SealedBal) -> ProviderResult<()> {
+    fn insert(&self, num_hash: NumHash, bal: RawBal) -> ProviderResult<()> {
         let mut inner = self.inner.write();
-        inner.insert(num_hash.hash, num_hash.number, bal.clone_inner());
+        inner.insert(num_hash.hash, num_hash.number, bal.as_raw().clone());
         if let Some(highest_block_number) = inner.highest_block_number {
             // This preserves insert-time cleanup based on the highest inserted BAL block.
             inner.prune(self.config.in_memory_retention, highest_block_number);
@@ -136,7 +137,7 @@ impl BalStore for InMemoryBalStore {
         Ok(())
     }
 
-    fn insert_many(&self, entries: Vec<(NumHash, SealedBal)>) -> ProviderResult<()> {
+    fn insert_many(&self, entries: Vec<(NumHash, RawBal)>) -> ProviderResult<()> {
         if entries.is_empty() {
             return Ok(())
         }
@@ -144,7 +145,7 @@ impl BalStore for InMemoryBalStore {
         let mut inner = self.inner.write();
         inner.entries.reserve(entries.len());
         for (num_hash, bal) in &entries {
-            inner.insert(num_hash.hash, num_hash.number, bal.clone_inner());
+            inner.insert(num_hash.hash, num_hash.number, bal.as_raw().clone());
         }
         if let Some(highest_block_number) = inner.highest_block_number {
             inner.prune(self.config.in_memory_retention, highest_block_number);
@@ -206,11 +207,11 @@ impl BalStore for InMemoryBalStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::{keccak256, Sealed, B256};
+    use alloy_primitives::B256;
     use tokio_stream::StreamExt;
 
-    fn sealed_bal(bal: Bytes) -> SealedBal {
-        Sealed::new_unchecked(bal.clone(), keccak256(&bal))
+    fn sealed_bal(bal: Bytes) -> RawBal {
+        RawBal::new(bal)
     }
 
     #[test]
@@ -242,7 +243,7 @@ mod tests {
 
         assert_eq!(
             store.get_by_hashes(&[hash0, hash1]).unwrap(),
-            vec![Some(bal0.clone_inner()), Some(Bytes::from_static(b"bal1"))]
+            vec![Some(bal0.as_raw().clone()), Some(Bytes::from_static(b"bal1"))]
         );
     }
 

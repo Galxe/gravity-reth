@@ -13,6 +13,9 @@
 )]
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 
+// Keep the original component feature edges without enabling broader revm facade features.
+use revm_database as _;
+
 /// The implementation of forward-only in-memory cursor.
 pub mod forward_cursor;
 

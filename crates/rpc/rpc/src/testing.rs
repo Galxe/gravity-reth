@@ -46,8 +46,7 @@ use reth_rpc_eth_api::{helpers::Call, FromEthApiError};
 use reth_rpc_eth_types::EthApiError;
 use reth_storage_api::{BlockReader, BlockReaderIdExt, HeaderProvider};
 use reth_transaction_pool::{BestTransactionsAttributes, PoolTransaction, TransactionPool};
-use revm::context::Block;
-use revm_primitives::map::DefaultHashBuilder;
+use revm::{context::Block, primitives::map::DefaultHashBuilder};
 use std::sync::Arc;
 use tracing::debug;
 

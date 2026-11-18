@@ -35,7 +35,6 @@ use reth_primitives_traits::ReceiptTy;
 use reth_provider::BlockExecutionOutput;
 use reth_tasks::Runtime;
 use revm::{
-    bytecode::BytecodeDecodeError,
     context::{result::ResultAndState, Block},
     database::{states::bundle_state::BundleRetention, State},
     state::bal::Bal as RevmBal,
@@ -225,9 +224,7 @@ fn convert_alloy_to_revm_bal(bal: &AlloyBal) -> Result<Arc<RevmBal>, BalExecutio
     // is triggered then the execution is reverted, and as such no actual code change event takes
     // place. Therefore, if we do observe such a bytecode in a BAL then that means the BAL is
     // invalid as no legal execution should've led to this bytecode deployment.
-    let alloy_bal: Vec<_> = Vec::<_>::from(bal.clone());
-    let received_bal_revm = RevmBal::try_from(alloy_bal).map_err(|e| {
-        let e: BytecodeDecodeError = e;
+    let received_bal_revm = RevmBal::clone_from_alloy(bal.as_vec()).map_err(|e| {
         BalExecutionError::Consensus(reth_consensus::ConsensusError::BlockAccessListInvalid(
             format!("{e:?}"),
         ))
@@ -348,6 +345,59 @@ mod tests {
         state::{AccountInfo, Bytecode},
     };
     use std::convert::Infallible;
+
+    #[test]
+    fn borrowed_bal_conversion_preserves_owned_conversion_and_source() {
+        use alloy_eip7928::{
+            AccountChanges, BalanceChange, BlockAccessIndex, CodeChange, NonceChange, SlotChanges,
+            StorageChange,
+        };
+        use alloy_primitives::{Address, Bytes};
+
+        let address = Address::repeat_byte(1);
+        let index = BlockAccessIndex::from_tx_index(0);
+        let entries = vec![AccountChanges::new(address)
+            .with_storage_read(U256::from(7))
+            .with_storage_change(SlotChanges::new(
+                U256::from(8),
+                vec![StorageChange::new(index, U256::from(9))],
+            ))
+            .with_balance_change(BalanceChange::new(index, U256::from(10)))
+            .with_nonce_change(NonceChange::new(index, 11))
+            .with_code_change(CodeChange::new(index, Bytes::from_static(&[0x60, 0x00])))];
+        let source: AlloyBal = entries.clone().into();
+        let raw_before = alloy_rlp::encode(&source);
+        let expected = RevmBal::try_from(entries).unwrap();
+
+        let converted = convert_alloy_to_revm_bal(&source).unwrap();
+
+        assert_eq!(converted.as_ref(), &expected);
+        assert_eq!(converted.accounts.len(), 1);
+        assert_eq!(converted.accounts[&address].storage.storage.len(), 2);
+        assert_eq!(alloy_rlp::encode(&source), raw_before);
+    }
+
+    #[test]
+    fn borrowed_bal_conversion_rejects_malformed_delegation_code() {
+        use alloy_eip7928::{AccountChanges, BlockAccessIndex, CodeChange};
+        use alloy_primitives::{Address, Bytes};
+
+        // The EIP-7702 marker requires a complete delegation designation, not just its prefix.
+        let entries = vec![AccountChanges::new(Address::repeat_byte(1)).with_code_change(
+            CodeChange::new(BlockAccessIndex::from_tx_index(0), Bytes::from_static(&[0xef, 0x01])),
+        )];
+        let source: AlloyBal = entries.clone().into();
+        let raw_before = alloy_rlp::encode(&source);
+        assert!(RevmBal::try_from(entries).is_err());
+
+        assert!(matches!(
+            convert_alloy_to_revm_bal(&source),
+            Err(BalExecutionError::Consensus(
+                reth_consensus::ConsensusError::BlockAccessListInvalid(_)
+            ))
+        ));
+        assert_eq!(alloy_rlp::encode(&source), raw_before);
+    }
 
     /// Wraps a `BlockAccessList` into an `Arc<DecodedBal>` by RLP-encoding the BAL.
     fn to_arc_decoded(bal: BlockAccessList) -> Arc<DecodedBal> {
@@ -1420,10 +1470,12 @@ mod tests {
         // All-state-gas results keep block_regular_gas_used at 0, so a second tx that fits
         // within the block limit but not the remaining cumulative budget proves that
         // non-Amsterdam reads cumulative_tx_gas_used while Amsterdam does not.
-        use revm::context::result::{
-            ExecResultAndState, ExecutionResult, Output, ResultGas, SuccessReason,
+        use revm::{
+            context::result::{
+                ExecResultAndState, ExecutionResult, Output, ResultGas, SuccessReason,
+            },
+            state::EvmState,
         };
-        use revm_state::EvmState;
 
         let block_gas_limit = 1_000_000u64;
         let first_tx_gas = 600_000u64;
@@ -1467,8 +1519,8 @@ mod tests {
                 ExecResultAndState, ExecutionResult, Output, ResultGas, SuccessReason,
             },
             primitives::eip7825::TX_GAS_LIMIT_CAP,
+            state::EvmState,
         };
-        use revm_state::EvmState;
 
         let block_gas_limit = 30_000_000u64;
         let oversized = TX_GAS_LIMIT_CAP + 1_000_000; // 17_777_216 — above the cap

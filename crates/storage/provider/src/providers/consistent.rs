@@ -33,7 +33,7 @@ use reth_storage_api::{
     StorageChangeSetReader, TryIntoHistoricalStateProvider,
 };
 use reth_storage_errors::provider::ProviderResult;
-use revm_database::states::PlainStorageRevert;
+use revm::database::states::PlainStorageRevert;
 use std::{
     ops::{Bound, RangeBounds, RangeInclusive},
     sync::Arc,
@@ -1659,7 +1659,7 @@ mod tests {
     use reth_testing_utils::generators::{
         self, random_block_range, random_changeset_range, random_eoa_accounts, BlockRangeParams,
     };
-    use revm_database::BundleState;
+    use revm::database::BundleState;
     use std::{
         ops::{Bound, Range, RangeBounds},
         sync::Arc,
@@ -2063,7 +2063,7 @@ mod empty_receipt_range_tests {
     };
     use reth_stages_types::StageId;
     use reth_testing_utils::generators::{self, random_block, random_receipt, BlockParams};
-    use revm_database::OriginalValuesKnown;
+    use revm::database::OriginalValuesKnown;
 
     #[test]
     fn get_state_preserves_empty_block_receipts() -> eyre::Result<()> {
