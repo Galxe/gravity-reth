@@ -41,7 +41,6 @@ reth-consensus-common.workspace = true
 reth-ethereum-primitives.workspace = true
 reth-ethereum-engine-primitives.workspace = true
 reth-payload-primitives.workspace = true
-reth-node-api.workspace = true
 reth-trie-common.workspace = true
 
 # ethereum

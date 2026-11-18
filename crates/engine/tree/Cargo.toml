@@ -39,11 +39,13 @@ reth-pipe-exec-layer-event-bus.workspace = true
 gravity-primitives.workspace = true
 reth-trie-sparse-parallel = { workspace = true, features = ["std"] }
 reth-trie.workspace = true
+reth-trie-common.workspace = true
 
 # alloy
 alloy-evm.workspace = true
 alloy-consensus.workspace = true
 alloy-eips.workspace = true
+alloy-eip7928.workspace = true
 alloy-primitives.workspace = true
 alloy-rlp.workspace = true
 alloy-rpc-types-engine.workspace = true
@@ -152,6 +154,7 @@ test-utils = [
     "reth-evm-ethereum/test-utils",
     "reth-tasks/test-utils",
     "reth-execution-cache/test-utils",
+    "reth-trie-common/test-utils",
 ]
 failpoints = ["fail/failpoints", "reth-db/failpoints"]
 

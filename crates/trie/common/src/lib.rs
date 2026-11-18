@@ -61,6 +61,9 @@ pub use proofs::*;
 
 pub mod root;
 
+/// Incremental ordered transaction and receipt trie roots.
+pub mod ordered_root;
+
 /// Buffer for trie updates.
 pub mod updates;
 

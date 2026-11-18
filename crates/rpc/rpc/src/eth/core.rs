@@ -13,7 +13,6 @@ use derive_more::Deref;
 use reth_chainspec::{ChainSpec, ChainSpecProvider};
 use reth_evm_ethereum::EthEvmConfig;
 use reth_network_api::noop::NoopNetwork;
-use reth_node_api::{FullNodeComponents, FullNodeTypes};
 use reth_rpc_convert::{RpcConvert, RpcConverter};
 use reth_rpc_eth_api::{
     helpers::{pending_block::PendingEnvBuilder, spec::SignersForRpc, SpawnBlocking},
@@ -36,20 +35,6 @@ use reth_transaction_pool::{
 use tokio::sync::{broadcast, mpsc, Mutex, Semaphore};
 
 const DEFAULT_BROADCAST_CAPACITY: usize = 2000;
-
-/// Helper type alias for [`RpcConverter`] with components from the given [`FullNodeComponents`].
-pub type EthRpcConverterFor<N, NetworkT = Ethereum> = RpcConverter<
-    NetworkT,
-    <N as FullNodeComponents>::Evm,
-    EthReceiptConverter<<<N as FullNodeTypes>::Provider as ChainSpecProvider>::ChainSpec>,
->;
-
-/// Helper type alias for [`EthApi`] with components from the given [`FullNodeComponents`].
-pub type EthApiFor<N, NetworkT = Ethereum> = EthApi<N, EthRpcConverterFor<N, NetworkT>>;
-
-/// Helper type alias for [`EthApi`] with components from the given [`FullNodeComponents`].
-pub type EthApiBuilderFor<N, NetworkT = Ethereum> =
-    EthApiBuilder<N, EthRpcConverterFor<N, NetworkT>>;
 
 /// `Eth` API implementation.
 ///
@@ -921,6 +906,83 @@ mod tests {
             for block in &result {
                 assert_eq!(block.inner.header.hash, block.inner.header.inner.hash_slow());
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn simulate_transfer_logs_across_amsterdam() {
+        use alloy_rpc_types_eth::simulate::{SimBlock, SimulatePayload, SimulatedBlock};
+        let provider = MockEthProvider::default().with_chain_spec(
+            ChainSpecBuilder::mainnet().osaka_activated().with_amsterdam_at(24).build(),
+        );
+        let header = Header {
+            number: 0,
+            timestamp: 0,
+            gas_limit: 30_000_000,
+            base_fee_per_gas: Some(0),
+            excess_blob_gas: Some(0),
+            blob_gas_used: Some(0),
+            parent_beacon_block_root: Some(B256::ZERO),
+            ..Default::default()
+        };
+        provider.add_block(header.hash_slow(), Block { header, body: BlockBody::default() });
+        let api = build_test_eth_api(provider);
+        let from = Address::with_last_byte(0x41);
+        let to = Address::with_last_byte(0x42);
+        let reverting = Address::with_last_byte(0x43);
+        let call_block = SimBlock::default()
+            .with_state_overrides(StateOverride::from_iter([
+                (from, AccountOverride::default().with_balance(U256::from(100)).with_nonce(0)),
+                (
+                    reverting,
+                    AccountOverride::default().with_code(alloy_primitives::bytes!("5f5ffd")),
+                ),
+            ]))
+            .call(TransactionRequest::default().from(from).to(to).value(U256::from(1)))
+            .call(TransactionRequest::default().from(from).to(reverting).value(U256::from(1)));
+        let mut untraced: Option<Vec<SimulatedBlock>> = None;
+        for trace_transfers in [false, true] {
+            let mut payload = SimulatePayload::default()
+                .extend(call_block.clone())
+                .extend(call_block.clone())
+                .extend(call_block.clone());
+            payload.trace_transfers = trace_transfers;
+            let result =
+                EthCall::simulate_v1(&api, payload, Some(BlockId::latest())).await.unwrap();
+            assert_eq!(result.len(), 3);
+            for (index, block) in result.iter().enumerate() {
+                assert_eq!(block.inner.header.timestamp, (index as u64 + 1) * 12);
+                assert!(block.calls[0].status);
+                let logs = &block.calls[0].logs;
+                if index == 0 && !trace_transfers {
+                    assert!(logs.is_empty());
+                } else {
+                    assert_eq!(logs.len(), 1);
+                    let emitter = if index == 0 {
+                        Address::repeat_byte(0xee)
+                    } else {
+                        revm::primitives::eip7708::ETH_TRANSFER_LOG_ADDRESS
+                    };
+                    assert_eq!(logs[0].address(), emitter);
+                }
+                assert!(!block.calls[1].status);
+                assert!(block.calls[1].logs.is_empty());
+                if index > 0 {
+                    assert!(!block.inner.header.logs_bloom.is_zero());
+                    if let Some(untraced) = &untraced {
+                        assert_eq!(logs[0].inner, untraced[index].calls[0].logs[0].inner);
+                        assert_eq!(
+                            block.inner.header.logs_bloom,
+                            untraced[index].inner.header.logs_bloom
+                        );
+                        assert_eq!(
+                            block.inner.header.receipts_root,
+                            untraced[index].inner.header.receipts_root
+                        );
+                    }
+                }
+            }
+            untraced = Some(result);
         }
     }
 

@@ -319,12 +319,13 @@ mod tests {
             trie_factory.storage_trie_cursor(a).unwrap(),
             hashed_factory.hashed_storage_cursor(a).unwrap(),
         );
-        for (address, expected) in [
+        let cases = [
             (a, crate::test_utils::storage_root_prehashed(slots_a)),
             (b, crate::test_utils::storage_root_prehashed(slots_b)),
             (missing, EMPTY_ROOT_HASH),
             (a, crate::test_utils::storage_root_prehashed(slots_a)),
-        ] {
+        ];
+        for (address, expected) in cases {
             let root = calculator.storage_root_node(address).unwrap();
             assert_eq!(
                 calculator.compute_root_hash(core::slice::from_ref(&root)).unwrap(),
@@ -332,6 +333,29 @@ mod tests {
             );
             let again = calculator.root_node(&mut StorageValueEncoder).unwrap();
             assert_eq!(root, again);
+        }
+
+        // The opt-in observers must preserve the same reset/rebind contract as their inner
+        // factory wrappers, including when an address has no storage.
+        let mut trie_cache = crate::trie_cursor::metrics::TrieCursorMetricsCache::default();
+        let mut hashed_cache = crate::hashed_cursor::metrics::HashedCursorMetricsCache::default();
+        let mut calculator = StorageProofCalculator::new_storage(
+            crate::trie_cursor::metrics::InstrumentedTrieCursor::new(
+                trie_factory.storage_trie_cursor(a).unwrap(),
+                &mut trie_cache,
+            ),
+            crate::hashed_cursor::metrics::InstrumentedHashedCursor::new(
+                hashed_factory.hashed_storage_cursor(a).unwrap(),
+                &mut hashed_cache,
+            ),
+        );
+        for (address, expected) in cases {
+            let root = calculator.storage_root_node(address).unwrap();
+            assert_eq!(
+                calculator.compute_root_hash(core::slice::from_ref(&root)).unwrap(),
+                Some(expected)
+            );
+            assert_eq!(root, calculator.root_node(&mut StorageValueEncoder).unwrap());
         }
     }
 
@@ -400,5 +424,66 @@ mod tests {
         assert!(account_hashed.seek(B256::ZERO).unwrap().is_none());
         assert!(storage_trie.seek(Nibbles::default()).unwrap().is_none());
         assert!(storage_hashed.is_storage_empty().unwrap());
+    }
+    #[test]
+    fn instrumented_reset_and_rebind_preserve_factory_errors() {
+        use crate::{
+            hashed_cursor::metrics::{HashedCursorMetricsCache, InstrumentedHashedCursor},
+            trie_cursor::metrics::{InstrumentedTrieCursor, TrieCursorMetricsCache},
+        };
+        let factory = FailingFactory::default();
+        let proof = ProofCursorFactory::new(factory.clone());
+        let mut account_trie_cache = TrieCursorMetricsCache::default();
+        let mut storage_trie_cache = TrieCursorMetricsCache::default();
+        let mut account_hashed_cache = HashedCursorMetricsCache::default();
+        let mut storage_hashed_cache = HashedCursorMetricsCache::default();
+        {
+            let mut account_trie = InstrumentedTrieCursor::new(
+                proof.account_trie_cursor().unwrap(),
+                &mut account_trie_cache,
+            );
+            let mut storage_trie = InstrumentedTrieCursor::new(
+                proof.storage_trie_cursor(B256::ZERO).unwrap(),
+                &mut storage_trie_cache,
+            );
+            let mut account_hashed = InstrumentedHashedCursor::new(
+                proof.hashed_account_cursor().unwrap(),
+                &mut account_hashed_cache,
+            );
+            let mut storage_hashed = InstrumentedHashedCursor::new(
+                proof.hashed_storage_cursor(B256::ZERO).unwrap(),
+                &mut storage_hashed_cache,
+            );
+            factory.0.store(true, Ordering::Relaxed);
+            fn assert_factory_error<T: std::fmt::Debug>(result: Result<T, DatabaseError>) {
+                match result {
+                    Err(DatabaseError::Other(message)) => assert_eq!(message, "factory failed"),
+                    other => panic!("expected original factory error, got {other:?}"),
+                }
+            }
+            assert_factory_error(account_trie.reset());
+            assert_factory_error(account_hashed.reset());
+            assert_factory_error(storage_trie.set_hashed_address(B256::repeat_byte(1)));
+            assert_factory_error(storage_hashed.set_hashed_address(B256::repeat_byte(1)));
+            assert_factory_error(account_trie.seek(Nibbles::new()));
+            assert_factory_error(account_hashed.seek(B256::ZERO));
+            assert_factory_error(storage_trie.current());
+            assert_factory_error(storage_hashed.is_storage_empty());
+            factory.0.store(false, Ordering::Relaxed);
+            account_trie.reset().unwrap();
+            account_hashed.reset().unwrap();
+            storage_trie.reset().unwrap();
+            storage_hashed.reset().unwrap();
+            assert!(account_trie.seek(Nibbles::new()).unwrap().is_none());
+            assert!(account_hashed.seek(B256::ZERO).unwrap().is_none());
+            assert!(storage_trie.seek(Nibbles::new()).unwrap().is_none());
+            assert!(storage_hashed.is_storage_empty().unwrap());
+        }
+        // Failed read attempts count too. Reset/rebind neither suppress errors nor clear
+        // counters, and the uninstrumented current() operation adds no seek/next count.
+        assert_eq!(account_trie_cache.seek_count, 2);
+        assert_eq!(account_hashed_cache.seek_count, 2);
+        assert_eq!(storage_trie_cache.seek_count, 1);
+        assert_eq!(storage_hashed_cache.is_storage_empty_count, 2);
     }
 }

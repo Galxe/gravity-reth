@@ -48,11 +48,13 @@ use std::sync::{
 };
 use tracing::{debug, debug_span, instrument, trace_span, Span};
 
+pub mod bal;
 pub mod bal_prewarm_pool;
 mod configured_sparse_trie;
 pub mod executor;
 pub mod multiproof;
 pub mod prewarm;
+pub mod receipt_root_task;
 pub mod sparse_trie;
 
 use configured_sparse_trie::ConfiguredSparseTrie;

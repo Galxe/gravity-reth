@@ -27,18 +27,15 @@ use reth_node_builder::{
     node::{FullNodeTypes, NodeTypes},
     rpc::{
         BasicEngineApiBuilder, BasicEngineValidatorBuilder, Either, EngineApiBuilder,
-        EngineValidatorAddOn, EngineValidatorBuilder, EthApiBuilder, EthApiCtx, Identity,
-        PayloadValidatorBuilder, RethAuthHttpMiddleware, RethRpcAddOns, RethRpcMiddleware,
-        RpcAddOns, RpcHandle, Stack,
+        EngineValidatorAddOn, EngineValidatorBuilder, EthApiBuilder, EthApiCtx, EthApiFor,
+        EthRpcConverterFor, Identity, PayloadValidatorBuilder, RethAuthHttpMiddleware,
+        RethRpcAddOns, RethRpcMiddleware, RpcAddOns, RpcHandle, Stack,
     },
     BuilderContext, DebugNode, Node, NodeAdapter, PayloadBuilderConfig,
 };
 use reth_payload_primitives::PayloadTypes;
 use reth_provider::{providers::ProviderFactoryBuilder, EthStorage, ProviderReadView};
-use reth_rpc::{
-    eth::core::{EthApiFor, EthRpcConverterFor},
-    TestingApi, ValidationApi,
-};
+use reth_rpc::{TestingApi, ValidationApi};
 use reth_rpc_api::servers::{BlockSubmissionValidationApiServer, TestingApiServer};
 use reth_rpc_builder::config::RethRpcServerConfig;
 use reth_rpc_eth_api::{

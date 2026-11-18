@@ -49,6 +49,7 @@ once_cell.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+alloy-eips.workspace = true
 reth-primitives-traits = { workspace = true, features = ["serde"] }
 reth-codecs = { workspace = true, features = ["alloy"] }
 alloy-genesis.workspace = true
@@ -93,6 +94,7 @@ std = [
     "once_cell/std",
     "reth-codecs?/std",
     "thiserror/std",
+    "alloy-eips/std",
 ]
 eip1186 = ["alloy-rpc-types-eth/serde", "dep:alloy-serde"]
 serde = [
@@ -108,6 +110,7 @@ serde = [
     "revm-database/serde",
     "revm-state/serde",
     "parking_lot/serde",
+    "alloy-eips/serde",
 ]
 reth-codec = ["dep:reth-codecs", "reth-codecs/alloy", "dep:bytes"]
 serde-bincode-compat = [
@@ -117,6 +120,7 @@ serde-bincode-compat = [
     "dep:serde_with",
     "alloy-genesis/serde-bincode-compat",
     "alloy-rpc-types-eth?/serde-bincode-compat",
+    "alloy-eips/serde-bincode-compat",
 ]
 test-utils = [
     "dep:plain_hasher",
@@ -137,6 +141,7 @@ arbitrary = [
     "nybbles/arbitrary",
     "reth-codecs/arbitrary",
     "alloy-rpc-types-eth?/arbitrary",
+    "alloy-eips/arbitrary",
 ]
 rayon = ["dep:rayon"]
 

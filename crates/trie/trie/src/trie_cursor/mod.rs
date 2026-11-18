@@ -2,6 +2,9 @@ use crate::{BranchNodeCompact, Nibbles};
 use alloy_primitives::B256;
 use reth_storage_errors::db::DatabaseError;
 
+/// Opt-in observers for trie cursor operations.
+pub mod metrics;
+
 /// In-memory implementations of trie cursors.
 mod in_memory;
 
