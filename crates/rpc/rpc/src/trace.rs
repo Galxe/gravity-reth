@@ -24,7 +24,7 @@ use reth_primitives_traits::{BlockBody, BlockHeader};
 use reth_rpc_api::TraceApiServer;
 use reth_rpc_convert::RpcTxReq;
 use reth_rpc_eth_api::{
-    helpers::{Call, LoadPendingBlock, LoadTransaction, Trace, TraceExt},
+    helpers::{LoadTransaction, Trace, TraceExt},
     FromEthApiError, RpcNodeCore,
 };
 use reth_rpc_eth_types::{error::EthApiError, utils::CallManyBudget, EthConfig};
@@ -92,7 +92,7 @@ impl<Eth> TraceApi<Eth>
 where
     // tracing methods do _not_ read from mempool, hence no `LoadBlock` trait
     // bound
-    Eth: Trace + Call + LoadPendingBlock + LoadTransaction + 'static,
+    Eth: Trace + LoadTransaction,
 {
     /// Executes the given call and returns a number of possible traces for it.
     pub async fn trace_call(
@@ -371,7 +371,7 @@ impl<Eth> TraceApi<Eth>
 where
     // tracing methods read from mempool, hence `LoadBlock` trait bound via
     // `TraceExt`
-    Eth: TraceExt + 'static,
+    Eth: TraceExt,
 {
     /// Returns all transaction traces that match the given filter.
     ///
@@ -721,7 +721,7 @@ fn apply_trace_filter_pagination(
 #[async_trait]
 impl<Eth> TraceApiServer<RpcTxReq<Eth::NetworkTypes>> for TraceApi<Eth>
 where
-    Eth: TraceExt + 'static,
+    Eth: TraceExt,
 {
     /// Executes the given call and returns a number of possible traces for it.
     ///
@@ -893,15 +893,18 @@ pub struct BlockStorageAccess {
 mod tests {
     use super::*;
     use crate::EthApiBuilder;
-    use alloy_consensus::Header;
+    use alloy_consensus::{Header, TxLegacy};
     use alloy_genesis::Genesis;
+    use alloy_primitives::{Signature, TxKind};
     use alloy_rpc_types_eth::TransactionRequest;
+    use reth_chain_state::CanonStateNotification;
     use reth_chainspec::ChainSpecBuilder;
     use reth_db_common::init::init_genesis;
-    use reth_ethereum_primitives::{Block, BlockBody};
+    use reth_ethereum_primitives::{Block, BlockBody, TransactionSigned};
     use reth_evm_ethereum::EthEvmConfig;
+    use reth_execution_types::{Chain, ExecutionOutcome};
     use reth_network_api::noop::NoopNetwork;
-    use reth_primitives_traits::Block as _;
+    use reth_primitives_traits::{Block as _, RecoveredBlock, SignerRecoverable};
     use reth_provider::{
         providers::BlockchainProvider,
         test_utils::{
@@ -909,6 +912,7 @@ mod tests {
         },
         BlockWriter, StageCheckpointWriter,
     };
+    use reth_rpc_eth_types::cache::cache_new_blocks_task;
     use reth_transaction_pool::test_utils::testing_pool;
 
     #[tokio::test]
@@ -993,19 +997,6 @@ mod tests {
 
     #[tokio::test]
     async fn trace_get_selects_tree_paths() {
-        use crate::EthApiBuilder;
-        use alloy_consensus::{Header, TxLegacy};
-        use alloy_primitives::{Signature, TxKind};
-        use reth_chain_state::CanonStateNotification;
-        use reth_ethereum_primitives::{Block, BlockBody, TransactionSigned};
-        use reth_evm_ethereum::EthEvmConfig;
-        use reth_execution_types::{Chain, ExecutionOutcome};
-        use reth_network_api::noop::NoopNetwork;
-        use reth_primitives_traits::{RecoveredBlock, SignerRecoverable};
-        use reth_provider::test_utils::{ExtendedAccount, MockEthProvider};
-        use reth_rpc_eth_types::cache::cache_new_blocks_task;
-        use reth_transaction_pool::test_utils::testing_pool;
-
         let provider = MockEthProvider::default();
         // The root calls 0x43 (which calls 0x44), then calls 0x45.
         for (address, code) in [
@@ -1092,12 +1083,6 @@ mod tests {
 
     #[tokio::test]
     async fn replay_missing_transaction_returns_null() {
-        use crate::EthApiBuilder;
-        use reth_evm_ethereum::EthEvmConfig;
-        use reth_network_api::noop::NoopNetwork;
-        use reth_provider::test_utils::MockEthProvider;
-        use reth_transaction_pool::test_utils::testing_pool;
-
         let provider = MockEthProvider::default();
         let eth_api = EthApiBuilder::new(
             provider.clone(),
@@ -1123,19 +1108,6 @@ mod tests {
 
     #[tokio::test]
     async fn replay_transaction_includes_transaction_hash() {
-        use crate::EthApiBuilder;
-        use alloy_consensus::{Header, TxLegacy};
-        use alloy_primitives::{Signature, TxKind};
-        use reth_chain_state::CanonStateNotification;
-        use reth_ethereum_primitives::{Block, BlockBody, TransactionSigned};
-        use reth_evm_ethereum::EthEvmConfig;
-        use reth_execution_types::{Chain, ExecutionOutcome};
-        use reth_network_api::noop::NoopNetwork;
-        use reth_primitives_traits::{RecoveredBlock, SignerRecoverable};
-        use reth_provider::test_utils::{ExtendedAccount, MockEthProvider};
-        use reth_rpc_eth_types::cache::cache_new_blocks_task;
-        use reth_transaction_pool::test_utils::testing_pool;
-
         let provider = MockEthProvider::default();
         let tx = TransactionSigned::new_unhashed(
             TxLegacy {

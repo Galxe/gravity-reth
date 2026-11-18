@@ -24,7 +24,7 @@ use reth_consensus::{ConsensusError, FullConsensus};
 use reth_engine_primitives::{
     ConfigureEngineEvm, ExecutableTxIterator, ExecutionPayload, InvalidBlockHook, PayloadValidator,
 };
-use reth_errors::{BlockExecutionError, ProviderResult};
+use reth_errors::{BlockExecutionError, BlockValidationError, ProviderResult};
 use reth_evm::{
     block::BlockExecutor, execute::ExecutableTxFor, ConfigureEvm, EvmEnvFor, ExecutionCtxFor,
     SpecFor,
@@ -779,7 +779,9 @@ where
         let state_hook = Box::new(handle.state_hook());
         let output = self.metrics.execute_metered(
             executor,
-            handle.iter_transactions().map(|res| res.map_err(BlockExecutionError::other)),
+            handle
+                .iter_transactions()
+                .map(|res| res.map_err(|err| BlockValidationError::other(err).into())),
             state_hook,
         )?;
         let execution_finish = Instant::now();

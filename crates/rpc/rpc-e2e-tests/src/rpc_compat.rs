@@ -2,7 +2,7 @@
 
 use eyre::{eyre, Result};
 use futures_util::future::BoxFuture;
-use jsonrpsee::core::client::ClientT;
+use jsonrpsee::core::{client::ClientT, params::ArrayParams};
 use reth_e2e_test_utils::testsuite::{actions::Action, BlockInfo, Environment};
 use reth_node_api::EngineTypes;
 use serde_json::Value;
@@ -169,7 +169,6 @@ impl RunRpcCompatTests {
 
         // Make the RPC request using jsonrpsee
         // We need to handle the case where the RPC might return an error
-        use jsonrpsee::core::params::ArrayParams;
 
         let response_result: Result<Value, jsonrpsee::core::client::Error> = match params {
             Value::Array(ref arr) => {

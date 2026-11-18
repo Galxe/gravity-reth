@@ -597,6 +597,7 @@ mod tests {
         eip7594::{BlobCellMask, BlobTransactionSidecarVariant, Cell},
     };
     use alloy_primitives::{TxHash, B128, B256};
+    use alloy_rlp::{Decodable, Encodable};
     use reth_network_api::test_utils::PeersHandle;
     use reth_storage_api::noop::NoopProvider;
     use reth_transaction_pool::blobstore::{BlobStoreCleanupStat, BlobStoreError};
@@ -761,8 +762,6 @@ mod tests {
     #[test_case(127)]
     #[tokio::test]
     async fn get_cells_request_uses_little_endian_wire_mask(index: u32) {
-        use alloy_rlp::{Decodable, Encodable};
-
         let (peers_tx, _) = mpsc::unbounded_channel();
         let (_incoming_tx, incoming_rx) = mpsc::channel(1);
         let numeric_mask = 1u128 << index;

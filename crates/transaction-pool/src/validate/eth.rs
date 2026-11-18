@@ -558,7 +558,7 @@ where
 
         // Ensure max possible transaction fee doesn't exceed configured transaction fee cap.
         // Only for transactions locally submitted for acceptance into the pool.
-        if is_local {
+        if origin.is_local() {
             match self.tx_fee_cap {
                 Some(0) | None => {} // Skip if cap is 0 or None
                 Some(tx_fee_cap_wei) => {
@@ -1941,6 +1941,39 @@ mod tests {
         ));
         let tx = pool.get(transaction.hash());
         assert!(tx.is_none());
+    }
+
+    #[tokio::test]
+    async fn invalid_on_fee_cap_exceeded_with_no_exemptions() {
+        let transaction = get_transaction();
+        let provider = provider_with_genesis_block();
+        provider.add_account(
+            transaction.sender(),
+            ExtendedAccount::new(transaction.nonce(), U256::MAX),
+        );
+        let max_tx_fee_wei = transaction.cost().saturating_sub(transaction.value());
+        let validator = EthTransactionValidatorBuilder::new(provider, test_evm_config())
+            .with_local_transactions_config(LocalTransactionConfig {
+                no_exemptions: true,
+                ..Default::default()
+            })
+            .set_tx_fee_cap(100)
+            .build(InMemoryBlobStore::default());
+
+        let outcome = validator.validate_one(TransactionOrigin::Local, transaction.clone());
+        let TransactionValidationOutcome::Invalid(_, err) = outcome else {
+            panic!("expected fee-cap rejection, got {outcome:?}")
+        };
+        assert!(matches!(
+            err,
+            InvalidPoolTransactionError::ExceedsFeeCap {
+                max_tx_fee_wei: actual,
+                tx_fee_cap_wei: 100,
+            } if U256::from(actual) == max_tx_fee_wei
+        ));
+        for origin in [TransactionOrigin::External, TransactionOrigin::Private] {
+            assert!(validator.validate_one(origin, transaction.clone()).is_valid());
+        }
     }
 
     #[tokio::test]

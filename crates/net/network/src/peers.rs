@@ -1146,7 +1146,7 @@ impl PeersManager {
                 peer.fork_id = fork_id.map(Box::new);
                 peer.addr = addr;
 
-                if peer.state == PeerConnectionState::Idle {
+                if peer.state.is_idle() {
                     // Try connecting again.
                     peer.state = PeerConnectionState::PendingOut;
                     self.connection_info.inc_pending_out();
@@ -3519,7 +3519,7 @@ mod tests {
         let num_pendingout_states = peer_manager
             .peers
             .iter()
-            .filter(|(_, peer)| peer.state == PeerConnectionState::PendingOut)
+            .filter(|(_, peer)| peer.state.is_pending_out())
             .map(|(peer_id, _)| *peer_id)
             .collect::<Vec<PeerId>>();
         assert_eq!(
@@ -3706,7 +3706,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_ip_filter_blocks_inbound_connection() {
-        use reth_net_banlist::IpFilter;
         use std::net::IpAddr;
 
         // Create a filter that only allows 192.168.0.0/16
@@ -3725,7 +3724,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_ip_filter_blocks_outbound_connection() {
-        use reth_net_banlist::IpFilter;
         use std::net::SocketAddr;
 
         // Create a filter that only allows 192.168.0.0/16
@@ -3749,7 +3747,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_ip_filter_ipv6() {
-        use reth_net_banlist::IpFilter;
         use std::net::IpAddr;
 
         // Create a filter that only allows IPv6 range 2001:db8::/32
@@ -3768,7 +3765,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_ip_filter_multiple_ranges() {
-        use reth_net_banlist::IpFilter;
         use std::net::IpAddr;
 
         // Create a filter that allows multiple ranges
@@ -3789,7 +3785,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_ip_filter_no_restriction() {
-        use reth_net_banlist::IpFilter;
         use std::net::IpAddr;
 
         // Create a filter with no restrictions (allow all)

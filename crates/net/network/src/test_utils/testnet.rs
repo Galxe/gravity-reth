@@ -97,7 +97,7 @@ where
 
 impl<C, Pool> Testnet<C, Pool>
 where
-    C: BlockReader + HeaderProvider + Clone + 'static,
+    C: BlockReader + Clone + 'static,
     Pool: TransactionPool,
 {
     /// Return a mutable slice of all peers.
@@ -413,7 +413,7 @@ pub struct Peer<C, Pool = TestPool> {
 
 impl<C, Pool> Peer<C, Pool>
 where
-    C: BlockReader + HeaderProvider + Clone + 'static,
+    C: BlockReader + Clone + 'static,
     Pool: TransactionPool,
 {
     /// Returns the number of connected peers.

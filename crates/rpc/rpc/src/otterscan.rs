@@ -20,7 +20,7 @@ use reth_rpc_api::{EthApiServer, OtterscanServer};
 use reth_rpc_convert::RpcTxReq;
 use reth_rpc_eth_api::{
     helpers::{EthTransactions, SpawnBlocking, TraceExt},
-    FullEthApiTypes, RpcBlock, RpcHeader, RpcReceipt, RpcTransaction,
+    RpcBlock, RpcHeader, RpcReceipt, RpcTransaction,
 };
 use reth_rpc_eth_types::{utils::binary_search, EthApiError};
 use reth_rpc_server_types::result::internal_rpc_err;
@@ -51,7 +51,7 @@ impl<Eth> OtterscanApi<Eth> {
 
 impl<Eth> OtterscanApi<Eth>
 where
-    Eth: FullEthApiTypes + TraceExt,
+    Eth: TraceExt,
 {
     /// Constructs a `BlockDetails` from a block and its receipts.
     async fn block_details(
@@ -121,8 +121,7 @@ where
             RpcHeader<Eth::NetworkTypes>,
             TxTy<Eth::Primitives>,
         > + EthTransactions
-        + TraceExt
-        + 'static,
+        + TraceExt,
 {
     /// Handler for `ots_getHeaderByNumber` and `erigon_getHeaderByNumber`
     async fn get_header_by_number(
@@ -503,6 +502,7 @@ mod tests {
     use reth_evm_ethereum::EthEvmConfig;
     use reth_network_api::noop::NoopNetwork;
     use reth_provider::test_utils::MockEthProvider;
+    use reth_rpc_eth_api::helpers::SpawnBlocking;
     use reth_transaction_pool::test_utils::testing_pool;
     use revm::{
         context::TxEnv,
@@ -514,6 +514,7 @@ mod tests {
         Context, InspectEvm, MainBuilder, MainContext,
     };
     use revm_inspectors::tracing::{types::CallTrace, TracingInspector};
+    use std::time::Duration;
 
     #[test]
     fn block_transaction_pages_match_frontend_index_navigation() {
@@ -960,9 +961,6 @@ mod tests {
     }
     #[tokio::test]
     async fn trace_methods_wait_for_tracing_permit() {
-        use reth_rpc_eth_api::helpers::SpawnBlocking;
-        use std::time::Duration;
-
         let api = OtterscanApi::new(
             crate::eth::EthApiBuilder::new(
                 MockEthProvider::default(),

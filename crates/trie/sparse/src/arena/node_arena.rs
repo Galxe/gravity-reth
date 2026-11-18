@@ -35,7 +35,7 @@ impl NodeArena {
     }
 
     /// Returns the total number of reusable or occupied node slots that fit without growing.
-    pub(super) fn capacity(&self) -> usize {
+    pub(super) const fn capacity(&self) -> usize {
         self.nodes.capacity()
     }
 

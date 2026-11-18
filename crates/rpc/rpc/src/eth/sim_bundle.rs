@@ -145,7 +145,7 @@ impl<Eth> EthSimBundle<Eth> {
 
 impl<Eth> EthSimBundle<Eth>
 where
-    Eth: EthTransactions + LoadBlock + Call + 'static,
+    Eth: EthTransactions + LoadBlock + Call,
 {
     /// Flattens a potentially nested bundle into a list of individual transactions in a
     /// `FlattenedBundleItem` with their associated metadata. This handles recursive bundle
@@ -505,7 +505,7 @@ where
 #[async_trait::async_trait]
 impl<Eth> MevSimApiServer for EthSimBundle<Eth>
 where
-    Eth: EthTransactions + LoadBlock + Call + 'static,
+    Eth: EthTransactions + LoadBlock + Call,
 {
     async fn sim_bundle(
         &self,
@@ -589,7 +589,6 @@ pub enum EthSimBundleError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_eips::BlockNumberOrTag;
     use alloy_primitives::Bytes;
     use alloy_rpc_types_mev::{Inclusion, ProtocolVersion};
     use reth_storage_api::ProviderReadView;
@@ -672,7 +671,7 @@ mod tests {
             (SimBundleOverrides::default(), 1, 112, 875_000_000, coinbase),
             (
                 SimBundleOverrides {
-                    parent_block: Some(BlockNumberOrTag::Number(0).into()),
+                    parent_block: Some(BlockId::number(0)),
                     block_overrides: BlockOverrides {
                         number: Some(U256::from(2)),
                         time: Some(200),

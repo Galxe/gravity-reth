@@ -97,7 +97,7 @@ jobs:
             allow_fail: false
             rustflags: "-C target-cpu=x86-64-v3 -C target-feature=+pclmulqdq"
           - target: aarch64-apple-darwin
-            os: macos-14
+            os: macos-15
             profile: maxperf
             allow_fail: false
             rustflags: ""

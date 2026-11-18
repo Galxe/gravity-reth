@@ -453,7 +453,7 @@ async fn test_basic_debug_calls<C>(client: &C)
 where
     C: ClientT + SubscriptionClientT + Sync,
 {
-    let block_id = BlockId::Number(BlockNumberOrTag::default());
+    let block_id = BlockId::latest();
 
     DebugApiClient::<TransactionRequest>::raw_header(client, block_id).await.unwrap_err();
     DebugApiClient::<TransactionRequest>::raw_block(client, block_id).await.unwrap_err();
@@ -492,7 +492,7 @@ async fn test_basic_trace_calls<C>(client: &C)
 where
     C: ClientT + SubscriptionClientT + Sync,
 {
-    let block_id = BlockId::Number(BlockNumberOrTag::default());
+    let block_id = BlockId::latest();
     let trace_filter = TraceFilter::default();
 
     TraceApiClient::<TransactionRequest>::trace_raw_transaction(
@@ -503,13 +503,9 @@ where
     )
     .await
     .unwrap_err();
-    TraceApiClient::<TransactionRequest>::trace_call_many(
-        client,
-        vec![],
-        Some(BlockNumberOrTag::Latest.into()),
-    )
-    .await
-    .unwrap_err();
+    TraceApiClient::<TransactionRequest>::trace_call_many(client, vec![], Some(BlockId::latest()))
+        .await
+        .unwrap_err();
     assert!(TraceApiClient::<TransactionRequest>::replay_transaction(
         client,
         B256::default(),

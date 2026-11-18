@@ -16,6 +16,9 @@ pub use reth_storage_errors as errors;
 mod account;
 pub use account::*;
 
+mod bal;
+pub use bal::*;
+
 mod block;
 pub use block::*;
 

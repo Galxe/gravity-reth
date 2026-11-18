@@ -17,6 +17,7 @@ use serde_with::{DeserializeFromStr, SerializeDisplay};
 
 #[cfg(feature = "secp256k1")]
 use enr::Enr;
+use url::{Host, Url};
 
 /// Represents an ENR in discovery.
 ///
@@ -172,8 +173,6 @@ impl FromStr for NodeRecord {
     type Err = NodeRecordParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        use url::{Host, Url};
-
         let url = Url::parse(s).map_err(|e| NodeRecordParseError::InvalidUrl(e.to_string()))?;
 
         let address = match url.host() {
@@ -245,6 +244,7 @@ impl TryFrom<&Enr<secp256k1::SecretKey>> for NodeRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_primitives::b512;
     use alloy_rlp::Decodable;
     use rand::{rng, Rng, RngCore};
     use std::net::Ipv6Addr;
@@ -327,7 +327,7 @@ mod tests {
             address: IpAddr::V4([127,0,0, 1].into()),
             tcp_port: 35481,
             udp_port: 0,
-            id: "0xfc8a2ff614e848c0af4c99372a81b8655edb8e11b617cffd0aab1a0691bcca66ca533626a528ee567f05f70c8cb529bda2c0a864cc0aec638a367fd2bb8e49fb".parse().unwrap(),
+            id: b512!("0xfc8a2ff614e848c0af4c99372a81b8655edb8e11b617cffd0aab1a0691bcca66ca533626a528ee567f05f70c8cb529bda2c0a864cc0aec638a367fd2bb8e49fb"),
         })
     }
 
@@ -339,7 +339,7 @@ mod tests {
             address: IpAddr::V4([10,3,58,6].into()),
             tcp_port: 30303,
             udp_port: 30301,
-            id: "6f8a80d14311c39f35f516fa664deaaaa13e85b2f7493f37f6144d86991ec012937307647bd3b9a82abe2974e1407241d54947bbb39763a4cac9f77166ad92a0".parse().unwrap(),
+            id: b512!("6f8a80d14311c39f35f516fa664deaaaa13e85b2f7493f37f6144d86991ec012937307647bd3b9a82abe2974e1407241d54947bbb39763a4cac9f77166ad92a0"),
         })
     }
 
@@ -366,7 +366,7 @@ mod tests {
                     address: IpAddr::V4([10, 3, 58, 6].into()),
                     tcp_port: 30303u16,
                     udp_port: 30301u16,
-                    id: PeerId::from_str("6f8a80d14311c39f35f516fa664deaaaa13e85b2f7493f37f6144d86991ec012937307647bd3b9a82abe2974e1407241d54947bbb39763a4cac9f77166ad92a0").unwrap(),
+                    id: b512!("6f8a80d14311c39f35f516fa664deaaaa13e85b2f7493f37f6144d86991ec012937307647bd3b9a82abe2974e1407241d54947bbb39763a4cac9f77166ad92a0"),
                 },
                 "\"enode://6f8a80d14311c39f35f516fa664deaaaa13e85b2f7493f37f6144d86991ec012937307647bd3b9a82abe2974e1407241d54947bbb39763a4cac9f77166ad92a0@10.3.58.6:30303?discport=30301\""
             ),
@@ -376,7 +376,7 @@ mod tests {
                     address: Ipv6Addr::new(0x2001, 0xdb8, 0x3c4d, 0x15, 0x0, 0x0, 0xabcd, 0xef12).into(),
                     tcp_port: 52150u16,
                     udp_port: 52151u16,
-                    id: PeerId::from_str("1dd9d65c4552b5eb43d5ad55a2ee3f56c6cbc1c64a5c8d659f51fcd51bace24351232b8d7821617d2b29b54b81cdefb9b3e9c37d7fd5f63270bcc9e1a6f6a439").unwrap(),
+                    id: b512!("1dd9d65c4552b5eb43d5ad55a2ee3f56c6cbc1c64a5c8d659f51fcd51bace24351232b8d7821617d2b29b54b81cdefb9b3e9c37d7fd5f63270bcc9e1a6f6a439"),
                 },
                 "\"enode://1dd9d65c4552b5eb43d5ad55a2ee3f56c6cbc1c64a5c8d659f51fcd51bace24351232b8d7821617d2b29b54b81cdefb9b3e9c37d7fd5f63270bcc9e1a6f6a439@[2001:db8:3c4d:15::abcd:ef12]:52150?discport=52151\"",
             )
@@ -398,7 +398,7 @@ mod tests {
                     address: IpAddr::V4([10, 3, 58, 6].into()),
                     tcp_port: 30303u16,
                     udp_port: 30301u16,
-                    id: PeerId::from_str("6f8a80d14311c39f35f516fa664deaaaa13e85b2f7493f37f6144d86991ec012937307647bd3b9a82abe2974e1407241d54947bbb39763a4cac9f77166ad92a0").unwrap(),
+                    id: b512!("6f8a80d14311c39f35f516fa664deaaaa13e85b2f7493f37f6144d86991ec012937307647bd3b9a82abe2974e1407241d54947bbb39763a4cac9f77166ad92a0"),
                 }
             ),
             // IPv6
@@ -408,7 +408,7 @@ mod tests {
                     address: Ipv6Addr::new(0x2001, 0xdb8, 0x3c4d, 0x15, 0x0, 0x0, 0xabcd, 0xef12).into(),
                     tcp_port: 52150u16,
                     udp_port: 52151u16,
-                    id: PeerId::from_str("1dd9d65c4552b5eb43d5ad55a2ee3f56c6cbc1c64a5c8d659f51fcd51bace24351232b8d7821617d2b29b54b81cdefb9b3e9c37d7fd5f63270bcc9e1a6f6a439").unwrap(),
+                    id: b512!("1dd9d65c4552b5eb43d5ad55a2ee3f56c6cbc1c64a5c8d659f51fcd51bace24351232b8d7821617d2b29b54b81cdefb9b3e9c37d7fd5f63270bcc9e1a6f6a439"),
                 }
             ),
         ];

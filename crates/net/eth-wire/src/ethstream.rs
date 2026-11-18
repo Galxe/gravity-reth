@@ -52,7 +52,7 @@ impl<S> UnauthedEthStream<S> {
 
 impl<S, E> UnauthedEthStream<S>
 where
-    S: Stream<Item = Result<BytesMut, E>> + CanDisconnect<Bytes> + Send + Unpin,
+    S: Stream<Item = Result<BytesMut, E>> + CanDisconnect<Bytes> + Send,
     EthStreamError: From<E> + From<<S as Sink<Bytes>>::Error>,
 {
     /// Consumes the [`UnauthedEthStream`] and returns an [`EthStream`] after the `Status`
@@ -373,7 +373,7 @@ where
 
 impl<S, N> Sink<EthMessage<N>> for EthStream<S, N>
 where
-    S: CanDisconnect<Bytes> + Unpin,
+    S: CanDisconnect<Bytes>,
     EthStreamError: From<<S as Sink<Bytes>>::Error>,
     N: NetworkPrimitives,
 {
