@@ -614,14 +614,18 @@ where
 mod tests {
     use crate::{eth::helpers::types::EthRpcConverter, EthApi, EthApiBuilder};
     use alloy_consensus::{Block, BlockBody, Header};
-    use alloy_eips::BlockNumberOrTag;
-    use alloy_primitives::{Address, Signature, B256, U256, U64};
+    use alloy_eips::{BlockId, BlockNumberOrTag};
+    use alloy_network::TransactionBuilder;
+    use alloy_primitives::{Address, Bytes, Signature, B256, U256, U64};
     use alloy_rpc_types::FeeHistory;
-    use alloy_rpc_types_eth::{Bundle, TransactionRequest};
+    use alloy_rpc_types_eth::{
+        state::{AccountOverride, EvmOverrides, StateOverride},
+        Bundle, TransactionRequest,
+    };
     use jsonrpsee_types::error::INVALID_PARAMS_CODE;
     use rand::Rng;
     use reth_chain_state::CanonStateSubscriptions;
-    use reth_chainspec::{ChainSpec, ChainSpecProvider, EthChainSpec};
+    use reth_chainspec::{ChainSpec, ChainSpecBuilder, ChainSpecProvider, EthChainSpec};
     use reth_ethereum_primitives::TransactionSigned;
     use reth_evm_ethereum::EthEvmConfig;
     use reth_network_api::noop::NoopNetwork;
@@ -633,7 +637,12 @@ mod tests {
         },
         PruneCheckpointReader, StageCheckpointReader,
     };
-    use reth_rpc_eth_api::{helpers::SpawnBlocking, node::RpcNodeCoreAdapter, EthApiServer};
+    use reth_rpc_eth_api::{
+        helpers::{EthCall, SpawnBlocking},
+        node::RpcNodeCoreAdapter,
+        EthApiServer,
+    };
+    use reth_rpc_eth_types::RpcInvalidTransactionError;
     use reth_storage_api::{BlockReader, BlockReaderIdExt, ProviderReadView, StateProviderFactory};
     use reth_tasks::cancel::is_cancelled;
     use reth_testing_utils::generators;
@@ -971,6 +980,113 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn call_many_methods_limit_calls_and_share_gas_cap() {
+        use alloy_rpc_types_trace::parity::TraceType;
+        use reth_rpc_eth_types::EthConfig;
+        use reth_rpc_server_types::constants::DEFAULT_MAX_CALL_MANY_CALLS;
+        use reth_tasks::{pool::BlockingTaskGuard, Runtime};
+        let provider = MockEthProvider::default();
+        let header = Header { number: 1, gas_limit: 30_000_000, ..Default::default() };
+        provider.add_block(header.hash_slow(), Block { header, body: BlockBody::default() });
+        // Loops until it runs out of gas.
+        let looping = Address::with_last_byte(0x43);
+        provider.add_account(
+            looping,
+            ExtendedAccount::new(0, U256::ZERO).with_bytecode(alloy_primitives::bytes!("5b600056")),
+        );
+        // A transfer to an empty account uses 21_000 gas, so a third one only gets 8_000 and a
+        // loop after one transfer runs out of the 29_000 left.
+        let api = build_test_eth_api_with_gas_cap(provider, 50_000);
+        let trace_api =
+            crate::TraceApi::new(api.clone(), BlockingTaskGuard::new(1), EthConfig::default());
+        let debug_api = crate::DebugApi::new(
+            api.clone(),
+            BlockingTaskGuard::new(1),
+            &Runtime::test(),
+            futures::stream::empty(),
+        );
+        let transfer = TransactionRequest::default().to(Address::with_last_byte(0x42));
+        let transfers = |calls| vec![transfer.clone(); calls];
+        let transfer_and_loop = vec![transfer.clone(), TransactionRequest::default().to(looping)];
+        let bundles = |calls: Vec<TransactionRequest>| {
+            vec![Bundle { transactions: calls, block_override: None }]
+        };
+        let trace_calls = |calls: Vec<TransactionRequest>| {
+            calls
+                .into_iter()
+                .map(|call| (call, std::iter::once(TraceType::Trace).collect()))
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            EthCall::call_many(&api, bundles(transfers(2)), None, None).await.unwrap()[0].len(),
+            2
+        );
+        assert_eq!(
+            trace_api.trace_call_many(trace_calls(transfers(2)), None).await.unwrap().len(),
+            2
+        );
+        assert_eq!(
+            debug_api.debug_trace_call_many(bundles(transfers(2)), None, None).await.unwrap()[0]
+                .len(),
+            2
+        );
+
+        let gas_cap_err = "the request's calls exceed the RPC gas cap of 50000";
+        for (calls, tx_index) in [(transfers(3), 2), (transfer_and_loop, 1)] {
+            assert_eq!(
+                EthCall::call_many(&api, bundles(calls.clone()), None, None)
+                    .await
+                    .unwrap_err()
+                    .to_string(),
+                format!("call_many error in bundle 0 and transaction {tx_index}: {gas_cap_err}")
+            );
+            assert_eq!(
+                trace_api
+                    .trace_call_many(trace_calls(calls.clone()), None)
+                    .await
+                    .unwrap_err()
+                    .to_string(),
+                gas_cap_err
+            );
+            assert_eq!(
+                debug_api
+                    .debug_trace_call_many(bundles(calls), None, None)
+                    .await
+                    .unwrap_err()
+                    .to_string(),
+                gas_cap_err
+            );
+        }
+
+        let too_many = transfers(DEFAULT_MAX_CALL_MANY_CALLS + 1);
+        let limit_err = "call count 1025 exceeds limit 1024";
+        assert_eq!(
+            EthCall::call_many(&api, bundles(too_many.clone()), None, None)
+                .await
+                .unwrap_err()
+                .to_string(),
+            limit_err
+        );
+        assert_eq!(
+            trace_api
+                .trace_call_many(trace_calls(too_many.clone()), None)
+                .await
+                .unwrap_err()
+                .to_string(),
+            limit_err
+        );
+        assert_eq!(
+            debug_api
+                .debug_trace_call_many(bundles(too_many), None, None)
+                .await
+                .unwrap_err()
+                .to_string(),
+            limit_err
+        );
+    }
+
+    #[tokio::test]
     /// Requesting no block should result in a default response
     async fn test_fee_history_no_block_requested() {
         let block_count = 10;
@@ -1186,5 +1302,245 @@ mod tests {
         assert_eq!(transaction.block_number, Some(1));
         assert_eq!(transaction.transaction_index, Some(0));
         assert_eq!(transaction.inner.signer(), sender);
+    }
+    fn build_test_eth_api_with_gas_cap(provider: MockEthProvider, gas_cap: u64) -> FakeEthApi {
+        EthApiBuilder::new(
+            provider.clone(),
+            testing_pool(),
+            NoopNetwork::default(),
+            EthEvmConfig::new(provider.chain_spec()),
+        )
+        .gas_cap(gas_cap.into())
+        .build()
+    }
+
+    #[tokio::test]
+    async fn estimate_gas_respects_rpc_gas_cap() {
+        const LOW_GAS_CAP: u64 = 50_000;
+        const HIGH_GAS_CAP: u64 = 200_000;
+        // Revert unless GAS > 60_000. Retrying above the RPC cap would succeed and
+        // incorrectly turn the revert into an out-of-gas error.
+        let code = Bytes::from_static(&[
+            0x5a, 0x61, 0xea, 0x60, 0x10, 0x60, 0x0d, 0x57, 0x60, 0x00, 0x60, 0x00, 0xfd, 0x5b,
+            0x00,
+        ]);
+        let sender = Address::repeat_byte(0x11);
+        let contract = Address::repeat_byte(0xaa);
+        let mut state_override = StateOverride::default();
+        state_override.insert(contract, AccountOverride { code: Some(code), ..Default::default() });
+        let overrides = EvmOverrides::state(Some(state_override));
+        let at = BlockId::Number(BlockNumberOrTag::Latest);
+
+        for chain_spec in [
+            ChainSpecBuilder::mainnet().cancun_activated().build(),
+            ChainSpecBuilder::mainnet().osaka_activated().build(),
+            ChainSpecBuilder::mainnet().amsterdam_activated().build(),
+        ] {
+            let provider = MockEthProvider::default().with_chain_spec(chain_spec);
+            provider.add_account(sender, ExtendedAccount::new(0, U256::MAX));
+            provider.add_block(
+                B256::repeat_byte(0x42),
+                Block {
+                    header: Header {
+                        number: 1,
+                        gas_limit: 30_000_000,
+                        excess_blob_gas: Some(0),
+                        ..Default::default()
+                    },
+                    body: BlockBody::default(),
+                },
+            );
+
+            for gas in [None, Some(1_000_000)] {
+                let request = TransactionRequest {
+                    gas,
+                    ..TransactionRequest::default().with_from(sender).with_to(contract)
+                };
+                let capped = build_test_eth_api_with_gas_cap(provider.clone(), LOW_GAS_CAP);
+                let err = EthCall::estimate_gas_at(&capped, request.clone(), at, overrides.clone())
+                    .await
+                    .expect_err("estimation above the RPC gas cap must fail");
+                assert!(
+                    matches!(
+                        err.as_invalid_transaction(),
+                        Some(RpcInvalidTransactionError::Revert(_))
+                    ),
+                    "{err}"
+                );
+
+                for gas_cap in [HIGH_GAS_CAP, 0] {
+                    let relaxed = build_test_eth_api_with_gas_cap(provider.clone(), gas_cap);
+                    let estimated =
+                        EthCall::estimate_gas_at(&relaxed, request.clone(), at, overrides.clone())
+                            .await
+                            .expect("same call fits under a higher or unlimited RPC gas cap");
+                    assert!(estimated > U256::from(LOW_GAS_CAP), "{estimated}");
+                    assert!(estimated <= U256::from(HIGH_GAS_CAP), "{estimated}");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn estimate_gas_transfer_respects_rpc_gas_cap() {
+        let provider = MockEthProvider::default();
+        provider.add_block(
+            B256::repeat_byte(0x42),
+            Block {
+                header: Header { number: 1, gas_limit: 30_000_000, ..Default::default() },
+                body: BlockBody::default(),
+            },
+        );
+        let request = TransactionRequest::default().with_to(Address::repeat_byte(0xaa));
+        let at = BlockId::Number(BlockNumberOrTag::Latest);
+
+        let capped = build_test_eth_api_with_gas_cap(provider.clone(), 20_999);
+        let err = EthCall::estimate_gas_at(&capped, request.clone(), at, EvmOverrides::default())
+            .await
+            .expect_err("the transfer shortcut must respect the RPC gas cap");
+        assert!(
+            matches!(
+                err.as_invalid_transaction(),
+                Some(RpcInvalidTransactionError::GasRequiredExceedsAllowance { gas_limit: 20_999 })
+            ),
+            "{err}"
+        );
+
+        let sufficient = build_test_eth_api_with_gas_cap(provider, 21_000);
+        let estimated = EthCall::estimate_gas_at(&sufficient, request, at, EvmOverrides::default())
+            .await
+            .unwrap();
+        assert_eq!(estimated, U256::from(21_000));
+    }
+    #[tokio::test]
+    async fn call_allowance_respects_rpc_gas_cap() {
+        use alloy_rpc_types_trace::{parity::TraceType, tracerequest::TraceCallRequest};
+        use reth_rpc_eth_types::EthConfig;
+        use reth_tasks::pool::BlockingTaskGuard;
+
+        let sender = Address::repeat_byte(0x11);
+        let contract = Address::repeat_byte(0xaa);
+        // Return the gas remaining after intrinsic gas and the GAS opcode.
+        let code = Bytes::from_static(&[0x5a, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xf3]);
+
+        // RPC cap, supplied gas, price, balance after value, block limit, expected budget.
+        for (gas_cap, gas, price, balance, block_limit, budget) in [
+            (50_000, None, 1, 100_000, 100_000, 50_000),
+            (50_000, None, 0, 100_000, 100_000, 50_000),
+            (50_000, None, 1, 40_000, 100_000, 40_000),
+            (50_000, None, 1, 100_000, 40_000, 40_000),
+            (50_000, Some(70_000), 1, 100_000, 100_000, 50_000),
+            (50_000, Some(30_000), 1, 100_000, 100_000, 30_000),
+            (50_000, Some(70_000), 1, 100_000, 40_000, 50_000),
+            (0, None, 1, 100_000, 100_000, 100_000),
+            (0, Some(70_000), 1, 100_000, 40_000, 70_000),
+        ] {
+            let provider = MockEthProvider::default()
+                .with_chain_spec(ChainSpecBuilder::mainnet().cancun_activated().build());
+            provider.add_block(
+                B256::repeat_byte(0x42),
+                Block {
+                    header: Header {
+                        number: 1,
+                        gas_limit: block_limit,
+                        excess_blob_gas: Some(0),
+                        ..Default::default()
+                    },
+                    body: BlockBody::default(),
+                },
+            );
+            let api = build_test_eth_api_with_gas_cap(provider, gas_cap);
+            let trace_api =
+                crate::TraceApi::new(api.clone(), BlockingTaskGuard::new(1), EthConfig::default());
+            let state_override = StateOverride::from_iter([
+                (
+                    sender,
+                    AccountOverride {
+                        balance: Some(U256::from(balance + 1_000)),
+                        ..Default::default()
+                    },
+                ),
+                (contract, AccountOverride { code: Some(code.clone()), ..Default::default() }),
+            ]);
+
+            for dynamic_fee in [false, true] {
+                let request = TransactionRequest {
+                    gas,
+                    gas_price: (!dynamic_fee).then_some(price),
+                    max_fee_per_gas: dynamic_fee.then_some(price),
+                    max_priority_fee_per_gas: dynamic_fee.then_some(price),
+                    value: Some(U256::from(1_000)),
+                    ..TransactionRequest::default().with_from(sender).with_to(contract)
+                };
+                let output = EthCall::call(
+                    &api,
+                    request.clone(),
+                    Some(BlockId::latest()),
+                    EvmOverrides::state(Some(state_override.clone())),
+                )
+                .await
+                .unwrap();
+                let traces = trace_api
+                    .trace_call(TraceCallRequest {
+                        call: request,
+                        trace_types: std::iter::once(TraceType::Trace).collect(),
+                        block_id: Some(BlockId::latest()),
+                        state_overrides: Some(state_override.clone()),
+                        block_overrides: None,
+                    })
+                    .await
+                    .unwrap();
+
+                assert_eq!(U256::from_be_slice(&output), U256::from(budget - 21_002));
+                assert_eq!(traces.output, output);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn blob_call_allowance_reserves_maximum_fee() {
+        use alloy_eips::eip4844::DATA_GAS_PER_BLOB;
+        use reth_evm::ConfigureEvm;
+        use reth_rpc_eth_api::helpers::Call;
+        use revm::{database::CacheDB, state::AccountInfo};
+        let sender = Address::repeat_byte(0x11);
+        let provider = MockEthProvider::default()
+            .with_chain_spec(ChainSpecBuilder::mainnet().cancun_activated().build());
+        let api = build_test_eth_api(provider);
+        let env = api.evm_config().evm_env(&Header::default()).unwrap();
+        let allowance = |balance, value| {
+            let mut db = CacheDB::<revm::database::EmptyDB>::default();
+            db.insert_account_info(sender, AccountInfo { balance, ..Default::default() });
+            let request = TransactionRequest {
+                max_fee_per_gas: Some(10),
+                max_priority_fee_per_gas: Some(10),
+                max_fee_per_blob_gas: Some(3),
+                blob_versioned_hashes: Some(vec![B256::repeat_byte(1)]),
+                value: Some(value),
+                ..TransactionRequest::default()
+                    .with_from(sender)
+                    .with_to(Address::repeat_byte(0xaa))
+            };
+            let tx = api.create_txn_env(&env, request, &mut db).unwrap();
+            api.caller_gas_allowance(&mut db, &env, &tx)
+        };
+        let value = U256::from(1_000);
+        let blob_fee = U256::from(DATA_GAS_PER_BLOB * 3);
+
+        assert_eq!(
+            allowance(U256::from(1_000_000), value).unwrap(),
+            (1_000_000 - 1_000 - DATA_GAS_PER_BLOB * 3) / 10
+        );
+        for (balance, value) in [(value + blob_fee - U256::ONE, value), (U256::MAX, U256::MAX)] {
+            let err = allowance(balance, value).unwrap_err();
+            assert!(
+                matches!(
+                    err.as_invalid_transaction(),
+                    Some(RpcInvalidTransactionError::InsufficientFunds { cost, balance: actual })
+                        if *cost == value.saturating_add(blob_fee) && *actual == balance
+                ),
+                "{err}"
+            );
+        }
     }
 }

@@ -17,7 +17,7 @@ use alloy_primitives::{
 };
 use alloy_trie::{BranchNodeCompact, TrieMask};
 use core::{cmp::Reverse, mem};
-use reth_execution_errors::SparseTrieResult;
+use reth_execution_errors::{SparseTrieErrorKind, SparseTrieResult};
 use reth_trie_common::{
     BranchNodeMasks, BranchNodeRef, ExtensionNodeRef, LeafNodeRef, Nibbles, ProofTrieNodeV2,
     RlpNode, TrieNodeV2, EMPTY_ROOT_HASH,
@@ -1270,7 +1270,7 @@ impl ArenaParallelSparseTrie {
             );
 
             let branch = arena[head_idx].branch_mut();
-            branch.state = ArenaSparseNodeState::Cached { rlp_node: rlp_node.clone() };
+            branch.state = ArenaSparseNodeState::Cached { rlp_node };
             branch.branch_masks = new_branch_masks;
 
             // Record trie updates for dirty branches only.
@@ -2235,8 +2235,6 @@ impl SparseTrie for ArenaParallelSparseTrie {
             "set_root called on a trie that already has revealed nodes"
         );
 
-        self.set_updates(retain_updates);
-
         match root {
             TrieNodeV2::EmptyRoot => {
                 trace!(target: TRACE_TARGET, "Setting empty root");
@@ -2265,11 +2263,16 @@ impl SparseTrie for ArenaParallelSparseTrie {
                     branch_masks: masks.unwrap_or_default(),
                 });
             }
-            TrieNodeV2::Extension(_) => {
-                panic!("set_root does not support Extension nodes; extensions are represented as branches with a short_key")
+            TrieNodeV2::Extension(node) => {
+                return Err(SparseTrieErrorKind::Reveal {
+                    path: Nibbles::new(),
+                    node: Box::new(node),
+                }
+                .into())
             }
         }
 
+        self.set_updates(retain_updates);
         Ok(())
     }
 
@@ -2401,9 +2404,13 @@ impl SparseTrie for ArenaParallelSparseTrie {
         } else {
             use rayon::iter::{IntoParallelRefMutIterator, ParallelIterator};
 
+            let parent_span = tracing::Span::current();
             let results: Vec<SparseTrieResult<()>> = taken
                 .par_iter_mut()
-                .map(|(_, subtrie, node_vec)| subtrie.reveal_nodes(node_vec))
+                .map(|(_, subtrie, node_vec)| {
+                    let _guard = parent_span.enter();
+                    subtrie.reveal_nodes(node_vec)
+                })
                 .collect();
 
             if let Some(err) = results.into_iter().find(|r| r.is_err()) {
@@ -2759,9 +2766,19 @@ impl SparseTrie for ArenaParallelSparseTrie {
             } else {
                 use rayon::iter::{IntoParallelRefMutIterator, ParallelIterator};
 
+                let parent_span = tracing::Span::current();
                 pruned += taken
                     .par_iter_mut()
-                    .map(|(_, subtrie, range)| subtrie.prune(&retained_leaves[range.clone()]))
+                    .map(|(_, subtrie, range)| {
+                        let _span = tracing::trace_span!(
+                            target: TRACE_TARGET,
+                            parent: &parent_span,
+                            "subtrie_prune",
+                            subtrie = ?subtrie.path,
+                        )
+                        .entered();
+                        subtrie.prune(&retained_leaves[range.clone()])
+                    })
                     .sum::<usize>();
             }
 
@@ -2808,6 +2825,7 @@ impl SparseTrie for ArenaParallelSparseTrie {
         sorted.sort_unstable_by_key(|entry| entry.1);
 
         let threshold = self.parallelism_thresholds.min_updates;
+        let parallelize_distributed_updates = sorted.len() >= threshold.saturating_mul(4);
 
         let mut cursor = mem::take(&mut self.buffers.cursor);
         cursor.reset(&self.upper_arena, self.root, Nibbles::default());
@@ -2885,7 +2903,9 @@ impl SparseTrie for ArenaParallelSparseTrie {
                     let might_empty_subtrie =
                         all_removals && num_subtrie_updates as u64 >= subtrie_num_leaves;
 
-                    if num_subtrie_updates >= threshold && !might_empty_subtrie {
+                    if (num_subtrie_updates >= threshold || parallelize_distributed_updates) &&
+                        !might_empty_subtrie
+                    {
                         // Take subtrie for parallel update.
                         trace!(target: TRACE_TARGET, ?subtrie_root_path, num_subtrie_updates, "Taking subtrie for parallel update");
                         let ArenaSparseNode::Subtrie(subtrie) = mem::replace(
@@ -3123,6 +3143,26 @@ mod tests {
     use reth_trie_common::{Nibbles, ProofV2Target};
     use std::collections::BTreeMap;
     use tracing::{info, trace};
+
+    #[test]
+    fn unsupported_root_preserves_update_retention_and_allows_valid_root() {
+        use reth_execution_errors::SparseTrieErrorKind;
+        use reth_trie_common::{ExtensionNode, RlpNode, TrieNodeV2, EMPTY_ROOT_HASH};
+
+        let mut trie = ArenaParallelSparseTrie::default();
+        let root = TrieNodeV2::Extension(ExtensionNode::new(
+            Nibbles::from_nibbles([1]),
+            RlpNode::word_rlp(&B256::ZERO),
+        ));
+        let error = trie.set_root(root, None, true).unwrap_err();
+        assert!(
+            matches!(error.kind(), SparseTrieErrorKind::Reveal { path, .. } if path.is_empty())
+        );
+        assert!(trie.updates.is_none());
+        trie.set_root(TrieNodeV2::EmptyRoot, None, true).unwrap();
+        assert_eq!(trie.root(), EMPTY_ROOT_HASH);
+        assert!(trie.updates.is_some());
+    }
 
     /// Test harness for proptest-based arena sparse trie testing.
     ///

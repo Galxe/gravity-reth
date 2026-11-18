@@ -494,7 +494,7 @@ pub trait EthTransactions: LoadTransaction<Provider: BlockReaderIdExt> {
         mut request: RpcTxReq<Self::NetworkTypes>,
     ) -> impl Future<Output = Result<B256, Self::Error>> + Send
     where
-        Self: EthApiSpec + LoadBlock + EstimateCall,
+        Self: EthApiSpec + LoadBlock + EstimateCall + LoadFee,
     {
         async move {
             ensure_no_conflicting_fee_fields(request.as_ref())?;
@@ -520,13 +520,43 @@ pub trait EthTransactions: LoadTransaction<Provider: BlockReaderIdExt> {
             }
 
             let chain_id = self.chain_id();
+            // A caller that pins `chainId` is asserting which chain it means to sign for.
+            // Silently rewriting it would sign and submit on a different chain than asked
+            // for, so reject the mismatch instead. Matches geth's `setDefaults`.
+            if let Some(request_chain_id) = request.as_ref().chain_id() &&
+                request_chain_id != chain_id.to::<u64>()
+            {
+                return Err(EthApiError::InvalidParams(format!(
+                    "chainId does not match node's (have={request_chain_id}, want={})",
+                    chain_id.to::<u64>()
+                ))
+                .into())
+            }
             request.as_mut().set_chain_id(chain_id.to());
 
-            let estimated_gas = self
-                .estimate_gas_at(request.clone(), BlockId::pending(), EvmOverrides::default())
-                .await?;
-            let gas_limit = estimated_gas;
-            request.as_mut().set_gas_limit(gas_limit.to());
+            // set fee defaults if not already set before, same as `fill_transaction`
+            if request.as_ref().gas_price().is_none() {
+                let tip = if let Some(tip) = request.as_ref().max_priority_fee_per_gas() {
+                    tip
+                } else {
+                    let tip = self.suggested_priority_fee().await?.to::<u128>();
+                    request.as_mut().set_max_priority_fee_per_gas(tip);
+                    tip
+                };
+                if request.as_ref().max_fee_per_gas().is_none() {
+                    let header =
+                        self.provider().latest_header().map_err(Self::Error::from_eth_err)?;
+                    let base_fee = header.and_then(|h| h.base_fee_per_gas()).unwrap_or_default();
+                    request.as_mut().set_max_fee_per_gas(base_fee as u128 * 2 + tip);
+                }
+            }
+
+            if request.as_ref().gas_limit().is_none() {
+                let estimated_gas = self
+                    .estimate_gas_at(request.clone(), BlockId::pending(), EvmOverrides::default())
+                    .await?;
+                request.as_mut().set_gas_limit(estimated_gas.to());
+            }
 
             let transaction = self.sign_request(&from, request).await?.with_signer(from);
 
@@ -570,6 +600,18 @@ pub trait EthTransactions: LoadTransaction<Provider: BlockReaderIdExt> {
             }
 
             let chain_id = self.chain_id();
+            // A caller that pins `chainId` is asserting which chain it means to sign for.
+            // Silently rewriting it would sign and submit on a different chain than asked
+            // for, so reject the mismatch instead. Matches geth's `setDefaults`.
+            if let Some(request_chain_id) = request.as_ref().chain_id() &&
+                request_chain_id != chain_id.to::<u64>()
+            {
+                return Err(EthApiError::InvalidParams(format!(
+                    "chainId does not match node's (have={request_chain_id}, want={})",
+                    chain_id.to::<u64>()
+                ))
+                .into())
+            }
             request.as_mut().set_chain_id(chain_id.to());
 
             if request.as_ref().has_eip4844_fields() &&

@@ -10,6 +10,7 @@ mod types;
 pub use types::BlockRangeInfo;
 
 use crate::{
+    budget::DEFAULT_BUDGET_PRIORITIZED_EVENTS,
     message::PeerMessage,
     metrics::SessionManagerMetrics,
     protocol::{IntoRlpxSubProtocol, OnNotSupported, RlpxSubProtocolHandlers, RlpxSubProtocols},
@@ -51,7 +52,9 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::PollSender;
 use tracing::{instrument, trace};
 
-use crate::session::active::{BroadcastItemCounter, RANGE_UPDATE_INTERVAL};
+use crate::session::active::{
+    request_timeout_interval, BroadcastItemCounter, RANGE_UPDATE_INTERVAL,
+};
 pub use conn::EthRlpxConnection;
 use handle::SessionCommandSender;
 pub use handle::{
@@ -113,6 +116,8 @@ pub struct SessionManager<N: NetworkPrimitives> {
     active_session_tx: MeteredPollSender<ActiveSessionMessage<N>>,
     /// Receiver half that listens for [`ActiveSessionMessage`] produced by pending sessions.
     active_session_rx: ReceiverStream<ActiveSessionMessage<N>>,
+    /// Number of active session events returned since pending sessions were last polled.
+    active_events_in_row: u32,
     /// Additional `RLPx` sub-protocols to be used by the session manager.
     extra_protocols: RlpxSubProtocols,
     /// Tracks the ongoing graceful disconnections attempts for incoming connections.
@@ -177,6 +182,7 @@ impl<N: NetworkPrimitives> SessionManager<N> {
             pending_session_rx: ReceiverStream::new(pending_sessions_rx),
             active_session_tx: MeteredPollSender::new(active_session_tx, "network_active_session"),
             active_session_rx: ReceiverStream::new(active_session_rx),
+            active_events_in_row: 0,
             extra_protocols,
             disconnections_counter: Default::default(),
             metrics: Default::default(),
@@ -261,6 +267,23 @@ impl<N: NetworkPrimitives> SessionManager<N> {
         transition
     }
 
+    /// Replaces the active [`ForkFilter`] with a newly derived one and returns the resulting
+    /// [`ForkId`].
+    ///
+    /// This is used to adopt a fork schedule that changed at runtime (e.g. an L1-signalled
+    /// upgrade) without restarting the node. The caller is expected to build `fork_filter` from
+    /// the updated chain spec already advanced to the node's current head, so that
+    /// [`ForkFilter::current`] reflects the correct [`ForkId`] immediately.
+    ///
+    /// Every subsequent handshake clones this filter and advertises the returned [`ForkId`], so
+    /// the node's advertised fork identity stays aligned with the rules it now enforces. Existing
+    /// active sessions are not revalidated here; see [`SessionManager::active_sessions`].
+    pub(crate) fn set_fork_filter(&mut self, fork_filter: ForkFilter) -> ForkId {
+        self.fork_filter = fork_filter;
+        self.status.forkid = self.fork_filter.current();
+        self.status.forkid
+    }
+
     /// An incoming TCP connection was received. This starts the authentication process to turn this
     /// stream into an active peer session.
     ///
@@ -320,46 +343,57 @@ impl<N: NetworkPrimitives> SessionManager<N> {
     }
 
     /// Starts a new pending session from the local node to the given remote node.
+    /// Skips the dial if the pending outbound session limit is reached.
     pub fn dial_outbound(&mut self, remote_addr: SocketAddr, remote_peer_id: PeerId) {
-        // The error can be dropped because no dial will be made if it would exceed the limit
-        if self.counter.ensure_pending_outbound().is_ok() {
-            let session_id = self.next_id();
-            let (disconnect_tx, disconnect_rx) = oneshot::channel();
-            let pending_events = self.pending_sessions_tx.clone();
-            let secret_key = self.secret_key;
-            let hello_message = self.hello_message.clone();
-            let fork_filter = self.fork_filter.clone();
-            let status = self.status;
-            let extra_handlers = self.extra_protocols.on_outgoing(remote_addr, remote_peer_id);
-            self.spawn(pending_session_with_timeout(
-                self.pending_session_timeout,
+        if let Err(err) = self.try_dial_outbound(remote_addr, remote_peer_id) {
+            trace!(target: "net", %err, "Outgoing connection rejected, capacity already reached.");
+        }
+    }
+
+    /// Starts an outbound session or reports that no dial was made due to the session limit.
+    pub(crate) fn try_dial_outbound(
+        &mut self,
+        remote_addr: SocketAddr,
+        remote_peer_id: PeerId,
+    ) -> Result<(), ExceedsSessionLimit> {
+        self.counter.ensure_pending_outbound()?;
+        let session_id = self.next_id();
+        let (disconnect_tx, disconnect_rx) = oneshot::channel();
+        let pending_events = self.pending_sessions_tx.clone();
+        let secret_key = self.secret_key;
+        let hello_message = self.hello_message.clone();
+        let fork_filter = self.fork_filter.clone();
+        let status = self.status;
+        let extra_handlers = self.extra_protocols.on_outgoing(remote_addr, remote_peer_id);
+        self.spawn(pending_session_with_timeout(
+            self.pending_session_timeout,
+            session_id,
+            remote_addr,
+            Direction::Outgoing(remote_peer_id),
+            pending_events.clone(),
+            start_pending_outbound_session(
+                self.handshake.clone(),
+                self.eth_max_message_size,
+                disconnect_rx,
+                pending_events,
                 session_id,
                 remote_addr,
-                Direction::Outgoing(remote_peer_id),
-                pending_events.clone(),
-                start_pending_outbound_session(
-                    self.handshake.clone(),
-                    self.eth_max_message_size,
-                    disconnect_rx,
-                    pending_events,
-                    session_id,
-                    remote_addr,
-                    remote_peer_id,
-                    secret_key,
-                    hello_message,
-                    status,
-                    fork_filter,
-                    extra_handlers,
-                ),
-            ));
+                remote_peer_id,
+                secret_key,
+                hello_message,
+                status,
+                fork_filter,
+                extra_handlers,
+            ),
+        ));
 
-            let handle = PendingSessionHandle {
-                disconnect_tx: Some(disconnect_tx),
-                direction: Direction::Outgoing(remote_peer_id),
-            };
-            self.pending_sessions.insert(session_id, handle);
-            self.counter.inc_pending_outbound();
-        }
+        let handle = PendingSessionHandle {
+            disconnect_tx: Some(disconnect_tx),
+            direction: Direction::Outgoing(remote_peer_id),
+        };
+        self.pending_sessions.insert(session_id, handle);
+        self.counter.inc_pending_outbound();
+        Ok(())
     }
 
     /// Initiates a shutdown of the channel.
@@ -410,6 +444,26 @@ impl<N: NetworkPrimitives> SessionManager<N> {
         Some(session)
     }
 
+    /// Cancels outgoing attempts superseded by an incoming session for this peer.
+    fn cancel_pending_outbound(&mut self, peer_id: PeerId) {
+        self.pending_sessions.retain(|_, session| {
+            if session.direction == Direction::Outgoing(peer_id) {
+                session.disconnect();
+                self.counter.dec_pending(&session.direction);
+                return false
+            }
+            true
+        });
+    }
+
+    /// Closes a completed handshake that will not become an active session.
+    fn disconnect_pending_connection(&self, conn: EthRlpxConnection<N>, reason: DisconnectReason) {
+        self.spawn(async move {
+            let _ =
+                tokio::time::timeout(HANDSHAKE_TIMEOUT, conn.into_inner().disconnect(reason)).await;
+        });
+    }
+
     /// Removes the [`PendingSessionHandle`] if it exists.
     fn remove_active_session(&mut self, id: &PeerId) -> Option<ActiveSessionHandle<N>> {
         let session = self.active_sessions.remove(id)?;
@@ -448,9 +502,36 @@ impl<N: NetworkPrimitives> SessionManager<N> {
 
     /// This polls all the session handles and returns [`SessionEvent`].
     ///
-    /// Active sessions are prioritized.
-    pub(crate) fn poll(&mut self, cx: &mut Context<'_>) -> Poll<SessionEvent<N>> {
-        // Poll events from active sessions
+    /// Active sessions are prioritized, but after [`DEFAULT_BUDGET_PRIORITIZED_EVENTS`] active
+    /// session events in a row pending sessions are polled first once, so a steady stream of active
+    /// session messages can't hold back new sessions. Established incoming sessions are
+    /// disconnected with the reason returned by `inbound_session_rejection` instead of being
+    /// activated.
+    pub(crate) fn poll(
+        &mut self,
+        cx: &mut Context<'_>,
+        inbound_session_rejection: impl Fn(PeerId) -> Option<DisconnectReason>,
+    ) -> Poll<SessionEvent<N>> {
+        if self.active_events_in_row >= DEFAULT_BUDGET_PRIORITIZED_EVENTS {
+            self.active_events_in_row = 0;
+            if let Poll::Ready(event) =
+                self.poll_pending_session_event(cx, &inbound_session_rejection)
+            {
+                return Poll::Ready(event)
+            }
+        }
+
+        if let Poll::Ready(event) = self.poll_active_session_event(cx) {
+            self.active_events_in_row += 1;
+            return Poll::Ready(event)
+        }
+
+        self.active_events_in_row = 0;
+        self.poll_pending_session_event(cx, inbound_session_rejection)
+    }
+
+    /// Polls the next event from the active sessions.
+    fn poll_active_session_event(&mut self, cx: &mut Context<'_>) -> Poll<SessionEvent<N>> {
         match self.active_session_rx.poll_next_unpin(cx) {
             Poll::Pending => {}
             Poll::Ready(None) => {
@@ -492,12 +573,34 @@ impl<N: NetworkPrimitives> SessionManager<N> {
                 }
             }
         }
+        Poll::Pending
+    }
 
-        // Poll the pending session event stream
-        let event = match self.pending_session_rx.poll_next_unpin(cx) {
-            Poll::Pending => return Poll::Pending,
-            Poll::Ready(None) => unreachable!("Manager holds both channel halves."),
-            Poll::Ready(Some(event)) => event,
+    /// Polls the next event from the pending sessions.
+    fn poll_pending_session_event(
+        &mut self,
+        cx: &mut Context<'_>,
+        inbound_session_rejection: impl Fn(PeerId) -> Option<DisconnectReason>,
+    ) -> Poll<SessionEvent<N>> {
+        let event = loop {
+            let event = match self.pending_session_rx.poll_next_unpin(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(None) => unreachable!("Manager holds both channel halves."),
+                Poll::Ready(Some(event)) => event,
+            };
+            let session_id = match &event {
+                PendingSessionEvent::Established { session_id, .. } |
+                PendingSessionEvent::Disconnected { session_id, .. } |
+                PendingSessionEvent::OutgoingConnectionError { session_id, .. } |
+                PendingSessionEvent::EciesAuthError { session_id, .. } => session_id,
+            };
+            // Canceled attempts must not affect a replacement session for the same peer.
+            if self.remove_pending_session(session_id).is_some() {
+                break event
+            }
+            if let PendingSessionEvent::Established { conn, .. } = event {
+                self.disconnect_pending_connection(conn, DisconnectReason::AlreadyConnected);
+            }
         };
         match event {
             PendingSessionEvent::Established {
@@ -512,9 +615,6 @@ impl<N: NetworkPrimitives> SessionManager<N> {
                 client_id,
                 peer_listen_port,
             } => {
-                // move from pending to established.
-                self.remove_pending_session(&session_id);
-
                 // If there's already a session to the peer then we disconnect right away
                 if self.active_sessions.contains_key(&peer_id) {
                     trace!(
@@ -526,17 +626,24 @@ impl<N: NetworkPrimitives> SessionManager<N> {
                         "already connected"
                     );
 
-                    self.spawn(async move {
-                        // send a disconnect message
-                        let _ =
-                            conn.into_inner().disconnect(DisconnectReason::AlreadyConnected).await;
-                    });
+                    self.disconnect_pending_connection(conn, DisconnectReason::AlreadyConnected);
 
                     return Poll::Ready(SessionEvent::AlreadyConnected {
                         peer_id,
                         remote_addr,
                         direction,
                     })
+                }
+
+                if direction.is_incoming() {
+                    if let Some(reason) = inbound_session_rejection(peer_id) {
+                        self.disconnect_pending_connection(conn, reason);
+                        return Poll::Ready(SessionEvent::IncomingPendingSessionClosed {
+                            remote_addr,
+                            error: None,
+                        })
+                    }
+                    self.cancel_pending_outbound(peer_id);
                 }
 
                 let (commands_tx, commands_rx) = mpsc::channel(self.session_command_buffer);
@@ -597,7 +704,7 @@ impl<N: NetworkPrimitives> SessionManager<N> {
                         broadcast_items.clone(),
                     ),
                     received_requests_from_remote: Default::default(),
-                    internal_request_timeout_interval: tokio::time::interval(
+                    internal_request_timeout_interval: request_timeout_interval(
                         self.initial_internal_request_timeout,
                     ),
                     internal_request_timeout: Arc::clone(&timeout),
@@ -655,7 +762,6 @@ impl<N: NetworkPrimitives> SessionManager<N> {
                     ?error,
                     "disconnected pending session"
                 );
-                self.remove_pending_session(&session_id);
                 match direction {
                     Direction::Incoming => {
                         Poll::Ready(SessionEvent::IncomingPendingSessionClosed {
@@ -686,7 +792,6 @@ impl<N: NetworkPrimitives> SessionManager<N> {
                     ?peer_id,
                     "connection refused"
                 );
-                self.remove_pending_session(&session_id);
                 Poll::Ready(SessionEvent::OutgoingConnectionError { remote_addr, peer_id, error })
             }
             PendingSessionEvent::EciesAuthError { remote_addr, session_id, error, direction } => {
@@ -697,7 +802,6 @@ impl<N: NetworkPrimitives> SessionManager<N> {
                     ?remote_addr,
                     "ecies auth failed"
                 );
-                self.remove_pending_session(&session_id);
                 match direction {
                     Direction::Incoming => {
                         Poll::Ready(SessionEvent::IncomingPendingSessionClosed {
@@ -956,7 +1060,7 @@ pub(crate) async fn start_pending_incoming_session<N: NetworkPrimitives>(
 async fn start_pending_outbound_session<N: NetworkPrimitives>(
     handshake: Arc<dyn EthRlpxHandshake>,
     eth_max_message_size: usize,
-    disconnect_rx: oneshot::Receiver<()>,
+    mut disconnect_rx: oneshot::Receiver<()>,
     events: mpsc::Sender<PendingSessionEvent<N>>,
     session_id: SessionId,
     remote_addr: SocketAddr,
@@ -967,7 +1071,19 @@ async fn start_pending_outbound_session<N: NetworkPrimitives>(
     fork_filter: ForkFilter,
     extra_handlers: RlpxSubProtocolHandlers,
 ) {
-    let stream = match TcpStream::connect(remote_addr).await {
+    let connection = tokio::select! {
+        _ = &mut disconnect_rx => {
+            let _ = events.send(PendingSessionEvent::Disconnected {
+                remote_addr,
+                session_id,
+                direction: Direction::Outgoing(remote_peer_id),
+                error: None,
+            }).await;
+            return
+        },
+        connection = TcpStream::connect(remote_addr) => connection,
+    };
+    let stream = match connection {
         Ok(stream) => {
             if let Err(err) = stream.set_nodelay(true) {
                 tracing::warn!(target: "net::session", "set nodelay failed: {:?}", err);
@@ -1022,36 +1138,36 @@ async fn authenticate<N: NetworkPrimitives>(
     extra_handlers: RlpxSubProtocolHandlers,
 ) {
     let local_addr = stream.local_addr().ok();
-    let stream = match get_ecies_stream(stream, secret_key, direction).await {
-        Ok(stream) => stream,
-        Err(error) => {
-            let _ = events
-                .send(PendingSessionEvent::EciesAuthError {
+    let auth = async move {
+        let stream = match get_ecies_stream(stream, secret_key, direction).await {
+            Ok(stream) => stream,
+            Err(error) => {
+                return PendingSessionEvent::EciesAuthError {
                     remote_addr,
                     session_id,
                     error,
                     direction,
-                })
-                .await;
-            return
-        }
-    };
+                }
+            }
+        };
 
-    let unauthed = UnauthedP2PStream::new(stream);
+        let unauthed = UnauthedP2PStream::new(stream);
 
-    let auth = authenticate_stream(
-        handshake,
-        eth_max_message_size,
-        unauthed,
-        session_id,
-        remote_addr,
-        local_addr,
-        direction,
-        hello,
-        status,
-        fork_filter,
-        extra_handlers,
-    )
+        authenticate_stream(
+            handshake,
+            eth_max_message_size,
+            unauthed,
+            session_id,
+            remote_addr,
+            local_addr,
+            direction,
+            hello,
+            status,
+            fork_filter,
+            extra_handlers,
+        )
+        .await
+    }
     .boxed();
 
     match futures::future::select(disconnect_rx, auth).await {

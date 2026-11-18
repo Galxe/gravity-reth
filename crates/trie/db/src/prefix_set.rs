@@ -1,6 +1,6 @@
 use alloy_primitives::{
-    map::{HashMap, HashSet},
-    BlockNumber, B256,
+    map::{B256Map, HashSet},
+    BlockNumber,
 };
 use core::{
     marker::PhantomData,
@@ -43,7 +43,7 @@ impl<TX: DbTx, KH: KeyHasher> PrefixSetLoader<'_, TX, KH> {
     pub fn load(self, range: RangeInclusive<BlockNumber>) -> Result<TriePrefixSets, DatabaseError> {
         // Initialize prefix sets.
         let mut account_prefix_set = PrefixSetMut::default();
-        let mut storage_prefix_sets = HashMap::<B256, PrefixSetMut>::default();
+        let mut storage_prefix_sets = B256Map::<PrefixSetMut>::default();
         let mut destroyed_accounts = HashSet::default();
 
         // Walk account changeset and insert account prefixes.
