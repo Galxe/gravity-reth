@@ -307,10 +307,10 @@ struct RuntimeInner {
     proof_account_worker_pool: WorkerPool,
     /// Prewarming pool (execution prewarming workers).
     #[cfg(feature = "rayon")]
-    prewarming_pool: WorkerPool,
+    prewarming_pool: Arc<WorkerPool>,
     /// BAL streaming pool (BAL hashed state streaming).
     #[cfg(feature = "rayon")]
-    bal_streaming_pool: WorkerPool,
+    bal_streaming_pool: Arc<WorkerPool>,
     /// State trie overlay worker pool.
     #[cfg(feature = "rayon")]
     state_trie_overlay_worker_pool: Arc<WorkerPool>,
@@ -411,10 +411,22 @@ impl Runtime {
         &self.0.prewarming_pool
     }
 
+    /// Returns a shared prewarming pool handle for a [`crate::WorkerStatefulPool`] run.
+    #[cfg(feature = "rayon")]
+    pub fn prewarming_pool_handle(&self) -> Arc<WorkerPool> {
+        Arc::clone(&self.0.prewarming_pool)
+    }
+
     /// Get the BAL streaming pool.
     #[cfg(feature = "rayon")]
     pub fn bal_streaming_pool(&self) -> &WorkerPool {
         &self.0.bal_streaming_pool
+    }
+
+    /// Returns a shared BAL streaming pool handle for a [`crate::WorkerStatefulPool`] run.
+    #[cfg(feature = "rayon")]
+    pub fn bal_streaming_pool_handle(&self) -> Arc<WorkerPool> {
+        Arc::clone(&self.0.bal_streaming_pool)
     }
 
     /// Get the state trie overlay worker pool.
@@ -989,11 +1001,11 @@ impl RuntimeBuilder {
                 WorkerPool::new(proof_account_worker_threads, "proof-acct");
 
             let prewarming_threads = config.rayon.prewarming_threads.unwrap_or(default_threads);
-            let prewarming_pool = WorkerPool::new(prewarming_threads, "prewarm");
+            let prewarming_pool = Arc::new(WorkerPool::new(prewarming_threads, "prewarm"));
 
             let bal_streaming_threads =
                 config.rayon.bal_streaming_threads.unwrap_or(default_threads);
-            let bal_streaming_pool = WorkerPool::new(bal_streaming_threads, "bal-stream");
+            let bal_streaming_pool = Arc::new(WorkerPool::new(bal_streaming_threads, "bal-stream"));
 
             let state_trie_overlay_worker_threads = config
                 .rayon

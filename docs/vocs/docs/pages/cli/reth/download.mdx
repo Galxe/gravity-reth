@@ -158,13 +158,18 @@ Database:
       --without-rocksdb
           Skip optional RocksDB indices even when archive components are selected.
 
-          This affects `--archive`/`--all` and TUI archive preset (`a`).
+          This affects `--archive`/`--all`, TUI archive preset (`a`), and the full preset when it includes RocksDB indices.
 
   -y, --non-interactive
           Skip interactive component selection. Downloads the minimal set (state + headers + transactions + changesets) unless explicit --with-* flags narrow it
 
       --force
           Overwrite existing snapshot data by removing db, rocksdb, static_files, and reth.toml
+
+      --prune-unlisted
+          Remove snapshot-managed files not listed by the selected plan, retaining verified outputs.
+
+          Unselected components and local reth.toml edits are removed. Run with the node stopped; removal happens before downloading, so a failed download leaves the directory pruned.
 
       --resumable [<RESUMABLE>]
           Enable resumable two-phase downloads (download to disk first, then extract).
