@@ -1,6 +1,6 @@
 use std::{
     fs::File,
-    ops::RangeInclusive,
+    io::{BufReader, BufWriter, Write},
     path::{Path, PathBuf},
 };
 
@@ -69,12 +69,9 @@ where
         }
     }
 
-    /// Returns the range of file IDs in the storage.
-    ///
-    /// If there are no files in the storage, returns `None`.
-    pub(super) fn files_range(&self) -> WalResult<Option<RangeInclusive<u32>>> {
-        let mut min_id = None;
-        let mut max_id = None;
+    /// Returns the file IDs in the storage in ascending order.
+    pub(super) fn file_ids(&self) -> WalResult<Vec<u32>> {
+        let mut file_ids = Vec::new();
 
         for entry in reth_fs_util::read_dir(&self.path)? {
             let entry = entry.map_err(|err| WalError::DirEntry(self.path.clone(), err))?;
@@ -82,13 +79,12 @@ where
             if entry.path().extension() == Some(FILE_EXTENSION.as_ref()) {
                 let file_name = entry.file_name();
                 let file_id = Self::parse_filename(&file_name.to_string_lossy())?;
-
-                min_id = min_id.map_or(Some(file_id), |min_id: u32| Some(min_id.min(file_id)));
-                max_id = max_id.map_or(Some(file_id), |max_id: u32| Some(max_id.max(file_id)));
+                file_ids.push(file_id);
             }
         }
 
-        Ok(min_id.zip(max_id).map(|(min_id, max_id)| min_id..=max_id))
+        file_ids.sort_unstable();
+        Ok(file_ids)
     }
 
     /// Removes notifications from the storage according to the given list of file IDs.
@@ -113,11 +109,11 @@ where
         Ok((deleted_total, deleted_size))
     }
 
-    pub(super) fn iter_notifications(
-        &self,
-        range: RangeInclusive<u32>,
-    ) -> impl Iterator<Item = WalResult<(u32, u64, ExExNotification<N>)>> + '_ {
-        range.map(move |id| {
+    pub(super) fn iter_notifications<'a>(
+        &'a self,
+        file_ids: impl IntoIterator<Item = u32> + 'a,
+    ) -> impl Iterator<Item = WalResult<(u32, u64, ExExNotification<N>)>> + 'a {
+        file_ids.into_iter().map(move |id| {
             let (notification, size) =
                 self.read_notification(id)?.ok_or(WalError::FileNotFound(id))?;
 
@@ -143,7 +139,7 @@ where
 
         // Deserialize using the bincode- and msgpack-compatible serde wrapper
         let notification: reth_exex_types::serde_bincode_compat::ExExNotification<'_, N> =
-            rmp_serde::decode::from_read(&mut file)
+            rmp_serde::decode::from_read(BufReader::new(&mut file))
                 .map_err(|err| WalError::Decode(file_id, file_path, err))?;
 
         Ok(Some((notification.into(), size)))
@@ -168,7 +164,12 @@ where
             reth_exex_types::serde_bincode_compat::ExExNotification::<N>::from(notification);
 
         reth_fs_util::atomic_write_file(&file_path, |file| {
-            rmp_serde::encode::write(file, &notification)
+            let mut writer = BufWriter::new(file);
+            rmp_serde::encode::write(&mut writer, &notification)?;
+            // a `BufWriter` dropped without an explicit flush discards write errors, and
+            // `atomic_write_file` fsyncs as soon as this returns
+            writer.flush()?;
+            Ok::<_, Box<dyn core::error::Error + Send + Sync>>(())
         })?;
 
         Ok(file_path.metadata().map_err(|err| WalError::FileMetadata(file_id, err))?.len())
@@ -230,21 +231,20 @@ mod tests {
     }
 
     #[test]
-    fn test_files_range() -> eyre::Result<()> {
+    fn test_file_ids() -> eyre::Result<()> {
         let temp_dir = tempfile::tempdir()?;
         let storage: Storage = Storage::new(&temp_dir)?;
 
         // Create WAL files
         File::create(storage.file_path(1))?;
-        File::create(storage.file_path(2))?;
         File::create(storage.file_path(3))?;
 
         // Create non-WAL files that should be ignored
         File::create(temp_dir.path().join("0.tmp"))?;
         File::create(temp_dir.path().join("4.tmp"))?;
 
-        // Check files range
-        assert_eq!(storage.files_range()?, Some(1..=3));
+        // Check existing file IDs are returned in order without filling the gap
+        assert_eq!(storage.file_ids()?, vec![1, 3]);
 
         Ok(())
     }

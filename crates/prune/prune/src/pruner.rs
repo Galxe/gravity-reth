@@ -354,7 +354,7 @@ mod tests {
     use super::*;
     use crate::segments::AccountHistory;
     use reth_provider::test_utils::create_test_provider_factory;
-    use reth_prune_types::{PruneMode, PruneSegment, MINIMUM_UNWIND_SAFE_DISTANCE};
+    use reth_prune_types::{PruneMode, MINIMUM_UNWIND_SAFE_DISTANCE};
 
     #[test]
     fn is_pruning_needed() {

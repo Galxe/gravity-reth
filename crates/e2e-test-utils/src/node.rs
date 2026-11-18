@@ -227,11 +227,29 @@ where
         block_hash: B256,
         block_number: BlockNumber,
     ) -> eyre::Result<()> {
-        // get head block from notifications stream and verify the tx has been pushed to the
-        // pool is actually present in the canonical block
-        let head = self.canonical_stream.next().await.unwrap();
-        let tx = head.tip().body().transactions().first();
-        assert_eq!(tx.unwrap().tx_hash().as_slice(), tip_tx_hash.as_slice());
+        // Earlier canonical events can still be buffered, so wait for this exact block.
+        let wait = async {
+            loop {
+                let notification = self
+                    .canonical_stream
+                    .next()
+                    .await
+                    .ok_or_else(|| eyre::eyre!("canonical state stream closed"))?;
+                let committed = notification.committed();
+                if let Some(block) = committed.blocks().get(&block_number) &&
+                    block.hash() == block_hash
+                {
+                    return eyre::Ok(std::sync::Arc::clone(block))
+                }
+            }
+        };
+        let block = tokio::time::timeout(std::time::Duration::from_secs(30), wait)
+            .await
+            .map_err(|_| eyre::eyre!("timed out waiting for block {block_number}"))??;
+        eyre::ensure!(
+            block.body().transactions().iter().any(|tx| *tx.tx_hash() == tip_tx_hash),
+            "transaction {tip_tx_hash} is not included in block {block_number}"
+        );
 
         loop {
             // wait for the block to commit

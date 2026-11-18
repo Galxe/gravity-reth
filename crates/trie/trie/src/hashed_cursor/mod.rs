@@ -45,6 +45,9 @@ pub trait HashedCursor {
 
 /// The cursor for iterating over hashed storage entries.
 pub trait HashedStorageCursor: HashedCursor {
-    /// Returns `true` if there are no entries for a given key.
+    /// Returns `true` if the address configured when constructing this cursor has no storage.
+    ///
+    /// May be called immediately after construction, without first seeking. This may change
+    /// the cursor position; seek before iterating entries afterward.
     fn is_storage_empty(&mut self) -> Result<bool, DatabaseError>;
 }

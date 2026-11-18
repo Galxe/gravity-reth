@@ -12,7 +12,7 @@ use crate::{LeafLookup, LeafLookupError, LeafUpdate, SparseTrie, SparseTrieUpdat
 use alloc::{borrow::Cow, boxed::Box, collections::VecDeque, vec::Vec};
 use alloy_primitives::{
     keccak256,
-    map::{B256Map, HashMap, HashSet},
+    map::{B256Map, HashMap},
     B256,
 };
 use alloy_trie::{BranchNodeCompact, TrieMask};
@@ -2138,7 +2138,11 @@ impl ArenaParallelSparseTrie {
     }
 
     #[cfg(debug_assertions)]
-    fn collect_reachable_nodes(arena: &NodeArena, idx: Index, reachable: &mut HashSet<Index>) {
+    fn collect_reachable_nodes(
+        arena: &NodeArena,
+        idx: Index,
+        reachable: &mut alloy_primitives::map::HashSet<Index>,
+    ) {
         if !reachable.insert(idx) {
             return;
         }
@@ -2153,9 +2157,10 @@ impl ArenaParallelSparseTrie {
 
     #[cfg(debug_assertions)]
     fn assert_no_orphaned_nodes(arena: &NodeArena, root: Index, label: &str) {
-        let mut reachable = HashSet::default();
+        let mut reachable = alloy_primitives::map::HashSet::default();
         Self::collect_reachable_nodes(arena, root, &mut reachable);
-        let all_indices: HashSet<Index> = arena.iter().map(|(idx, _)| idx).collect();
+        let all_indices: alloy_primitives::map::HashSet<Index> =
+            arena.iter().map(|(idx, _)| idx).collect();
         let orphaned: Vec<_> = all_indices.difference(&reachable).collect();
         debug_assert!(
             orphaned.is_empty(),
@@ -3127,7 +3132,7 @@ impl SparseTrie for ArenaParallelSparseTrie {
     fn commit_updates(
         &mut self,
         _updated: &HashMap<Nibbles, BranchNodeCompact>,
-        _removed: &HashSet<Nibbles>,
+        _removed: &alloy_primitives::map::HashSet<Nibbles>,
     ) {
         // no-op for arena trie
     }

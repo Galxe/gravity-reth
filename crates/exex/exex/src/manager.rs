@@ -688,8 +688,7 @@ mod tests {
     use reth_primitives_traits::RecoveredBlock;
     use reth_provider::{
         providers::BlockchainProvider, test_utils::create_test_provider_factory, BlockReader,
-        BlockWriter, Chain, DBProvider, DatabaseProviderFactory, StorageLocation,
-        TransactionVariant,
+        BlockWriter, Chain, DatabaseProviderFactory, StorageLocation, TransactionVariant,
     };
     use reth_testing_utils::generators::{self, random_block, BlockParams};
 

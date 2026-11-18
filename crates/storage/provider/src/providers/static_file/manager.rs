@@ -936,6 +936,23 @@ impl<N: NodePrimitives> StaticFileProvider<N> {
         if !get_gravity_config().disable_pipe_execution {
             return self.check_consistency_pipe_execution(provider);
         }
+        self.check_consistency_staged_sync(provider, has_receipt_pruning)
+    }
+
+    /// Checks static files against the individual staged-sync checkpoints.
+    ///
+    /// This is the consistency model for the history-sync pipeline. Pipe execution instead uses
+    /// its single execution checkpoint through [`Self::check_consistency`]. Callers explicitly
+    /// validating pipeline fixtures can select this model without changing global node settings.
+    pub fn check_consistency_staged_sync<Provider>(
+        &self,
+        provider: &Provider,
+        has_receipt_pruning: bool,
+    ) -> ProviderResult<Option<PipelineTarget>>
+    where
+        Provider: DBProvider + BlockReader + StageCheckpointReader + ChainSpecProvider,
+        N: NodePrimitives<Receipt: Value, BlockHeader: Value, SignedTx: Value>,
+    {
         // OVM historical import is broken and does not work with this check. It's importing
         // duplicated receipts resulting in having more receipts than the expected transaction
         // range.
@@ -2289,6 +2306,45 @@ mod cache_publication_tests {
         thread,
         time::{Duration, Instant},
     };
+
+    #[test]
+    fn recovery_prunes_transaction_zero_at_empty_genesis() -> eyre::Result<()> {
+        use crate::{
+            test_utils::create_test_provider_factory, StaticFileProviderFactory,
+            TransactionsProvider,
+        };
+        use alloy_consensus::{SignableTransaction, TxLegacy};
+        use alloy_primitives::Signature;
+        use reth_db::{tables, transaction::DbTxMut};
+
+        let factory = create_test_provider_factory();
+        let provider = factory.provider_rw()?;
+        provider.tx_ref().put::<tables::BlockBodyIndices>(0, Default::default())?;
+        provider.commit()?;
+
+        let static_files = factory.static_file_provider();
+        let segment = StaticFileSegment::Transactions;
+        let tx = TxLegacy::default().into_signed(Signature::test_signature()).into();
+        {
+            let mut writer = static_files.latest_writer(segment)?;
+            writer.increment_block(0)?;
+            writer.increment_block(1)?;
+            writer.append_transaction(0, &tx)?;
+            writer.commit()?;
+        }
+        assert!(static_files.transaction_by_id(0)?.is_some());
+
+        // Exercise the recovery truncation directly, independent of pipe/legacy startup selection.
+        static_files.prune_segment_to(&factory.provider()?, segment, 0, 1)?;
+        assert_eq!(static_files.get_highest_static_file_block(segment), Some(0));
+        assert!(static_files.transaction_by_id(0)?.is_none());
+
+        let mut writer = static_files.latest_writer(segment)?;
+        writer.increment_block(1)?;
+        writer.append_transaction(0, &tx)?;
+        writer.commit()?;
+        Ok(())
+    }
 
     #[test]
     fn stale_cache_fill_does_not_survive_index_reinitialization() -> eyre::Result<()> {

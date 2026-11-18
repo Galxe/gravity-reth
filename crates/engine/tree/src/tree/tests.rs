@@ -20,7 +20,7 @@ use reth_ethereum_engine_primitives::EthEngineTypes;
 use reth_ethereum_primitives::{Block, EthPrimitives};
 use reth_evm_ethereum::MockEvmConfig;
 use reth_primitives_traits::Block as _;
-use reth_provider::{test_utils::MockEthProvider, ExecutionOutcome};
+use reth_provider::{test_utils::MockEthProvider, ExecutionOutcome, HeaderProvider};
 use reth_trie::HashedPostState;
 use std::{
     collections::BTreeMap,
@@ -1492,4 +1492,44 @@ fn test_gravity_chain_make_canonical_e2e_flow() {
         last_block.recovered_block.hash(),
         "Final canonical head should be the last block"
     );
+}
+
+/// An old persisted tip remains addressable by hash until disk reorg cleanup completes.
+async fn assert_fcu_restores_stale_persisted_head(sibling_len: u64) {
+    let mut harness = TestHarness::new(MAINNET.clone());
+    let old: Vec<_> = harness.block_builder.get_executed_blocks(0..4).collect();
+    harness = harness.with_blocks(old.clone());
+    let old_tip = old[3].recovered_block().hash();
+    let mut parent_hash = old[0].recovered_block().hash();
+    let mut new = Vec::new();
+    for number in 1..=sibling_len {
+        let block = harness.block_builder.get_executed_block_with_number(number, parent_hash);
+        parent_hash = block.recovered_block().hash();
+        harness.tree.state.tree_state.insert_executed(block.clone());
+        new.push(block);
+    }
+    let new_tip = new.last().unwrap().recovered_block().hash();
+    let fcu = |head_block_hash| ForkchoiceState {
+        head_block_hash,
+        safe_block_hash: B256::ZERO,
+        finalized_block_hash: B256::ZERO,
+    };
+    let outcome = harness.tree.on_forkchoice_updated(fcu(new_tip), None).unwrap();
+    assert_eq!(outcome.outcome.forkchoice_status(), ForkchoiceStatus::Valid);
+    assert_eq!(harness.tree.canonical_in_memory_state.get_canonical_head().hash(), new_tip);
+    assert!(harness.provider.header(&old_tip).unwrap().is_some());
+    assert!(harness.tree.find_canonical_header(old_tip).unwrap().is_none());
+    let outcome = harness.tree.on_forkchoice_updated(fcu(old_tip), None).unwrap();
+    assert_eq!(outcome.outcome.forkchoice_status(), ForkchoiceStatus::Valid);
+    assert_eq!(harness.tree.canonical_in_memory_state.get_canonical_head().hash(), old_tip);
+}
+
+#[tokio::test]
+async fn fcu_restores_reorged_out_persisted_head_before_disk_cleanup() {
+    assert_fcu_restores_stale_persisted_head(3).await;
+}
+
+#[tokio::test]
+async fn fcu_restores_stale_persisted_head_above_shorter_branch() {
+    assert_fcu_restores_stale_persisted_head(1).await;
 }

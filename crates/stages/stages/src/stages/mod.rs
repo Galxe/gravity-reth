@@ -325,7 +325,7 @@ mod tests {
         static_file_provider = StaticFileProvider::read_write(static_file_provider.path()).unwrap();
         assert!(matches!(
             static_file_provider
-                .check_consistency(&db.factory.database_provider_ro().unwrap(), is_full_node,),
+                .check_consistency_staged_sync(&db.factory.database_provider_ro().unwrap(), is_full_node,),
             Ok(e) if e == expected
         ));
     }
@@ -347,7 +347,7 @@ mod tests {
         assert!(matches!(
             db.factory
                 .static_file_provider()
-                .check_consistency(&db.factory.database_provider_ro().unwrap(), false,),
+                .check_consistency_staged_sync(&db.factory.database_provider_ro().unwrap(), false,),
             Ok(e) if e == expected
         ));
     }
@@ -380,7 +380,7 @@ mod tests {
         assert!(matches!(
             db.factory
                 .static_file_provider()
-                .check_consistency(&db.factory.database_provider_ro().unwrap(), false),
+                .check_consistency_staged_sync(&db.factory.database_provider_ro().unwrap(), false),
             Ok(e) if e == expected
         ));
     }
@@ -391,7 +391,7 @@ mod tests {
         let db_provider = db.factory.database_provider_ro().unwrap();
 
         assert!(matches!(
-            db.factory.static_file_provider().check_consistency(&db_provider, false),
+            db.factory.static_file_provider().check_consistency_staged_sync(&db_provider, false),
             Ok(None)
         ));
     }

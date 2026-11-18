@@ -56,8 +56,8 @@ use reth_rpc_eth_types::{receipt::EthReceiptConverter, EthConfig, EthSubscriptio
 use reth_rpc_layer::{AuthLayer, Claims, CompressionLayer, JwtAuthValidator, JwtSecret};
 pub use reth_rpc_server_types::RethRpcModule;
 use reth_storage_api::{
-    AccountReader, BlockReader, ChangeSetReader, FullRpcProvider, NodePrimitivesProvider,
-    ProviderReadView, StateProviderFactory,
+    BlockReader, ChangeSetReader, FullRpcProvider, NodePrimitivesProvider, ProviderReadView,
+    StateProviderFactory,
 };
 use reth_tasks::{pool::BlockingTaskGuard, Runtime};
 use reth_tokio_util::EventSender;
@@ -313,7 +313,6 @@ where
     Provider: FullRpcProvider<Block = N::Block, Receipt = N::Receipt, Header = N::BlockHeader>
         + CanonStateSubscriptions<Primitives = N>
         + ForkChoiceSubscriptions<Header = N::BlockHeader>
-        + AccountReader
         + ChangeSetReader,
     Pool: TransactionPool + Clone + 'static,
     Network: NetworkInfo + Peers + Clone + 'static,
@@ -661,8 +660,7 @@ where
             Block = N::Block,
             Receipt = N::Receipt,
             Transaction = N::SignedTx,
-        > + AccountReader
-        + ChangeSetReader
+        > + ChangeSetReader
         + CanonStateSubscriptions<Primitives = N>
         + ForkChoiceSubscriptions<Header = N::BlockHeader>,
     Network: NetworkInfo + Peers + Clone + 'static,
@@ -778,8 +776,7 @@ where
             Header = N::BlockHeader,
             Transaction = N::SignedTx,
             Receipt = N::Receipt,
-        > + AccountReader
-        + ChangeSetReader,
+        > + ChangeSetReader,
     Network: NetworkInfo + Peers + Clone + 'static,
     EthApi: EthApiTypes,
     EvmConfig: ConfigureEvmForRead<Primitives = N>,
@@ -858,7 +855,6 @@ where
     Provider: FullRpcProvider<Block = N::Block, Header = N::BlockHeader, Receipt = N::Receipt>
         + CanonStateSubscriptions<Primitives = N>
         + ForkChoiceSubscriptions<Header = N::BlockHeader>
-        + AccountReader
         + ChangeSetReader,
     Pool: TransactionPool + Clone + 'static,
     Network: NetworkInfo + Peers + Clone + 'static,

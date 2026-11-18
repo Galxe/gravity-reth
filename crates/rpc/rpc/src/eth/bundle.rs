@@ -405,7 +405,7 @@ impl BundleBlockGas {
         }
     }
 
-    pub(crate) fn record<H>(&mut self, result: &ExecutionResult<H>) {
+    pub(crate) const fn record<H>(&mut self, result: &ExecutionResult<H>) {
         self.gas_used += result.tx_gas_used();
         self.regular_gas_used += result.gas().block_regular_gas_used();
         self.state_gas_used += result.gas().block_state_gas_used();
