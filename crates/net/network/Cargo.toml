@@ -40,6 +40,7 @@ reth-network-types = { workspace = true, features = ["serde"] }
 
 # ethereum
 alloy-consensus.workspace = true
+alloy-trie = { workspace = true, features = ["ethereum"] }
 alloy-eips.workspace = true
 alloy-primitives.workspace = true
 alloy-rlp.workspace = true
@@ -127,6 +128,7 @@ serde = [
     "rand_08/serde",
     "reth-storage-api/serde",
     "reth-network-types/serde",
+    "alloy-trie/serde",
 ]
 test-utils = [
     "reth-transaction-pool/test-utils",

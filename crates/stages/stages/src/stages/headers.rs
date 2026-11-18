@@ -310,8 +310,10 @@ where
         self.hash_collector.clear();
         self.header_collector.clear();
 
-        Ok(ExecOutput {
-            checkpoint: StageCheckpoint::new(last_header_number).with_headers_stage_checkpoint(
+        // We only reach here if all headers have been downloaded by ETL, and pushed to DB all
+        // in one stage run.
+        Ok(ExecOutput::done(
+            StageCheckpoint::new(last_header_number).with_headers_stage_checkpoint(
                 HeadersCheckpoint {
                     block_range: CheckpointBlockRange {
                         from: input.checkpoint().block_number,
@@ -323,10 +325,7 @@ where
                     },
                 },
             ),
-            // We only reach here if all headers have been downloaded by ETL, and pushed to DB all
-            // in one stage run.
-            done: true,
-        })
+        ))
     }
 
     /// Unwind the stage.

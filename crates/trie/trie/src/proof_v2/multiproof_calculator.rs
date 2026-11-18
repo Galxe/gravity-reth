@@ -39,6 +39,7 @@ where
     account_calculator: Option<AccountCalculatorOf<T, H>>,
     storage_calculator: Option<Arc<Mutex<StorageCalculatorOf<T, H>>>>,
     prefix_sets: TriePrefixSets,
+    known_storage_roots: Option<Arc<B256Map<B256>>>,
     trie_cursor_factory: T,
     hashed_cursor_factory: H,
 }
@@ -65,9 +66,26 @@ where
             account_calculator: None,
             storage_calculator: None,
             prefix_sets,
+            known_storage_roots: None,
             trie_cursor_factory,
             hashed_cursor_factory,
         }
+    }
+
+    /// Supplies storage roots keyed by hashed account address for account leaf encoding.
+    ///
+    /// Every supplied root must belong to the same immutable state view as the account leaves,
+    /// cursors and changed-key prefixes, including any storage changes in that view. Supplied roots
+    /// are trusted, not validated; stale roots can produce an incorrect account proof. A partial or
+    /// empty map is valid: accounts absent from the map calculate their roots from the cursors.
+    /// Explicit storage proof and storage root-node requests always use the cursors, even when a
+    /// known root is supplied for that account.
+    ///
+    /// This does not remove the requirement for working storage cursor factories: the shared
+    /// storage calculator is opened before account proofs, even if all encoded roots are known.
+    pub fn with_known_storage_roots(mut self, roots: Arc<B256Map<B256>>) -> Self {
+        self.known_storage_roots = Some(roots);
+        self
     }
 
     /// Generates account and storage proofs for `targets`.
@@ -102,7 +120,7 @@ where
             }
         };
 
-        // Calculate account proofs, computing storage roots inline.
+        // Calculate account proofs, reusing known roots or computing missing roots inline.
         if !account_targets.is_empty() {
             let account_calculator = match &mut self.account_calculator {
                 Some(account_calculator) => account_calculator,
@@ -116,8 +134,10 @@ where
                     )
                 }
             };
-            let mut encoder =
-                AccountValueEncoder { storage_calculator: storage_calculator.clone() };
+            let mut encoder = AccountValueEncoder {
+                storage_calculator: storage_calculator.clone(),
+                known_storage_roots: self.known_storage_roots.clone(),
+            };
             proof.account_proofs = account_calculator.proof(&mut encoder, &mut account_targets)?;
         }
 
@@ -196,11 +216,12 @@ impl<TC: TrieStorageCursor, HC: RebindableHashedStorageCursor<Value = U256>>
     }
 }
 
-/// Account value encoder that computes storage roots with a shared storage calculator.
+/// Account value encoder that reuses known storage roots or computes them on demand.
 struct AccountValueEncoder<TC, HC> {
     // Arc<Mutex<_>> keeps the calculator Send whenever its cursors are. The mutex never poisons,
     // which is why the calculator must not be reused after a panic.
     storage_calculator: Arc<Mutex<PrefixSetStorageCalculator<TC, HC>>>,
+    known_storage_roots: Option<Arc<B256Map<B256>>>,
 }
 
 impl<TC: TrieStorageCursor, HC: RebindableHashedStorageCursor<Value = U256>> LeafValueEncoder
@@ -214,32 +235,50 @@ impl<TC: TrieStorageCursor, HC: RebindableHashedStorageCursor<Value = U256>> Lea
         hashed_address: B256,
         account: Account,
     ) -> Self::DeferredEncoder {
-        AccountDeferredValueEncoder {
-            storage_calculator: self.storage_calculator.clone(),
-            hashed_address,
-            account,
+        if let Some(root) =
+            self.known_storage_roots.as_ref().and_then(|roots| roots.get(&hashed_address))
+        {
+            AccountDeferredValueEncoder::Known { storage_root: *root, account }
+        } else {
+            AccountDeferredValueEncoder::Calculate {
+                storage_calculator: self.storage_calculator.clone(),
+                hashed_address,
+                account,
+            }
         }
     }
 }
 
-/// Deferred account encoder that computes the account's storage root when encoded.
-struct AccountDeferredValueEncoder<TC, HC> {
-    storage_calculator: Arc<Mutex<PrefixSetStorageCalculator<TC, HC>>>,
-    hashed_address: B256,
-    account: Account,
+/// Deferred account encoder using a known storage root or synchronous root calculation.
+enum AccountDeferredValueEncoder<TC, HC> {
+    Known {
+        storage_root: B256,
+        account: Account,
+    },
+    Calculate {
+        storage_calculator: Arc<Mutex<PrefixSetStorageCalculator<TC, HC>>>,
+        hashed_address: B256,
+        account: Account,
+    },
 }
 
 impl<TC: TrieStorageCursor, HC: RebindableHashedStorageCursor<Value = U256>> DeferredValueEncoder
     for AccountDeferredValueEncoder<TC, HC>
 {
     fn encode(self, buf: &mut Vec<u8>) -> Result<(), StateProofError> {
-        let mut storage = self.storage_calculator.lock();
-        let calculator = storage.calculator_for(self.hashed_address);
-        let root_node = calculator.storage_root_node(self.hashed_address)?;
-        let root = calculator
-            .compute_root_hash(core::slice::from_ref(&root_node))?
-            .expect("storage_root_node returns a node at the root path");
-        self.account.into_trie_account(root).encode(buf);
+        let (account, root) = match self {
+            Self::Known { storage_root, account } => (account, storage_root),
+            Self::Calculate { storage_calculator, hashed_address, account } => {
+                let mut storage = storage_calculator.lock();
+                let calculator = storage.calculator_for(hashed_address);
+                let root_node = calculator.storage_root_node(hashed_address)?;
+                let root = calculator
+                    .compute_root_hash(core::slice::from_ref(&root_node))?
+                    .expect("storage_root_node returns a node at the root path");
+                (account, root)
+            }
+        };
+        account.into_trie_account(root).encode(buf);
         Ok(())
     }
 }
@@ -532,6 +571,147 @@ mod tests {
             }
             other => panic!("expected original factory initialization error, got {other:?}"),
         }
+    }
+
+    fn known_roots(fixture: &Fixture) -> B256Map<B256> {
+        fixture
+            .accounts
+            .keys()
+            .map(|address| (keccak256(address), fixture.expected_storage_root(*address)))
+            .collect()
+    }
+
+    #[test]
+    fn complete_partial_and_empty_known_roots_match_independent_oracles() {
+        let fixture = Fixture::new();
+        let a = Address::with_last_byte(1);
+        for roots in [
+            B256Map::default(),
+            B256Map::from_iter([(keccak256(a), fixture.expected_storage_root(a))]),
+            known_roots(&fixture),
+        ] {
+            let mut calculator =
+                fixture.calculator(Default::default()).with_known_storage_roots(Arc::new(roots));
+            for _ in 0..2 {
+                let proof = calculator.multiproof(Fixture::mixed_targets()).unwrap();
+                let root = fixture.expected_root();
+                assert_eq!(proof_root(&proof.account_proofs), root);
+                for address in
+                    [a, Address::with_last_byte(2), Address::with_last_byte(3), Fixture::missing()]
+                {
+                    let slots = if address == a {
+                        vec![Fixture::slot(0), Fixture::slot(1), Fixture::slot(999)]
+                    } else {
+                        Vec::new()
+                    };
+                    let account = proof.account_proof(address, &slots).unwrap();
+                    assert_eq!(account.info, fixture.accounts.get(&address).copied());
+                    account.verify(root).unwrap();
+                }
+                for address in [a, Address::with_last_byte(2), Fixture::missing()] {
+                    assert_eq!(
+                        proof_root(&proof.storage_proofs[&keccak256(address)]),
+                        fixture.expected_storage_root(address)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn known_roots_skip_per_account_storage_calculation() {
+        let fixture = Fixture::new();
+        let calculated_control = Arc::new(Control::default());
+        let mut calculated = fixture.calculator(calculated_control.clone());
+        let calculated_proof = calculated.multiproof(Fixture::root_targets()).unwrap();
+        let known_control = Arc::new(Control::default());
+        let mut known = fixture
+            .calculator(known_control.clone())
+            .with_known_storage_roots(Arc::new(known_roots(&fixture)));
+        let known_proof = known.multiproof(Fixture::root_targets()).unwrap();
+        assert_eq!(proof_root(&calculated_proof.account_proofs), fixture.expected_root());
+        assert_eq!(proof_root(&known_proof.account_proofs), fixture.expected_root());
+        // Both paths open the shared storage cursors, but known leaves avoid per-address rebinds.
+        assert!(known_control.calls.load(Ordering::Relaxed) >= 4);
+        assert!(
+            known_control.calls.load(Ordering::Relaxed) <
+                calculated_control.calls.load(Ordering::Relaxed)
+        );
+    }
+
+    #[test]
+    fn stale_known_root_is_trusted_but_explicit_storage_nodes_use_current_view() {
+        let fixture = Fixture::new();
+        let a = Address::with_last_byte(1);
+        let mut stale_slots = fixture.storage[&a].clone();
+        stale_slots.insert(Fixture::slot(0), U256::from(1));
+        let stale_root = test_utils::storage_root(stale_slots);
+        assert_ne!(stale_root, fixture.expected_storage_root(a));
+        let stale_roots = Arc::new(B256Map::from_iter([(keccak256(a), stale_root)]));
+        let mut calculator =
+            fixture.calculator(Default::default()).with_known_storage_roots(stale_roots);
+        let proof = calculator.multiproof(Fixture::mixed_targets()).unwrap();
+        // Known roots cannot be validated without doing the work they are intended to avoid.
+        assert_ne!(proof_root(&proof.account_proofs), fixture.expected_root());
+        assert!(proof
+            .account_proof(a, &[Fixture::slot(0)])
+            .unwrap()
+            .verify(fixture.expected_root())
+            .is_err());
+        assert_eq!(
+            proof_root(&proof.storage_proofs[&keccak256(a)]),
+            fixture.expected_storage_root(a)
+        );
+        let root_only = calculator
+            .multiproof(MultiProofTargetsV2 {
+                storage_targets: B256Map::from_iter([(keccak256(a), Vec::new())]),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            proof_root(&root_only.storage_proofs[&keccak256(a)]),
+            fixture.expected_storage_root(a)
+        );
+        // A new calculator for this same view with a matching root restores the state oracle.
+        let mut current = fixture
+            .calculator(Default::default())
+            .with_known_storage_roots(Arc::new(known_roots(&fixture)));
+        assert_eq!(
+            proof_root(&current.multiproof(Fixture::root_targets()).unwrap().account_proofs),
+            fixture.expected_root()
+        );
+    }
+
+    #[test]
+    fn known_roots_preserve_initialization_and_explicit_storage_errors() {
+        let fixture = Fixture::new();
+        let control = Arc::new(Control::default());
+        control.fail_on.store(1, Ordering::Relaxed);
+        let mut calculator = fixture
+            .calculator(control.clone())
+            .with_known_storage_roots(Arc::new(known_roots(&fixture)));
+        assert_factory_error(calculator.multiproof(Fixture::root_targets()), 1);
+        control.fail_on.store(0, Ordering::Relaxed);
+        assert_eq!(
+            proof_root(&calculator.multiproof(Fixture::root_targets()).unwrap().account_proofs),
+            fixture.expected_root()
+        );
+        let a = Address::with_last_byte(1);
+        let targets = || MultiProofTargetsV2 {
+            storage_targets: B256Map::from_iter([(
+                keccak256(a),
+                vec![ProofV2Target::new(keccak256(Fixture::slot(0)))],
+            )]),
+            ..Default::default()
+        };
+        let fail_on = control.fail_next();
+        assert_factory_error(calculator.multiproof(targets()), fail_on);
+        control.fail_on.store(0, Ordering::Relaxed);
+        let proof = calculator.multiproof(targets()).unwrap();
+        assert_eq!(
+            proof_root(&proof.storage_proofs[&keccak256(a)]),
+            fixture.expected_storage_root(a)
+        );
     }
 
     #[test]

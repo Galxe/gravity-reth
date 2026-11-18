@@ -47,6 +47,18 @@ impl TryFrom<SnapProtocolMessage> for SnapResponse {
     }
 }
 
+impl From<SnapResponse> for SnapProtocolMessage {
+    fn from(response: SnapResponse) -> Self {
+        match response {
+            SnapResponse::AccountRange(message) => Self::AccountRange(message),
+            SnapResponse::StorageRanges(message) => Self::StorageRanges(message),
+            SnapResponse::ByteCodes(message) => Self::ByteCodes(message),
+            SnapResponse::TrieNodes(message) => Self::TrieNodes(message),
+            SnapResponse::BlockAccessLists(message) => Self::BlockAccessLists(message),
+        }
+    }
+}
+
 /// The snap sync downloader client
 #[auto_impl::auto_impl(&, Arc, Box)]
 pub trait SnapClient: DownloadClient {

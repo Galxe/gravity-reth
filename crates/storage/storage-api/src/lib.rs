@@ -48,6 +48,9 @@ pub use stage_checkpoint::*;
 mod state;
 pub use state::*;
 
+mod state_range;
+pub use state_range::*;
+
 mod storage;
 pub use storage::*;
 

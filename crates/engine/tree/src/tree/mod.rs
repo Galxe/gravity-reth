@@ -1482,6 +1482,12 @@ where
         }
 
         if !self.backfill_sync_state.is_idle() {
+            // Backfill owns the database, but a custom running sync may still follow the head.
+            if self.backfill_sync_state.is_pending() || self.backfill_sync_state.is_active() {
+                let _ = self.outgoing.send(EngineApiEvent::BackfillAction(
+                    BackfillAction::UpdateTarget(state.head_block_hash),
+                )).inspect_err(|err| error!(target: "engine::tree", ?err, "Failed to update backfill target"));
+            }
             // We can only process new forkchoice updates if the pipeline is idle, since it requires
             // exclusive access to the database
             trace!(target: "engine::tree", "Pipeline is syncing, skipping forkchoice update");

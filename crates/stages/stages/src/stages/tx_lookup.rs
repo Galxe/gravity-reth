@@ -179,11 +179,10 @@ where
             }
         }
 
-        Ok(ExecOutput {
-            checkpoint: StageCheckpoint::new(input.target())
+        Ok(ExecOutput::done(
+            StageCheckpoint::new(input.target())
                 .with_entities_stage_checkpoint(stage_checkpoint(provider)?),
-            done: true,
-        })
+        ))
     }
 
     /// Unwind the stage.

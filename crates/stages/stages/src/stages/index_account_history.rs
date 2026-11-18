@@ -127,7 +127,7 @@ where
             |key| key.key,
         )?;
 
-        Ok(ExecOutput { checkpoint: StageCheckpoint::new(*range.end()), done: true })
+        Ok(ExecOutput::done(StageCheckpoint::new(*range.end())))
     }
 
     /// Unwind the stage.
@@ -226,7 +226,7 @@ mod tests {
         let mut stage = IndexAccountHistoryStage::default();
         let provider = db.factory.database_provider_rw().unwrap();
         let out = stage.execute(&provider, input).unwrap();
-        assert_eq!(out, ExecOutput { checkpoint: StageCheckpoint::new(run_to), done: true });
+        assert_eq!(out, ExecOutput::done(StageCheckpoint::new(run_to)));
         provider.commit().unwrap();
     }
 
@@ -259,7 +259,7 @@ mod tests {
         };
         let provider = db.factory.database_provider_rw().unwrap();
         let output = stage.execute(&provider, input()).unwrap();
-        assert_eq!(output, ExecOutput { checkpoint: StageCheckpoint::new(20_000), done: true });
+        assert_eq!(output, ExecOutput::done(StageCheckpoint::new(20_000)));
         drop(provider);
         // Unlike the upstream storage-v2 side database, Gravity's history batch is transactional.
         assert_eq!(
@@ -522,7 +522,7 @@ mod tests {
         };
         let provider = db.factory.database_provider_rw().unwrap();
         let out = stage.execute(&provider, input).unwrap();
-        assert_eq!(out, ExecOutput { checkpoint: StageCheckpoint::new(20000), done: true });
+        assert_eq!(out, ExecOutput::done(StageCheckpoint::new(20000)));
         provider.commit().unwrap();
 
         // verify
@@ -613,10 +613,7 @@ mod tests {
                     return Ok(())
                 }
 
-                assert_eq!(
-                    output,
-                    ExecOutput { checkpoint: StageCheckpoint::new(input.target()), done: true }
-                );
+                assert_eq!(output, ExecOutput::done(StageCheckpoint::new(input.target())));
 
                 let provider = self.db.factory.provider()?;
                 let mut changeset_cursor =

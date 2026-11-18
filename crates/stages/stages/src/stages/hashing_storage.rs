@@ -164,7 +164,7 @@ where
                     ..Default::default()
                 });
 
-            Ok(ExecOutput { checkpoint, done: true })
+            Ok(ExecOutput::done(checkpoint))
         } else {
             // Stream changesets entry-by-entry, bounded by both block count
             // (commit_threshold) and entry count (commit_entries), whichever comes first.

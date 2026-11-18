@@ -5,7 +5,7 @@
 //! [`ChainOrchestrator`](crate::chain::ChainOrchestrator) ready to be polled as a `Stream`.
 
 use crate::{
-    backfill::PipelineSync,
+    backfill::{BackfillSync, PipelineSync},
     chain::ChainOrchestrator,
     download::BasicBlockDownloader,
     engine::{EngineApiKind, EngineApiRequest, EngineApiRequestHandler, EngineHandler},
@@ -27,7 +27,7 @@ use reth_provider::{
 use reth_prune::PrunerWithFactory;
 use reth_stages_api::{MetricEventsSender, Pipeline};
 use reth_tasks::Runtime;
-use std::sync::Arc;
+use std::{convert::Infallible, sync::Arc};
 
 /// Builds the engine [`ChainOrchestrator`] that drives the chain forward.
 ///
@@ -82,6 +82,72 @@ where
     V: EngineValidator<N::Payload> + WaitForCaches,
     C: ConfigureEvm<Primitives = N::Primitives> + 'static,
 {
+    let Ok(orchestrator) = build_engine_orchestrator_with_backfill(
+        engine_kind,
+        consensus,
+        client,
+        incoming_requests,
+        pipeline,
+        pipeline_task_spawner,
+        provider,
+        blockchain_db,
+        pruner,
+        payload_builder,
+        payload_validator,
+        tree_config,
+        sync_metrics_tx,
+        evm_config,
+        _runtime,
+        |pipeline, runtime| Ok::<_, Infallible>(PipelineSync::new(pipeline, runtime)),
+    );
+    orchestrator
+}
+
+/// Builds the engine with a caller-supplied backfill.
+///
+/// The backfill is constructed before any engine service is spawned, so a construction error
+/// returns without starting persistence or tree tasks. The default entry point retains staged sync.
+#[expect(clippy::too_many_arguments, clippy::type_complexity)]
+pub fn build_engine_orchestrator_with_backfill<N, Client, S, V, C, B, E>(
+    engine_kind: EngineApiKind,
+    consensus: Arc<dyn FullConsensus<N::Primitives>>,
+    client: Client,
+    incoming_requests: S,
+    pipeline: Pipeline<N>,
+    pipeline_task_spawner: Runtime,
+    provider: ProviderFactory<N>,
+    blockchain_db: BlockchainProvider<N>,
+    pruner: PrunerWithFactory<ProviderFactory<N>>,
+    payload_builder: PayloadBuilderHandle<N::Payload>,
+    payload_validator: V,
+    tree_config: TreeConfig,
+    sync_metrics_tx: MetricEventsSender,
+    evm_config: C,
+    // NOTE(gravity): accepted for call-site parity with upstream; the gravity-form
+    // NOTE(gravity): `EngineApiTreeHandler::spawn_new` does not take a runtime; the
+    // gravity-form tree spawns via the global runtime instead.
+    _runtime: Runtime,
+    backfill: impl FnOnce(Pipeline<N>, Runtime) -> Result<B, E>,
+) -> Result<
+    ChainOrchestrator<
+        EngineHandler<
+            EngineApiRequestHandler<EngineApiRequest<N::Payload, N::Primitives>, N::Primitives>,
+            S,
+            BasicBlockDownloader<Client, <N::Primitives as NodePrimitives>::Block>,
+        >,
+        B,
+    >,
+    E,
+>
+where
+    N: ProviderNodeTypes<Primitives: PipeExecPrimitives>,
+    B: BackfillSync + Unpin,
+    Client: BlockClient<Block = <N::Primitives as NodePrimitives>::Block> + 'static,
+    S: Stream<Item = BeaconEngineMessage<N::Payload>> + Send + Sync + Unpin + 'static,
+    V: EngineValidator<N::Payload> + WaitForCaches,
+    C: ConfigureEvm<Primitives = N::Primitives> + 'static,
+{
+    let backfill_sync = backfill(pipeline, pipeline_task_spawner)?;
     let downloader = BasicBlockDownloader::new(client, consensus.clone());
 
     let persistence_handle =
@@ -104,7 +170,5 @@ where
     let engine_handler = EngineApiRequestHandler::new(to_tree_tx, from_tree);
     let handler = EngineHandler::new(engine_handler, downloader, incoming_requests);
 
-    let backfill_sync = PipelineSync::new(pipeline, pipeline_task_spawner);
-
-    ChainOrchestrator::new(handler, backfill_sync)
+    Ok(ChainOrchestrator::new(handler, backfill_sync))
 }
