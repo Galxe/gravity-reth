@@ -150,7 +150,7 @@ pub use block::{
     body::{BlockBody, FullBlockBody},
     header::{AlloyBlockHeader, BlockHeader, FullBlockHeader},
     recovered::IndexedTx,
-    Block, FullBlock, RecoveredBlock, SealedBlock, SealedBlockWith,
+    Block, FullBlock, RecoveredBlock, SealedBlock, SealedBlockWith, SealedOrRecoveredBlock,
 };
 
 #[cfg(all(test, feature = "std", feature = "reth-codec"))]
