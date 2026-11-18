@@ -4,7 +4,7 @@ use crate::tree::payload_processor::multiproof::{MultiProofTaskMetrics, SparseTr
 use alloy_primitives::B256;
 use rayon::iter::{ParallelBridge, ParallelIterator};
 use reth_trie::{updates::TrieUpdates, Nibbles};
-use reth_trie_parallel::root::ParallelStateRootError;
+use reth_trie_parallel::error::StateRootTaskError;
 use reth_trie_sparse::{
     errors::{SparseStateTrieResult, SparseTrieErrorKind},
     provider::{TrieNodeProvider, TrieNodeProviderFactory},
@@ -63,7 +63,7 @@ where
     /// - `SparseStateTrie` that needs to be cleared and reused to avoid reallocations.
     pub(super) fn run(
         mut self,
-    ) -> (Result<StateRootComputeOutcome, ParallelStateRootError>, SparseStateTrie<A, S>) {
+    ) -> (Result<StateRootComputeOutcome, StateRootTaskError>, SparseStateTrie<A, S>) {
         // run the main loop to completion
         let result = self.run_inner();
         (result, self.trie)
@@ -72,7 +72,7 @@ where
     /// Inner function to run the sparse trie task to completion.
     ///
     /// See [`Self::run`] for more information.
-    fn run_inner(&mut self) -> Result<StateRootComputeOutcome, ParallelStateRootError> {
+    fn run_inner(&mut self) -> Result<StateRootComputeOutcome, StateRootTaskError> {
         let now = Instant::now();
 
         let mut num_iterations = 0;
@@ -95,11 +95,7 @@ where
 
             let elapsed =
                 update_sparse_trie(&mut self.trie, update, &self.blinded_provider_factory)
-                    .map_err(|e| {
-                        ParallelStateRootError::Other(format!(
-                            "could not calculate state root: {e:?}"
-                        ))
-                    })?;
+                    .map_err(StateRootTaskError::from)?;
             self.metrics.sparse_trie_update_duration_histogram.record(elapsed);
             trace!(target: "engine::root", ?elapsed, num_iterations, "Root calculation completed");
         }
@@ -107,10 +103,10 @@ where
         debug!(target: "engine::root", num_iterations, "All proofs processed, ending calculation");
 
         let start = Instant::now();
-        let (state_root, trie_updates) =
-            self.trie.root_with_updates(&self.blinded_provider_factory).map_err(|e| {
-                ParallelStateRootError::Other(format!("could not calculate state root: {e:?}"))
-            })?;
+        let (state_root, trie_updates) = self
+            .trie
+            .root_with_updates(&self.blinded_provider_factory)
+            .map_err(StateRootTaskError::from)?;
 
         self.metrics.sparse_trie_final_update_duration_histogram.record(start.elapsed());
         self.metrics.sparse_trie_total_duration_histogram.record(now.elapsed());
@@ -274,4 +270,65 @@ where
     );
 
     Ok(elapsed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reth_provider::ProviderError;
+    use reth_trie_sparse::{
+        errors::{SparseStateTrieError, SparseStateTrieErrorKind, SparseTrieError},
+        provider::RevealedNode,
+    };
+
+    #[derive(Clone, Debug)]
+    struct FailingNodeProvider;
+
+    impl TrieNodeProvider for FailingNodeProvider {
+        fn trie_node(&self, _: &Nibbles) -> Result<Option<RevealedNode>, SparseTrieError> {
+            let error: Box<dyn std::error::Error + Send + Sync> =
+                Box::new(ProviderError::BestBlockNotFound);
+            Err(error.into())
+        }
+    }
+
+    impl TrieNodeProviderFactory for FailingNodeProvider {
+        type AccountNodeProvider = Self;
+        type StorageNodeProvider = Self;
+        fn account_node_provider(&self) -> Self {
+            Self
+        }
+        fn storage_node_provider(&self, _: B256) -> Self {
+            Self
+        }
+    }
+
+    #[test]
+    fn sparse_root_task_preserves_provider_failure_source() {
+        let (tx, rx) = mpsc::channel();
+        drop(tx);
+        let task = SparseTrieTask::new_with_cleared_trie(
+            rx,
+            FailingNodeProvider,
+            MultiProofTaskMetrics::default(),
+            ClearedSparseStateTrie::from_state_trie(SparseStateTrie::<
+                SerialSparseTrie,
+                SerialSparseTrie,
+            >::default()),
+        );
+        // A blind root actually asks the node provider for its root, which fails here.
+        let (result, _) = task.run();
+        let Err(StateRootTaskError::Provider(error)) = result else {
+            panic!("root task lost its provider failure")
+        };
+        let error = error.downcast_other_ref::<SparseStateTrieError>().unwrap();
+        let SparseStateTrieErrorKind::Sparse(SparseTrieErrorKind::Other(error)) = error.kind()
+        else {
+            panic!("root task lost its sparse trie error source: {error:?}")
+        };
+        assert!(matches!(
+            error.downcast_ref::<ProviderError>(),
+            Some(ProviderError::BestBlockNotFound)
+        ));
+    }
 }

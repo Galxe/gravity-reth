@@ -17,6 +17,9 @@ pub mod stats;
 /// Implementation of parallel state root computation.
 pub mod root;
 
+/// Errors from state-root calculation and proof workers.
+pub mod error;
+
 /// Implementation of parallel proof computation.
 pub mod proof;
 

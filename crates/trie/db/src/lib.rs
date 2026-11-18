@@ -32,3 +32,6 @@ pub use witness::DatabaseTrieWitness;
 pub mod verify;
 #[cfg(not(target_family = "wasm"))]
 pub use verify::LegacyDatabaseVerifier;
+
+/// Opt-in legacy on-demand trie revert computation and cache.
+pub mod changesets;

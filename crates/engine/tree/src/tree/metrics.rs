@@ -12,6 +12,7 @@ use reth_evm::{metrics::ExecutorMetrics, OnStateHook, RecoveredTx};
 use reth_execution_types::BlockExecutionOutput;
 use reth_metrics::{
     metrics::{Counter, Gauge, Histogram},
+    thread::{ThreadResourceUsage, ThreadResourceUsageDelta},
     Metrics,
 };
 use reth_primitives_traits::{constants::gas_units::MEGAGAS, SignedTransaction};
@@ -506,6 +507,9 @@ impl Default for BlockValidationGasBucketMetrics {
 #[derive(Metrics)]
 #[metrics(scope = "consensus.engine.beacon")]
 pub(crate) struct NewPayloadStatusMetrics {
+    /// Resource usage on the engine thread while processing new payloads.
+    #[metric(skip)]
+    thread_resource_usage: NewPayloadThreadResourceMetrics,
     /// Finish time of the latest new payload call.
     #[metric(skip)]
     pub(crate) latest_finish_at: Option<Instant>,
@@ -553,6 +557,11 @@ pub(crate) struct NewPayloadStatusMetrics {
 }
 
 impl NewPayloadStatusMetrics {
+    /// Measures only this synchronous engine thread, excluding detached execution workers.
+    pub(crate) fn measure_thread_resource_usage(&self) -> NewPayloadThreadResourceGuard {
+        self.thread_resource_usage.measure()
+    }
+
     /// Increment the newPayload counter based on the given result
     pub(crate) fn update_response_metrics(
         &mut self,
@@ -690,6 +699,64 @@ pub(crate) struct BlockBufferMetrics {
     pub blocks: Gauge,
 }
 
+/// Per-newPayload engine thread resource usage metrics.
+#[derive(Clone, Metrics)]
+#[metrics(scope = "consensus.engine.beacon")]
+struct NewPayloadThreadResourceMetrics {
+    /// User-mode CPU time used while processing a new payload.
+    new_payload_thread_user_cpu_seconds: Histogram,
+    /// Kernel-mode CPU time used while processing a new payload.
+    new_payload_thread_system_cpu_seconds: Histogram,
+    /// Minor page faults incurred while processing a new payload.
+    new_payload_thread_minor_page_faults: Histogram,
+    /// Major page faults incurred while processing a new payload.
+    new_payload_thread_major_page_faults: Histogram,
+    /// Voluntary context switches while processing a new payload.
+    new_payload_thread_voluntary_context_switches: Histogram,
+    /// Involuntary context switches while processing a new payload.
+    new_payload_thread_involuntary_context_switches: Histogram,
+    /// Block input operations while processing a new payload.
+    new_payload_thread_block_input_operations: Histogram,
+    /// Block output operations while processing a new payload.
+    new_payload_thread_block_output_operations: Histogram,
+}
+
+impl NewPayloadThreadResourceMetrics {
+    fn measure(&self) -> NewPayloadThreadResourceGuard {
+        let metrics = self.clone();
+        let start = ThreadResourceUsage::now();
+        NewPayloadThreadResourceGuard { start, metrics }
+    }
+
+    fn record(&self, usage: &ThreadResourceUsageDelta) {
+        self.new_payload_thread_user_cpu_seconds.record(usage.user_cpu_time);
+        self.new_payload_thread_system_cpu_seconds.record(usage.system_cpu_time);
+        self.new_payload_thread_minor_page_faults.record(usage.minor_page_faults as f64);
+        self.new_payload_thread_major_page_faults.record(usage.major_page_faults as f64);
+        self.new_payload_thread_voluntary_context_switches
+            .record(usage.voluntary_context_switches as f64);
+        self.new_payload_thread_involuntary_context_switches
+            .record(usage.involuntary_context_switches as f64);
+        self.new_payload_thread_block_input_operations.record(usage.block_input_operations as f64);
+        self.new_payload_thread_block_output_operations
+            .record(usage.block_output_operations as f64);
+    }
+}
+
+/// Records engine thread resource usage when dropped.
+pub(crate) struct NewPayloadThreadResourceGuard {
+    start: ThreadResourceUsage,
+    metrics: NewPayloadThreadResourceMetrics,
+}
+
+impl Drop for NewPayloadThreadResourceGuard {
+    fn drop(&mut self) {
+        if let Some(usage) = self.start.elapsed() {
+            self.metrics.record(&usage);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -728,18 +795,32 @@ mod tests {
 
         metrics.record_block_execution(&output, Duration::from_millis(100));
 
+        metrics.engine.new_payload.thread_resource_usage.record(&ThreadResourceUsageDelta {
+            user_cpu_time: Duration::from_millis(1),
+            system_cpu_time: Duration::from_millis(2),
+            minor_page_faults: 3,
+            major_page_faults: 4,
+            voluntary_context_switches: 5,
+            involuntary_context_switches: 6,
+            block_input_operations: 7,
+            block_output_operations: 8,
+        });
         let snapshot = snapshotter.snapshot().into_vec();
 
         // Verify that metrics were registered
         let mut found_metrics = false;
+        let mut found_thread_metrics = false;
         for (key, _unit, _desc, _value) in snapshot {
             let metric_name = key.key().name();
             if metric_name.starts_with("sync.execution") {
                 found_metrics = true;
-                break;
+            }
+            if metric_name == "consensus.engine.beacon.new_payload_thread_major_page_faults" {
+                found_thread_metrics = true;
             }
         }
 
         assert!(found_metrics, "Expected to find sync.execution metrics");
+        assert!(found_thread_metrics, "Expected to find thread resource metrics");
     }
 }

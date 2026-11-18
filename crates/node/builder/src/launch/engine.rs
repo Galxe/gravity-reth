@@ -17,7 +17,7 @@ use reth_db::{database_metrics::DatabaseMetrics, Database};
 use reth_engine_tree::{
     chain::{ChainEvent, FromOrchestrator},
     engine::{EngineApiKind, EngineApiRequest, EngineRequestHandler},
-    launch::build_engine_orchestrator_with_backfill,
+    launch::EngineOrchestratorBuilder,
     tree::TreeConfig,
 };
 use reth_engine_util::EngineMessageStreamExt;
@@ -268,31 +268,31 @@ impl<B> EngineNodeLauncher<B> {
 
         let (backfill_client, backfill_factory) =
             (network_client.clone(), ctx.provider_factory().clone());
-        let mut orchestrator = build_engine_orchestrator_with_backfill(
+        let mut orchestrator = EngineOrchestratorBuilder {
             engine_kind,
-            consensus.clone(),
-            network_client.clone(),
-            Box::pin(consensus_engine_stream),
+            consensus: consensus.clone(),
+            client: network_client.clone(),
+            incoming_requests: Box::pin(consensus_engine_stream),
             pipeline,
-            ctx.task_executor().clone(),
-            ctx.provider_factory().clone(),
-            ctx.blockchain_db().clone(),
+            pipeline_task_spawner: ctx.task_executor().clone(),
+            provider: ctx.provider_factory().clone(),
+            blockchain_db: ctx.blockchain_db().clone(),
             pruner,
-            ctx.components().payload_builder_handle().clone(),
-            engine_validator,
-            engine_tree_config,
-            ctx.sync_metrics_tx(),
-            ctx.components().evm_config().clone(),
-            ctx.task_executor().clone(),
-            |pipeline, runtime| {
-                backfill.build(BackfillContext::new(
-                    pipeline,
-                    backfill_client,
-                    backfill_factory,
-                    runtime,
-                ))
-            },
-        )?;
+            payload_builder: ctx.components().payload_builder_handle().clone(),
+            payload_validator: engine_validator,
+            tree_config: engine_tree_config,
+            sync_metrics_tx: ctx.sync_metrics_tx(),
+            evm_config: ctx.components().evm_config().clone(),
+            runtime: ctx.task_executor().clone(),
+        }
+        .build_with_backfill(|pipeline, runtime| {
+            backfill.build(BackfillContext::new(
+                pipeline,
+                backfill_client,
+                backfill_factory,
+                runtime,
+            ))
+        })?;
 
         info!(target: "reth::cli", "Consensus engine initialized");
 

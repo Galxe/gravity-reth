@@ -735,12 +735,11 @@ where
         start: BlockNumber,
         count: u64,
     ) -> EngineApiResult<ExecutionPayloadBodiesV2> {
+        if !self.has_payload_body_bal_store() {
+            return self.get_payload_bodies_by_range_with(start, count, Self::payload_body).await
+        }
         Ok(self
-            .get_payload_bodies_by_range_with_timestamps(
-                start,
-                count,
-                self.has_payload_body_bal_store(),
-            )
+            .get_payload_bodies_by_range_with_timestamps(start, count, true)
             .await?
             .into_iter()
             .map(|body| body.map(|(_, body)| body))
@@ -819,18 +818,18 @@ where
         result
     }
 
+    fn payload_body(block: Provider::Block) -> ExecutionPayloadBodyV2 {
+        ExecutionPayloadBodyV2 {
+            transactions: block.body().encoded_2718_transactions(),
+            withdrawals: block.body().withdrawals().cloned().map(Withdrawals::into_inner),
+            block_access_list: None,
+        }
+    }
+
     fn payload_body_with_timestamp(
         block: Provider::Block,
     ) -> (BlockHash, u64, ExecutionPayloadBodyV2) {
-        (
-            block.header().hash_slow(),
-            block.header().timestamp(),
-            ExecutionPayloadBodyV2 {
-                transactions: block.body().encoded_2718_transactions(),
-                withdrawals: block.body().withdrawals().cloned().map(Withdrawals::into_inner),
-                block_access_list: None,
-            },
-        )
+        (block.header().hash_slow(), block.header().timestamp(), Self::payload_body(block))
     }
 
     async fn attach_payload_body_bals(
@@ -940,8 +939,11 @@ where
         &self,
         hashes: Vec<BlockHash>,
     ) -> EngineApiResult<ExecutionPayloadBodiesV2> {
+        if !self.has_payload_body_bal_store() {
+            return self.get_payload_bodies_by_hash_with(hashes, Self::payload_body).await
+        }
         Ok(self
-            .get_payload_bodies_by_hash_with_timestamps(hashes, self.has_payload_body_bal_store())
+            .get_payload_bodies_by_hash_with_timestamps(hashes, true)
             .await?
             .into_iter()
             .map(|body| body.map(|(_, body)| body))

@@ -8491,6 +8491,7 @@ dependencies = [
  "derive_more",
  "eyre",
  "futures-util",
+ "gravity-primitives",
  "jsonrpsee",
  "reth-chainspec",
  "reth-cli-commands",
@@ -9340,6 +9341,7 @@ name = "reth-metrics"
 version = "2.3.0"
 dependencies = [
  "futures",
+ "libc",
  "metrics",
  "metrics-derive",
  "reth-primitives-traits",
@@ -11121,6 +11123,7 @@ dependencies = [
  "reth-execution-errors",
  "reth-primitives-traits",
  "reth-provider",
+ "reth-prune-types",
  "reth-storage-api",
  "reth-storage-errors",
  "reth-trie",

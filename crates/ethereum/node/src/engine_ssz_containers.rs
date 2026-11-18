@@ -125,7 +125,8 @@ pub struct PayloadStatus {
     pub validation_error: Optional<ErrorBytes>,
 }
 
-const MAX_ERROR_BYTES: usize = 1024;
+/// Maximum UTF-8 validation error length in the REST-SSZ payload status.
+pub const MAX_ERROR_BYTES: usize = 1024;
 
 const fn status_code(status: &PayloadStatusEnum) -> u8 {
     match status {
@@ -1381,13 +1382,13 @@ impl TryFrom<Vec<Option<BlobCellsAndProofsV1>>> for BlobsV4Response {
 }
 
 /// A trie-node byte list in an [`ExecutionWitnessV1`].
-pub type WitnessNodeV1 = Vec<u8>;
+pub type WitnessNodeV1 = Bytes;
 
 /// A contract-code byte list in an [`ExecutionWitnessV1`].
-pub type WitnessCodeV1 = Vec<u8>;
+pub type WitnessCodeV1 = Bytes;
 
 /// An RLP-encoded header byte list in an [`ExecutionWitnessV1`].
-pub type WitnessHeaderV1 = Vec<u8>;
+pub type WitnessHeaderV1 = Bytes;
 
 /// Canonical execution witness for `POST /payloads/witness`.
 ///
@@ -1975,9 +1976,9 @@ mod tests {
             validation_error: Optional::none(),
         };
         let witness = ExecutionWitnessV1 {
-            state: vec![vec![1, 2, 3]],
-            codes: vec![vec![4, 5]],
-            headers: vec![vec![6]],
+            state: vec![vec![1, 2, 3].into()],
+            codes: vec![vec![4, 5].into()],
+            headers: vec![vec![6].into()],
         };
         let response = PayloadStatusWithWitness::new(payload_status, Some(witness));
 
