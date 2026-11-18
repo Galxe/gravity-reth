@@ -13,7 +13,7 @@ use crate::{
     HashBuilder, Nibbles, TRIE_ACCOUNT_RLP_MAX_SIZE,
 };
 use alloy_consensus::EMPTY_ROOT_HASH;
-use alloy_primitives::{keccak256, Address, B256, U256};
+use alloy_primitives::{keccak256, map::B256Map, Address, B256, U256};
 use alloy_rlp::{BufMut, Encodable};
 use alloy_trie::proof::AddedRemovedKeys;
 use reth_execution_errors::{StateRootError, StorageRootError};
@@ -38,6 +38,8 @@ pub struct StateRoot<T, H> {
     pub prefix_sets: TriePrefixSets,
     /// Whether every child of a changed branch path must be walked.
     walk_all_changed_branch_children: bool,
+    /// Whether destroyed storage tries are represented by explicit stored-node removals.
+    materialize_destroyed_storage_nodes: bool,
     /// Previous intermediate state.
     previous_state: Option<IntermediateStateRootState>,
     /// The number of updates after which the intermediate progress should be returned.
@@ -59,6 +61,7 @@ impl<T, H> StateRoot<T, H> {
             hashed_cursor_factory,
             prefix_sets: TriePrefixSets::default(),
             walk_all_changed_branch_children: false,
+            materialize_destroyed_storage_nodes: false,
             previous_state: None,
             threshold: DEFAULT_INTERMEDIATE_THRESHOLD,
             #[cfg(feature = "metrics")]
@@ -78,6 +81,17 @@ impl<T, H> StateRoot<T, H> {
     /// tree mask. Regenerated branch updates take precedence over these deletions.
     pub const fn with_walk_all_changed_branch_children(mut self, enabled: bool) -> Self {
         self.walk_all_changed_branch_children = enabled;
+        self
+    }
+
+    /// Uses explicit legacy storage-node removals for destroyed accounts when retaining updates.
+    ///
+    /// Disabled by default: existing callers retain whole-storage `is_deleted` updates. This mode
+    /// enumerates the legacy trie cursor for each destroyed account, propagating read errors.
+    /// Factories must expose one immutable view for both calculation and node enumeration; this
+    /// does not change the production nested trie or interpret its native table encoding.
+    pub const fn with_materialized_destroyed_storage_nodes(mut self, enabled: bool) -> Self {
+        self.materialize_destroyed_storage_nodes = enabled;
         self
     }
 
@@ -107,6 +121,7 @@ impl<T, H> StateRoot<T, H> {
             prefix_sets: self.prefix_sets,
             threshold: self.threshold,
             walk_all_changed_branch_children: self.walk_all_changed_branch_children,
+            materialize_destroyed_storage_nodes: self.materialize_destroyed_storage_nodes,
             previous_state: self.previous_state,
             #[cfg(feature = "metrics")]
             metrics: self.metrics,
@@ -121,6 +136,7 @@ impl<T, H> StateRoot<T, H> {
             prefix_sets: self.prefix_sets,
             threshold: self.threshold,
             walk_all_changed_branch_children: self.walk_all_changed_branch_children,
+            materialize_destroyed_storage_nodes: self.materialize_destroyed_storage_nodes,
             previous_state: self.previous_state,
             #[cfg(feature = "metrics")]
             metrics: self.metrics,
@@ -328,7 +344,28 @@ where
 
         let removed_keys = account_node_iter.walker.take_removed_keys();
         let StateRootContext { mut trie_updates, hashed_entries_walked, .. } = storage_ctx;
-        trie_updates.finalize(hash_builder, removed_keys, self.prefix_sets.destroyed_accounts);
+        if self.materialize_destroyed_storage_nodes && retain_updates {
+            let mut destroyed_nodes = B256Map::default();
+            for address in self.prefix_sets.destroyed_accounts {
+                let mut cursor = self.trie_cursor_factory.storage_trie_cursor(address)?;
+                let mut entry = cursor.seek(Nibbles::default())?;
+                let mut paths = Vec::new();
+                while let Some((path, _)) = entry {
+                    paths.push(path);
+                    entry = cursor.next()?;
+                }
+                if !paths.is_empty() {
+                    destroyed_nodes.insert(address, paths);
+                }
+            }
+            trie_updates.finalize_with_destroyed_storage_nodes(
+                hash_builder,
+                removed_keys,
+                destroyed_nodes,
+            );
+        } else {
+            trie_updates.finalize(hash_builder, removed_keys, self.prefix_sets.destroyed_accounts);
+        }
 
         let stats = tracker.finish();
 
@@ -869,5 +906,36 @@ mod empty_storage_updates_tests {
             assert_eq!(walked, 0);
             assert_eq!(updates, StorageTrieUpdates::default());
         }
+    }
+}
+
+#[cfg(test)]
+mod materialized_destroyed_storage_tests {
+    use super::*;
+    use crate::{
+        hashed_cursor::mock::MockHashedCursorFactory, trie_cursor::mock::MockTrieCursorFactory,
+    };
+
+    #[test]
+    fn explicit_destroyed_node_mode_propagates_original_cursor_error_and_default_still_wipes() {
+        let address = B256::with_last_byte(42);
+        let prefixes = TriePrefixSets {
+            destroyed_accounts: [address].into_iter().collect(),
+            ..Default::default()
+        };
+        let (_, original) =
+            StateRoot::new(MockTrieCursorFactory::default(), MockHashedCursorFactory::default())
+                .with_prefix_sets(prefixes.clone())
+                .root_with_updates()
+                .unwrap();
+        assert!(original.storage_tries[&address].is_deleted());
+        let result =
+            StateRoot::new(MockTrieCursorFactory::default(), MockHashedCursorFactory::default())
+                .with_prefix_sets(prefixes)
+                .with_materialized_destroyed_storage_nodes(true)
+                .root_with_updates();
+        assert!(
+            matches!(result, Err(StateRootError::Database(reth_storage_errors::db::DatabaseError::Other(message))) if message == format!("storage trie for {address:?} not found"))
+        );
     }
 }
