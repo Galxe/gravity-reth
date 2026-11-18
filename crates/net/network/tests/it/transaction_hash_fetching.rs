@@ -1,57 +1,22 @@
 //! Tests fetching transactions that peers announce by hash over real sessions.
 
+use crate::utils::{funded_transactions, poll_until};
 use alloy_primitives::{TxHash, U256};
 use reth_network::{
     test_utils::Testnet,
     transactions::{TransactionPropagationMode, TransactionsManagerConfig},
 };
-use reth_primitives_traits::SignedTransaction;
-use reth_provider::test_utils::{ExtendedAccount, MockEthProvider};
+use reth_provider::test_utils::ExtendedAccount;
 use reth_tracing::init_test_tracing;
-use reth_transaction_pool::{
-    test_utils::TransactionGenerator, EthPooledTransaction, PoolTransaction, TransactionPool,
-};
+use reth_transaction_pool::{test_utils::TransactionGenerator, PoolTransaction, TransactionPool};
 use std::time::Duration;
-
-/// How long a peer may take to fetch and import the announced transactions.
-const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Generates pooled transactions from distinct senders that are funded in the provider.
-fn funded_transactions(provider: &MockEthProvider, count: usize) -> Vec<EthPooledTransaction> {
-    let mut generator = TransactionGenerator::with_num_signers(rand::rng(), count);
-    generator
-        .signer_keys
-        .clone()
-        .into_iter()
-        .map(|signer| {
-            let mut tx = generator.transaction();
-            tx.signer = signer;
-            let tx = tx.into_eip1559().try_into_recovered().unwrap();
-            let tx = EthPooledTransaction::try_from_consensus(tx).unwrap();
-            provider.add_account(tx.sender(), ExtendedAccount::new(0, U256::from(10u128.pow(18))));
-            tx
-        })
-        .collect()
-}
 
 /// Waits until the pool contains all the given transactions.
 async fn wait_for_transactions(pool: &impl TransactionPool, hashes: &[TxHash]) {
-    tokio::time::timeout(FETCH_TIMEOUT, async {
-        loop {
-            if pool.get_all(hashes.to_vec()).len() == hashes.len() {
-                return
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+    poll_until("transactions", async || {
+        (pool.get_all(hashes.to_vec()).len() == hashes.len()).then_some(())
     })
     .await
-    .unwrap_or_else(|_| {
-        panic!(
-            "timed out, pool has {} of {} transactions",
-            pool.get_all(hashes.to_vec()).len(),
-            hashes.len()
-        )
-    });
 }
 
 /// Hash-only propagation, so peers must request every transaction they learn about.

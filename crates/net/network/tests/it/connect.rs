@@ -97,8 +97,8 @@ async fn test_already_connected() {
     let p1 = PeerConfig::default();
 
     // initialize two peers with the same identifier
-    let p2 = PeerConfig::with_secret_key(client.clone(), secret_key);
-    let p3 = PeerConfig::with_secret_key(client, secret_key);
+    let p2 = PeerConfig::new(client.clone()).with_secret_key(secret_key);
+    let p3 = PeerConfig::new(client).with_secret_key(secret_key);
 
     net.extend_peer_with_config(vec![p1, p2, p3]).await.unwrap();
 
@@ -141,8 +141,8 @@ async fn test_get_peer() {
     let client = NoopProvider::default();
 
     let p1 = PeerConfig::default();
-    let p2 = PeerConfig::with_secret_key(client.clone(), secret_key);
-    let p3 = PeerConfig::with_secret_key(client, secret_key_1);
+    let p2 = PeerConfig::new(client.clone()).with_secret_key(secret_key);
+    let p3 = PeerConfig::new(client).with_secret_key(secret_key_1);
     net.extend_peer_with_config(vec![p1, p2, p3]).await.unwrap();
 
     let mut handles = net.handles();
@@ -174,8 +174,8 @@ async fn test_get_peer_by_id() {
     let secret_key_1 = SecretKey::new(&mut rand_08::thread_rng());
     let client = NoopProvider::default();
     let p1 = PeerConfig::default();
-    let p2 = PeerConfig::with_secret_key(client.clone(), secret_key);
-    let p3 = PeerConfig::with_secret_key(client, secret_key_1);
+    let p2 = PeerConfig::new(client.clone()).with_secret_key(secret_key);
+    let p3 = PeerConfig::new(client).with_secret_key(secret_key_1);
 
     net.extend_peer_with_config(vec![p1, p2, p3]).await.unwrap();
 

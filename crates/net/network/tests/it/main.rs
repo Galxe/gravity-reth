@@ -12,6 +12,7 @@ mod session;
 mod startup;
 mod transaction_hash_fetching;
 mod txgossip;
+mod utils;
 
 const fn main() {}
 

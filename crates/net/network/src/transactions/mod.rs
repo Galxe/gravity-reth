@@ -2538,17 +2538,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_ignored_tx_broadcasts_while_initially_syncing() {
         reth_tracing::init_test_tracing();
-        let net = Testnet::create(3).await;
+        let net = Testnet::create(3).await.spawn();
+        let [peer0, peer1, _] = net.peers_array();
 
-        let mut handles = net.handles();
-        let handle0 = handles.next().unwrap();
-        let handle1 = handles.next().unwrap();
-
-        drop(handles);
-        let handle = net.spawn();
-
-        let listener0 = handle0.event_listener();
-        handle0.add_peer(*handle1.peer_id(), handle1.local_addr());
+        let listener0 = peer0.event_listener();
+        peer0.add_peer(peer1);
         let secret_key = SecretKey::new(&mut rand_08::thread_rng());
 
         let client = NoopProvider::default();
@@ -2593,7 +2587,7 @@ mod tests {
         );
         let signed_tx = TransactionSigned::decode(&mut &input[..]).unwrap();
         transactions.on_network_tx_event(NetworkTransactionEvent::IncomingTransactions {
-            peer_id: *handle1.peer_id(),
+            peer_id: *peer1.peer_id(),
             msg: Transactions(vec![signed_tx.clone()]),
         });
         poll_fn(|cx| {
@@ -2602,23 +2596,16 @@ mod tests {
         })
         .await;
         assert!(pool.is_empty());
-        handle.terminate().await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_tx_broadcasts_through_two_syncs() {
         reth_tracing::init_test_tracing();
-        let net = Testnet::create(3).await;
+        let net = Testnet::create(3).await.spawn();
+        let [peer0, peer1, _] = net.peers_array();
 
-        let mut handles = net.handles();
-        let handle0 = handles.next().unwrap();
-        let handle1 = handles.next().unwrap();
-
-        drop(handles);
-        let handle = net.spawn();
-
-        let listener0 = handle0.event_listener();
-        handle0.add_peer(*handle1.peer_id(), handle1.local_addr());
+        let listener0 = peer0.event_listener();
+        peer0.add_peer(peer1);
         let secret_key = SecretKey::new(&mut rand_08::thread_rng());
 
         let client = NoopProvider::default();
@@ -2666,7 +2653,7 @@ mod tests {
         );
         let signed_tx = TransactionSigned::decode(&mut &input[..]).unwrap();
         transactions.on_network_tx_event(NetworkTransactionEvent::IncomingTransactions {
-            peer_id: *handle1.peer_id(),
+            peer_id: *peer1.peer_id(),
             msg: Transactions(vec![signed_tx.clone()]),
         });
         poll_fn(|cx| {
@@ -2677,7 +2664,6 @@ mod tests {
         assert!(!NetworkInfo::is_initially_syncing(&network_handle));
         assert!(NetworkInfo::is_syncing(&network_handle));
         assert!(!pool.is_empty());
-        handle.terminate().await;
     }
 
     // Ensure that the transaction manager correctly handles the `IncomingPooledTransactionHashes`
@@ -2788,18 +2774,12 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_handle_incoming_transactions() {
         reth_tracing::init_test_tracing();
-        let net = Testnet::create(3).await;
+        let net = Testnet::create(3).await.spawn();
+        let [peer0, peer1, _] = net.peers_array();
 
-        let mut handles = net.handles();
-        let handle0 = handles.next().unwrap();
-        let handle1 = handles.next().unwrap();
+        let listener0 = peer0.event_listener();
 
-        drop(handles);
-        let handle = net.spawn();
-
-        let listener0 = handle0.event_listener();
-
-        handle0.add_peer(*handle1.peer_id(), handle1.local_addr());
+        peer0.add_peer(peer1);
         let secret_key = SecretKey::new(&mut rand_08::thread_rng());
 
         let client = NoopProvider::default();
@@ -2842,14 +2822,14 @@ mod tests {
         );
         let signed_tx = TransactionSigned::decode(&mut &input[..]).unwrap();
         transactions.on_network_tx_event(NetworkTransactionEvent::IncomingTransactions {
-            peer_id: *handle1.peer_id(),
+            peer_id: *peer1.peer_id(),
             msg: Transactions(vec![signed_tx.clone()]),
         });
         assert!(transactions
             .transactions_by_peers
             .get(signed_tx.tx_hash())
             .unwrap()
-            .contains(handle1.peer_id()));
+            .contains(peer1.peer_id()));
 
         // advance the transaction manager future
         poll_fn(|cx| {
@@ -2860,7 +2840,6 @@ mod tests {
 
         assert!(!pool.is_empty());
         assert!(pool.get(signed_tx.tx_hash()).is_some());
-        handle.terminate().await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2965,18 +2944,12 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_on_get_pooled_transactions_network() {
         reth_tracing::init_test_tracing();
-        let net = Testnet::create(2).await;
+        let net = Testnet::create(2).await.spawn();
+        let [peer0, peer1] = net.peers_array();
 
-        let mut handles = net.handles();
-        let handle0 = handles.next().unwrap();
-        let handle1 = handles.next().unwrap();
+        let listener0 = peer0.event_listener();
 
-        drop(handles);
-        let handle = net.spawn();
-
-        let listener0 = handle0.event_listener();
-
-        handle0.add_peer(*handle1.peer_id(), handle1.local_addr());
+        peer0.add_peer(peer1);
         let secret_key = SecretKey::new(&mut rand_08::thread_rng());
 
         let client = NoopProvider::default();
@@ -3012,7 +2985,6 @@ mod tests {
                 }
             }
         }
-        handle.terminate().await;
 
         let tx = MockTransaction::eip1559();
         let _ = transactions
@@ -3026,7 +2998,7 @@ mod tests {
             oneshot::channel::<RequestResult<PooledTransactions<PooledTransactionVariant>>>();
 
         transactions.on_network_tx_event(NetworkTransactionEvent::GetPooledTransactions {
-            peer_id: *handle1.peer_id(),
+            peer_id: *peer1.peer_id(),
             request,
             response: send,
         });
