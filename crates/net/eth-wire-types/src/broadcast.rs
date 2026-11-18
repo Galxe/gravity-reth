@@ -173,7 +173,7 @@ pub fn decode_list_with_memory_budget<T: Decodable + InMemorySize>(
     let (payload, rest) = buf.split_at(header.payload_length);
     let mut payload = payload;
 
-    let mut txs = Vec::new();
+    let mut txs = Vec::with_capacity(estimated_transaction_list_capacity(header.payload_length));
     let mut total_size = 0usize;
 
     while !payload.is_empty() {
@@ -189,6 +189,23 @@ pub fn decode_list_with_memory_budget<T: Decodable + InMemorySize>(
 
     *buf = rest;
     Ok(txs)
+}
+
+// Keep this as a conservative hint: small lists stay allocation-free until the first push, while
+// large untrusted payloads cannot force an outsized preallocation.
+const MIN_TRANSACTION_RLP_SIZE_ESTIMATE: usize = 128;
+const MIN_PREALLOCATED_TRANSACTIONS: usize = 4;
+const MAX_PREALLOCATED_TRANSACTIONS: usize = 1024;
+
+const fn estimated_transaction_list_capacity(payload_length: usize) -> usize {
+    let estimate = payload_length / MIN_TRANSACTION_RLP_SIZE_ESTIMATE;
+    if estimate < MIN_PREALLOCATED_TRANSACTIONS {
+        0
+    } else if estimate > MAX_PREALLOCATED_TRANSACTIONS {
+        MAX_PREALLOCATED_TRANSACTIONS
+    } else {
+        estimate
+    }
 }
 
 /// Same as [`Transactions`] but this is intended as egress message send from local to _many_ peers.
@@ -444,6 +461,13 @@ pub struct NewPooledTransactionHashes66(
     pub Vec<B256>,
 );
 
+impl NewPooledTransactionHashes66 {
+    /// Returns a new instance with capacity for `capacity` hashes.
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self(Vec::with_capacity(capacity))
+    }
+}
+
 impl From<Vec<B256>> for NewPooledTransactionHashes66 {
     fn from(v: Vec<B256>) -> Self {
         Self(v)
@@ -516,6 +540,15 @@ impl proptest::prelude::Arbitrary for NewPooledTransactionHashes68 {
 }
 
 impl NewPooledTransactionHashes68 {
+    /// Returns a new instance with capacity for `capacity` entries.
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            types: Vec::with_capacity(capacity),
+            sizes: Vec::with_capacity(capacity),
+            hashes: Vec::with_capacity(capacity),
+        }
+    }
+
     /// Returns an iterator over tx hashes zipped with corresponding metadata.
     pub fn metadata_iter(&self) -> impl Iterator<Item = (&B256, (u8, usize))> {
         self.hashes.iter().zip(self.types.iter().copied().zip(self.sizes.iter().copied()))
@@ -685,6 +718,16 @@ impl proptest::prelude::Arbitrary for NewPooledTransactionHashes72 {
 }
 
 impl NewPooledTransactionHashes72 {
+    /// Returns a new instance with capacity for `capacity` entries and no cell mask.
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            types: Vec::with_capacity(capacity),
+            sizes: Vec::with_capacity(capacity),
+            hashes: Vec::with_capacity(capacity),
+            cell_mask: None,
+        }
+    }
+
     /// Returns an iterator over tx hashes zipped with corresponding metadata.
     pub fn metadata_iter(&self) -> impl Iterator<Item = (&B256, (u8, usize))> {
         self.hashes.iter().zip(self.types.iter().copied().zip(self.sizes.iter().copied()))
