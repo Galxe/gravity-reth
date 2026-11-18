@@ -3,7 +3,7 @@ use reth_db_api::{table::Value, transaction::DbTxMut};
 use reth_primitives_traits::NodePrimitives;
 use reth_provider::{
     BlockReader, DBProvider, PruneCheckpointReader, PruneCheckpointWriter,
-    StaticFileProviderFactory, StorageSettingsCache,
+    StaticFileProviderFactory, StorageSettingsCache, TransactionsProviderExt,
 };
 use reth_prune::{
     PruneMode, PruneModes, PruneSegment, PrunerBuilder, SegmentOutput, SegmentOutputCheckpoint,
@@ -45,7 +45,8 @@ where
         + BlockReader
         + StaticFileProviderFactory<
             Primitives: NodePrimitives<SignedTx: Value, Receipt: Value, BlockHeader: Value>,
-        > + StorageSettingsCache,
+        > + StorageSettingsCache
+        + TransactionsProviderExt,
 {
     fn id(&self) -> StageId {
         StageId::Prune
@@ -149,7 +150,8 @@ where
         + BlockReader
         + StaticFileProviderFactory<
             Primitives: NodePrimitives<SignedTx: Value, Receipt: Value, BlockHeader: Value>,
-        > + StorageSettingsCache,
+        > + StorageSettingsCache
+        + TransactionsProviderExt,
 {
     fn id(&self) -> StageId {
         StageId::PruneSenderRecovery

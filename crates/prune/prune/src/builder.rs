@@ -8,7 +8,7 @@ use reth_primitives_traits::NodePrimitives;
 use reth_provider::{
     providers::StaticFileProvider, BlockReader, DBProvider, DatabaseProviderFactory,
     NodePrimitivesProvider, PruneCheckpointReader, PruneCheckpointWriter,
-    StaticFileProviderFactory, StorageSettingsCache,
+    StaticFileProviderFactory, StorageSettingsCache, TransactionsProviderExt,
 };
 use reth_prune_types::PruneModes;
 use std::time::Duration;
@@ -85,7 +85,8 @@ impl PrunerBuilder {
                                 + BlockReader<Transaction: Encodable2718>
                                 + StaticFileProviderFactory<
                     Primitives: NodePrimitives<SignedTx: Value, Receipt: Value, BlockHeader: Value>,
-                > + StorageSettingsCache,
+                > + StorageSettingsCache
+                                + TransactionsProviderExt,
             > + StaticFileProviderFactory<
                 Primitives = <PF::ProviderRW as NodePrimitivesProvider>::Primitives,
             >,
@@ -115,7 +116,8 @@ impl PrunerBuilder {
             + BlockReader<Transaction: Encodable2718>
             + PruneCheckpointWriter
             + PruneCheckpointReader
-            + StorageSettingsCache,
+            + StorageSettingsCache
+            + TransactionsProviderExt,
     {
         let segments = SegmentSet::<Provider>::from_components(static_file_provider, self.segments);
 

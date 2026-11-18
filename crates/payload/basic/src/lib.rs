@@ -16,7 +16,8 @@ use futures_util::FutureExt;
 use reth_chain_state::CanonStateNotification;
 use reth_execution_cache::SavedCache;
 use reth_payload_builder::{
-    BuildNewPayload, KeepPayloadJobAlive, PayloadId, PayloadJob, PayloadJobGenerator,
+    BuildNewPayload, KeepPayloadJobAlive, PayloadBuilderLease, PayloadId, PayloadJob,
+    PayloadJobGenerator,
 };
 use reth_payload_builder_primitives::PayloadBuilderError;
 use reth_payload_primitives::{BuiltPayload, PayloadAttributes, PayloadKind};
@@ -164,7 +165,8 @@ where
         input: BuildNewPayload<Builder::Attributes>,
         id: PayloadId,
     ) -> Result<Self::Job, PayloadBuilderError> {
-        let parent_header = if input.parent_hash.is_zero() {
+        let BuildNewPayload { attributes, parent_hash, mut resources } = input;
+        let parent_header = if parent_hash.is_zero() {
             // Use latest header for genesis block case
             self.client
                 .latest_header()
@@ -173,16 +175,16 @@ where
         } else {
             // Fetch specific header by hash
             self.client
-                .sealed_header_by_hash(input.parent_hash)
+                .sealed_header_by_hash(parent_hash)
                 .map_err(PayloadBuilderError::from)?
-                .ok_or_else(|| PayloadBuilderError::MissingParentHeader(input.parent_hash))?
+                .ok_or_else(|| PayloadBuilderError::MissingParentHeader(parent_hash))?
         };
 
         let parent_hash = parent_header.hash();
         let cached_reads = self.maybe_pre_cached(parent_hash);
         let parent_block_info = self.maybe_parent_block_info(parent_hash);
 
-        let config = PayloadConfig::new(Arc::new(parent_header), input.attributes, id)
+        let config = PayloadConfig::new(Arc::new(parent_header), attributes, id)
             .with_parent_block_info(parent_block_info);
 
         let until = self.job_deadline(config.attributes.timestamp());
@@ -197,8 +199,9 @@ where
             best_payload: PayloadState::Missing,
             pending_block: None,
             cached_reads,
-            execution_cache: input.cache,
-            trie_handle: input.trie_handle,
+            execution_cache: resources.take_execution_cache(),
+            trie_handle: resources.take_state_root_handle(),
+            leases: resources.take_leases(),
             payload_task_guard: self.payload_task_guard.clone(),
             metrics: Default::default(),
             builder: self.builder.clone(),
@@ -389,6 +392,8 @@ where
     execution_cache: Option<SavedCache>,
     /// Optional state root task handle, shared with the engine.
     trie_handle: Option<StateRootHandle>,
+    /// Held by the job and every detached build until its work has actually exited.
+    leases: Vec<PayloadBuilderLease>,
     /// metrics for this type
     metrics: PayloadBuilderMetrics,
     /// The type responsible for building payloads.
@@ -416,6 +421,7 @@ where
         let cached_reads = self.cached_reads.take().unwrap_or_default();
         let execution_cache = self.execution_cache.clone();
         let trie_handle = self.trie_handle.take();
+        let leases = self.leases.clone();
         let builder = self.builder.clone();
         let executor = self.executor.clone();
         let span = Span::current();
@@ -436,6 +442,7 @@ where
                     cancel,
                     best_payload,
                 };
+                let _leases = leases;
                 let result = builder.try_build(args);
                 let _ = tx.send(result);
             });
@@ -586,11 +593,13 @@ where
                     let (tx, rx) = oneshot::channel();
                     let config = self.config.clone();
                     let builder = self.builder.clone();
+                    let leases = self.leases.clone();
                     let span = Span::current();
                     let dispatch = tracing::dispatcher::get_default(Clone::clone);
                     self.executor.spawn_blocking_named_or_tokio(
                         PAYLOAD_BUILDER_THREAD_NAME,
                         move || {
+                            let _leases = leases;
                             let _dispatch = tracing::dispatcher::set_default(&dispatch);
                             let _parent = span.enter();
                             let _span =
@@ -607,11 +616,13 @@ where
                     debug!(target: "payload_builder", id=%self.config.payload_id(), "racing fallback payload");
                     // race the in progress job with this job
                     let (tx, rx) = oneshot::channel();
+                    let leases = self.leases.clone();
                     let span = Span::current();
                     let dispatch = tracing::dispatcher::get_default(Clone::clone);
                     self.executor.spawn_blocking_named_or_tokio(
                         PAYLOAD_BUILDER_THREAD_NAME,
                         move || {
+                            let _leases = leases;
                             let _dispatch = tracing::dispatcher::set_default(&dispatch);
                             let _parent = span.enter();
                             let _span =
@@ -1057,4 +1068,192 @@ fn duration_until(unix_timestamp_secs: u64) -> Duration {
     let unix_now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
     let timestamp = Duration::from_secs(unix_timestamp_secs);
     timestamp.saturating_sub(unix_now)
+}
+
+#[cfg(test)]
+mod lease_tests {
+    use super::*;
+    use alloy_consensus::Header;
+    use reth_ethereum_engine_primitives::{EthBuiltPayload, EthPayloadAttributes};
+    use std::sync::{mpsc, Condvar, Mutex};
+
+    #[derive(Clone)]
+    struct Gate {
+        entered: mpsc::Sender<()>,
+        release: Arc<(Mutex<bool>, Condvar)>,
+    }
+
+    struct Release(Arc<(Mutex<bool>, Condvar)>);
+
+    impl Drop for Release {
+        fn drop(&mut self) {
+            *self.0 .0.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+            self.0 .1.notify_all();
+        }
+    }
+
+    impl Gate {
+        fn new() -> (Self, mpsc::Receiver<()>, Release) {
+            let (entered, receiver) = mpsc::channel();
+            let release = Arc::new((Mutex::new(false), Condvar::new()));
+            (Self { entered, release: release.clone() }, receiver, Release(release))
+        }
+
+        fn wait(&self) {
+            self.entered.send(()).unwrap();
+            let guard = self.release.0.lock().unwrap();
+            let (released, _) = self
+                .release
+                .1
+                .wait_timeout_while(guard, Duration::from_secs(5), |released| !*released)
+                .unwrap();
+            let was_released = *released;
+            drop(released);
+            assert!(was_released, "fixture worker gate was not released within the bounded wait");
+        }
+    }
+
+    struct DropProbe(mpsc::Sender<()>);
+
+    impl Drop for DropProbe {
+        fn drop(&mut self) {
+            let _ = self.0.send(());
+        }
+    }
+
+    #[derive(Clone)]
+    struct BlockingBuilder {
+        gate: Gate,
+        fallback: bool,
+    }
+
+    fn payload() -> EthBuiltPayload {
+        EthBuiltPayload::new(Arc::new(Default::default()), U256::ZERO, None, None)
+    }
+
+    impl PayloadBuilder for BlockingBuilder {
+        type Attributes = EthPayloadAttributes;
+        type BuiltPayload = EthBuiltPayload;
+
+        fn try_build(
+            &self,
+            _args: BuildArguments<EthPayloadAttributes, EthBuiltPayload>,
+        ) -> Result<BuildOutcome<EthBuiltPayload>, PayloadBuilderError> {
+            self.gate.wait();
+            Ok(BuildOutcome::Freeze(payload()))
+        }
+
+        fn build_empty_payload(
+            &self,
+            _config: PayloadConfig<EthPayloadAttributes, Header>,
+        ) -> Result<EthBuiltPayload, PayloadBuilderError> {
+            self.gate.wait();
+            Ok(payload())
+        }
+
+        fn on_missing_payload(
+            &self,
+            _args: BuildArguments<EthPayloadAttributes, EthBuiltPayload>,
+        ) -> MissingPayloadBehaviour<EthBuiltPayload> {
+            if self.fallback {
+                let gate = self.gate.clone();
+                MissingPayloadBehaviour::RacePayload(Box::new(move || {
+                    gate.wait();
+                    Ok(payload())
+                }))
+            } else {
+                MissingPayloadBehaviour::RaceEmptyPayload
+            }
+        }
+    }
+
+    fn job(
+        builder: BlockingBuilder,
+        dropped: mpsc::Sender<()>,
+        executor: Runtime,
+    ) -> BasicPayloadJob<BlockingBuilder> {
+        BasicPayloadJob {
+            config: PayloadConfig::new(
+                Arc::new(SealedHeader::seal_slow(Header::default())),
+                EthPayloadAttributes { timestamp: 1, ..Default::default() },
+                Default::default(),
+            ),
+            executor,
+            deadline: Box::pin(tokio::time::sleep(Duration::from_secs(60))),
+            interval: tokio::time::interval(Duration::from_secs(60)),
+            best_payload: PayloadState::Missing,
+            pending_block: None,
+            payload_task_guard: PayloadTaskGuard::new(1),
+            cached_reads: None,
+            execution_cache: None,
+            trie_handle: None,
+            leases: vec![PayloadBuilderLease::new(DropProbe(dropped))],
+            metrics: Default::default(),
+            builder,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn try_build_lease_outlives_resolve_and_cancellation() {
+        for cancel in [false, true] {
+            // Keep the named worker runtime alive until the gate and its worker have exited.
+            // Declaring it before Release also makes panic unwinding release the gate before join.
+            let runtime = Runtime::test();
+            let (gate, entered, release) = Gate::new();
+            let (dropped, drop_rx) = mpsc::channel();
+            let mut job = job(BlockingBuilder { gate, fallback: false }, dropped, runtime.clone());
+            // A completed prior build can win while a newer detached attempt is still running.
+            job.best_payload = PayloadState::Best(payload());
+            job.spawn_build_job();
+            entered.recv_timeout(Duration::from_secs(5)).unwrap();
+            let (resolved, _) = job.resolve_kind(PayloadKind::Earliest);
+            if cancel {
+                drop(resolved);
+            } else {
+                resolved.await.unwrap();
+            }
+            drop(job);
+            assert_eq!(drop_rx.try_recv(), Err(mpsc::TryRecvError::Empty));
+            drop(release);
+            drop_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        }
+    }
+
+    async fn assert_resolve_worker_lease(fallback: bool) {
+        for cancel in [false, true] {
+            // Keep the named worker runtime alive until the gate and its worker have exited.
+            // Declaring it before Release also makes panic unwinding release the gate before join.
+            let runtime = Runtime::test();
+            let (gate, entered, release) = Gate::new();
+            let (dropped, drop_rx) = mpsc::channel();
+            let mut job = job(BlockingBuilder { gate, fallback }, dropped, runtime.clone());
+            // Resolve may race an already queued primary result; its channel controls that winner.
+            let (primary, receiver) = oneshot::channel();
+            job.pending_block =
+                Some(PendingPayload { _cancel: CancelOnDrop::default(), payload: receiver });
+            let (resolved, _) = job.resolve_kind(PayloadKind::Earliest);
+            entered.recv_timeout(Duration::from_secs(5)).unwrap();
+            if cancel {
+                drop(resolved);
+                drop(primary);
+            } else {
+                primary.send(Ok(BuildOutcome::Freeze(payload()))).unwrap();
+                resolved.await.unwrap();
+            }
+            drop(job);
+            assert_eq!(drop_rx.try_recv(), Err(mpsc::TryRecvError::Empty));
+            drop(release);
+            drop_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn empty_payload_lease_outlives_winning_primary_and_cancellation() {
+        assert_resolve_worker_lease(false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fallback_payload_lease_outlives_winning_primary_and_cancellation() {
+        assert_resolve_worker_lease(true).await;
+    }
 }
