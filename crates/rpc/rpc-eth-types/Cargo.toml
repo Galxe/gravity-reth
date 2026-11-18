@@ -25,6 +25,7 @@ reth-revm.workspace = true
 reth-rpc-server-types.workspace = true
 reth-rpc-convert.workspace = true
 reth-tasks.workspace = true
+reth-lru.workspace = true
 reth-transaction-pool.workspace = true
 
 # ethereum
@@ -60,7 +61,6 @@ serde = { workspace = true, features = ["derive"] }
 url = { workspace = true, features = ["serde"] }
 thiserror.workspace = true
 derive_more.workspace = true
-schnellru.workspace = true
 rand.workspace = true
 tracing.workspace = true
 itertools.workspace = true

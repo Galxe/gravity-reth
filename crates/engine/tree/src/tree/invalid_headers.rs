@@ -1,10 +1,10 @@
 use alloy_eips::eip1898::BlockWithParent;
-use alloy_primitives::B256;
+use alloy_primitives::{map::FbBuildHasher, B256};
+use reth_lru::LruMap;
 use reth_metrics::{
     metrics::{Counter, Gauge},
     Metrics,
 };
-use schnellru::{ByLength, LruMap};
 use std::fmt::Debug;
 use tracing::warn;
 
@@ -12,7 +12,7 @@ use tracing::warn;
 #[derive(Debug)]
 pub struct InvalidHeaderCache {
     /// This maps a header hash to a reference to its invalid ancestor.
-    headers: LruMap<B256, HeaderEntry>,
+    headers: LruMap<B256, HeaderEntry, FbBuildHasher<32>>,
     /// Number of cache hits before an invalid header entry is evicted and reprocessed.
     hit_eviction_threshold: u8,
     /// Metrics for the cache.
@@ -26,14 +26,14 @@ impl InvalidHeaderCache {
     /// evicted on the first lookup.
     pub fn new(max_length: u32, hit_eviction_threshold: u8) -> Self {
         Self {
-            headers: LruMap::new(ByLength::new(max_length)),
+            headers: LruMap::with_hasher(max_length, Default::default()),
             hit_eviction_threshold,
             metrics: Default::default(),
         }
     }
 
     fn insert_entry(&mut self, hash: B256, header: BlockWithParent) {
-        self.headers.insert(hash, HeaderEntry { header, hit_count: 0 });
+        let _ = self.headers.insert(hash, HeaderEntry { header, hit_count: 0 });
     }
 
     /// Returns the invalid ancestor's header if it exists in the cache.
