@@ -52,7 +52,7 @@ impl NodeArena {
     }
 
     /// Returns bytes reserved by this arena's backing arrays, excluding nodes' own heap data.
-    pub(super) fn allocated_bytes(&self) -> usize {
+    pub(super) const fn allocated_bytes(&self) -> usize {
         self.capacity() * core::mem::size_of::<ArenaSparseNode>() +
             self.free.capacity() * core::mem::size_of::<Index>() +
             self.blinded.capacity() * core::mem::size_of::<RlpNode>() +

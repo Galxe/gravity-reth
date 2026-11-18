@@ -3,6 +3,9 @@
 mod calculator;
 pub use calculator::*;
 
+mod multiproof_calculator;
+pub use multiproof_calculator::MultiProofCalculator;
+
 /// Read-only cursor factory adapters for reusable proof calculations.
 pub mod cursor;
 pub use cursor::{
