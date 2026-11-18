@@ -10,7 +10,10 @@ use crate::{
     FetchClient,
 };
 use alloy_consensus::BlockHeader;
-use alloy_primitives::B256;
+use alloy_primitives::{
+    map::{FbBuildHasher, HashMap},
+    B256,
+};
 use rand::seq::SliceRandom;
 use reth_eth_wire::{
     BlockHashNumber, Capabilities, DisconnectReason, EthNetworkPrimitives, GetReceipts70,
@@ -23,7 +26,7 @@ use reth_network_peers::PeerId;
 use reth_network_types::{PeerAddr, PeerKind};
 use reth_primitives_traits::Block;
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::VecDeque,
     fmt,
     net::{IpAddr, SocketAddr},
     ops::Deref,
@@ -76,7 +79,7 @@ impl Deref for BlockNumReader {
 #[derive(Debug)]
 pub struct NetworkState<N: NetworkPrimitives = EthNetworkPrimitives> {
     /// All active peers and their state.
-    active_peers: HashMap<PeerId, ActivePeer<N>>,
+    active_peers: HashMap<PeerId, ActivePeer<N>, FbBuildHasher<64>>,
     /// Manages connections to peers.
     peers_manager: PeersManager,
     /// Buffered messages until polled.
@@ -312,14 +315,15 @@ impl<N: NetworkPrimitives> NetworkState<N> {
         self.peers_manager.add_trusted_peer_node(trusted)
     }
 
-    /// Adds a peer and its address with the given kind to the peerset.
+    /// Adds a peer and its address with the given kind to the peerset and dials it if there's an
+    /// outbound slot.
     pub(crate) fn add_peer_kind(
         &mut self,
         peer_id: PeerId,
         kind: Option<PeerKind>,
         addr: PeerAddr,
     ) {
-        self.peers_manager.add_peer_kind(peer_id, kind, addr, None)
+        self.peers_manager.add_requested_peer(peer_id, kind, addr)
     }
 
     /// Connects a peer and its address with the given kind
