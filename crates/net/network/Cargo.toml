@@ -81,6 +81,7 @@ itertools.workspace = true
 smallvec.workspace = true
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 test-case.workspace = true
 criterion = { workspace = true, features = ["async_tokio"] }
 # reth

@@ -23,7 +23,7 @@ use std::{
 
 /// A real immutable fixture state. Range reads, roots and proofs share these exact leaves.
 #[derive(Debug, Default)]
-struct FixtureState {
+pub(super) struct FixtureState {
     accounts: BTreeMap<B256, Account>,
     storage: BTreeMap<B256, BTreeMap<B256, U256>>,
 }
@@ -63,12 +63,12 @@ impl FixtureState {
 type StorageRead = (B256, B256, B256, usize);
 
 #[derive(Debug)]
-struct Fixture {
+pub(super) struct Fixture {
     state: Arc<FixtureState>,
     root: B256,
     codes: BTreeMap<B256, Bytecode>,
     bals: BalStoreHandle,
-    resolutions: AtomicUsize,
+    pub(super) resolutions: AtomicUsize,
     code_reads: AtomicUsize,
     storage_reads: Arc<Mutex<Vec<StorageRead>>>,
     fail_reads: bool,
@@ -77,7 +77,7 @@ struct Fixture {
 }
 
 impl Fixture {
-    fn new(state: FixtureState) -> Self {
+    pub(super) fn new(state: FixtureState) -> Self {
         let root = trie(&state.account_leaves(), &[]).0;
         Self {
             state: Arc::new(state),
@@ -93,7 +93,7 @@ impl Fixture {
         }
     }
 
-    fn account_request(&self) -> GetAccountRangeMessage {
+    pub(super) fn account_request(&self) -> GetAccountRangeMessage {
         GetAccountRangeMessage {
             request_id: 1,
             root_hash: self.root,
@@ -265,7 +265,7 @@ fn trie(leaves: &[(B256, Vec<u8>)], keys: &[B256]) -> (B256, Vec<Bytes>) {
     )
 }
 
-fn state_with_accounts() -> FixtureState {
+pub(super) fn state_with_accounts() -> FixtureState {
     let a = B256::repeat_byte(1);
     let b = B256::repeat_byte(2);
     FixtureState {

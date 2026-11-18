@@ -26,7 +26,9 @@ use reth_engine_primitives::{
 };
 use reth_errors::{ConsensusError, ProviderResult};
 use reth_evm::ConfigureEvm;
-use reth_payload_builder::{BuildNewPayload, PayloadBuilderHandle};
+use reth_payload_builder::{
+    BuildNewPayload, PayloadBuilderHandle, PayloadBuilderLease, PayloadBuilderResources,
+};
 use reth_payload_primitives::{BuiltPayload, NewPayloadError, PayloadTypes};
 use reth_pipe_exec_layer_event_bus::{
     MakeCanonicalEvent, PipeExecLayerEvent, PipeExecPrimitives, WaitForPersistenceEvent,
@@ -357,6 +359,11 @@ where
     /// Set when an FCU with payload attributes is received, cleared on the next FCU without.
     /// Suppresses persistence cycles during payload building.
     building_payload: bool,
+    /// Actual retained-engine jobs, including detached work after resolve/cancellation.
+    payload_builds: PayloadBuildTracker,
+    payload_build_finished: Receiver<()>,
+    /// Durable legacy completion whose in-memory handoff waits for old-view readers.
+    pending_persisted_handoff: Option<PersistenceResult>,
 }
 
 impl<N, P: Debug, T: PayloadTypes + Debug, V: Debug, C> std::fmt::Debug
@@ -431,6 +438,7 @@ where
         evm_config: C,
     ) -> Self {
         let (incoming_tx, incoming) = crossbeam_channel::unbounded();
+        let (payload_builds, payload_build_finished) = PayloadBuildTracker::new();
 
         Self {
             termination_ack: None,
@@ -453,6 +461,9 @@ where
             persistence_waiters: PersistenceWaiters::new(),
             execution_timing_stats: B256Map::default(),
             building_payload: false,
+            payload_builds,
+            payload_build_finished,
+            pending_persisted_handoff: None,
         }
     }
 
@@ -759,9 +770,9 @@ where
             // But it shifts the bottleneck to the lighter-weight incoming queue rather than
             // the costlier persistence pipeline. Other clients that respect reply latency
             // can treat the delayed responses as a signal to chill out.
-            match self.try_poll_persistence() {
+            match self.try_poll_legacy_persistence() {
                 Ok(true) => {
-                    if let Err(err) = self.advance_persistence() {
+                    if let Err(err) = self.advance_legacy_persistence() {
                         error!(target: "engine::tree", %err, "Advancing persistence failed");
                         return
                     }
@@ -798,8 +809,14 @@ where
                     }
                 }
                 LoopEvent::PersistenceComplete { result, start_time } => {
-                    if let Err(err) = self.on_persistence_complete(result, start_time) {
+                    if let Err(err) = self.on_legacy_persistence_complete(result, start_time) {
                         error!(target: "engine::tree", %err, "Persistence complete handling failed");
+                        return
+                    }
+                }
+                LoopEvent::PayloadBuildFinished => {
+                    if let Err(err) = self.on_payload_build_finished() {
+                        error!(target: "engine::tree", %err, "Payload build completion failed");
                         return
                     }
                 }
@@ -813,7 +830,7 @@ where
             // - After engine messages: new blocks may have been inserted that exceed the
             //   persistence threshold
             // - After persistence completion: we can now persist more blocks if needed
-            if let Err(err) = self.advance_persistence() {
+            if let Err(err) = self.advance_legacy_persistence() {
                 error!(target: "engine::tree", %err, "Advancing persistence failed");
                 return
             }
@@ -844,6 +861,12 @@ where
     /// Uses biased selection to prioritize persistence completion to update in-memory state and
     /// unblock further writes.
     fn wait_for_event(&mut self) -> LoopEvent<T, N> {
+        if self.pending_persisted_handoff.is_some() {
+            return match self.payload_build_finished.recv() {
+                Ok(()) => LoopEvent::PayloadBuildFinished,
+                Err(_) => LoopEvent::Disconnected,
+            }
+        }
         // Take ownership of persistence rx if present
         let maybe_persistence = self.persistence_state.rx.take();
 
@@ -861,6 +884,13 @@ where
                         Err(_) => LoopEvent::Disconnected,
                     }
                 },
+                recv(self.payload_build_finished) -> result => {
+                    self.persistence_state.rx = Some((persistence_rx, start_time, action));
+                    match result {
+                        Ok(()) => LoopEvent::PayloadBuildFinished,
+                        Err(_) => LoopEvent::Disconnected,
+                    }
+                },
                 recv(self.incoming) -> msg => {
                     // Put the persistence rx back - we didn't consume it
                     self.persistence_state.rx = Some((persistence_rx, start_time, action));
@@ -871,10 +901,15 @@ where
                 },
             }
         } else {
-            // No persistence in progress - just wait on incoming
-            match self.incoming.recv() {
-                Ok(m) => LoopEvent::EngineMessage(m),
-                Err(_) => LoopEvent::Disconnected,
+            crossbeam_channel::select_biased! {
+                recv(self.payload_build_finished) -> result => match result {
+                    Ok(()) => LoopEvent::PayloadBuildFinished,
+                    Err(_) => LoopEvent::Disconnected,
+                },
+                recv(self.incoming) -> msg => match msg {
+                    Ok(m) => LoopEvent::EngineMessage(m),
+                    Err(_) => LoopEvent::Disconnected,
+                },
             }
         }
     }
@@ -898,7 +933,7 @@ where
         for block in blocks.drain(..batch) {
             if let Some(event) = self.on_downloaded_block(block)? {
                 let needs_backfill = event.is_backfill_action();
-                self.on_tree_event(event)?;
+                self.on_legacy_tree_event(event)?;
                 if needs_backfill {
                     // can exit early if backfill is needed
                     return Ok(None)
@@ -1727,6 +1762,63 @@ where
         Ok(())
     }
 
+    fn advance_legacy_persistence(&mut self) -> Result<(), AdvancePersistenceError> {
+        if self.pending_persisted_handoff.is_some() || self.persistence_state.in_progress() {
+            return Ok(())
+        }
+        if let Some(new_tip_num) = self.find_disk_reorg()? {
+            self.remove_blocks(new_tip_num);
+        } else if self.backfill_sync_state.is_pending_revalidation() {
+            if !self.payload_builds.is_active() {
+                self.revalidate_pending_backfill()?;
+            }
+        } else if !(self.config.suppress_persistence_during_build() &&
+            self.payload_builds.is_active()) &&
+            self.should_persist_without_payload_suppression()
+        {
+            let blocks = self.get_canonical_blocks_to_persist(PersistTarget::Threshold)?;
+            self.persist_blocks(blocks);
+        }
+        Ok(())
+    }
+
+    fn revalidate_pending_backfill(&mut self) -> Result<(), AdvancePersistenceError> {
+        let sync_target = self.state.forkchoice_state_tracker.sync_target_state();
+        let target = if let Some(state) = sync_target {
+            let configured = self.backfill_target_hash(state);
+            let hash = if configured.is_zero() { state.head_block_hash } else { configured };
+            let number = if let Some(block) = self.state.buffer.block(&hash) {
+                Some(block.number())
+            } else {
+                self.sealed_header_by_hash(hash)?.map(|header| header.number())
+            };
+            number.and_then(|number| {
+                self.backfill_sync_target(
+                    self.state.tree_state.canonical_block_number(),
+                    number,
+                    None,
+                )
+            })
+        } else {
+            None
+        };
+        if let Some(target) = target {
+            // SaveBlocks acknowledges before pruning; only a barrier proves exclusive access.
+            self.persistence.wait_for_idle().map_err(|_| AdvancePersistenceError::ChannelClosed)?;
+            self.backfill_sync_state = BackfillSyncState::Idle;
+            self.emit_event(EngineApiEvent::BackfillAction(BackfillAction::Start(target.into())));
+        } else {
+            self.backfill_sync_state = BackfillSyncState::Idle;
+            if let Some(state) = sync_target &&
+                state.head_block_hash != self.state.tree_state.canonical_block_hash()
+            {
+                let target = self.lowest_buffered_ancestor_or(state.head_block_hash);
+                self.emit_event(EngineApiEvent::Download(DownloadRequest::single_block(target)));
+            }
+        }
+        Ok(())
+    }
+
     /// Drains persistence and defers the completion signal until the handler is dropped.
     /// The signal is also retained when draining fails, so shutdown cannot hang waiting for it.
     fn finish_termination(
@@ -1770,6 +1862,38 @@ where
         }
     }
 
+    fn persist_legacy_until_complete(&mut self) -> Result<(), AdvancePersistenceError> {
+        loop {
+            // Wait for any in-progress persistence to complete (blocking)
+            if let Some((rx, start_time, action)) = self.persistence_state.rx.take() {
+                debug!(target: "engine::tree", ?action, "waiting for in-flight persistence");
+                let result = rx.recv().map_err(|_| AdvancePersistenceError::ChannelClosed)?;
+                let _ = self.record_persistence_complete(result, start_time);
+            }
+
+            let blocks_to_persist = self.get_canonical_blocks_to_persist(PersistTarget::Head)?;
+
+            if blocks_to_persist.is_empty() {
+                debug!(target: "engine::tree", "persistence complete, signaling termination");
+                return Ok(())
+            }
+
+            debug!(target: "engine::tree", count = blocks_to_persist.len(), "persisting remaining blocks before shutdown");
+            self.persist_blocks(blocks_to_persist);
+        }
+    }
+
+    fn finish_legacy_termination(
+        &mut self,
+        tx: oneshot::Sender<()>,
+    ) -> Result<(), AdvancePersistenceError> {
+        let result = self.persist_legacy_until_complete().and_then(|()| {
+            self.persistence.wait_for_idle().map_err(|_| AdvancePersistenceError::ChannelClosed)
+        });
+        self.termination_ack = Some(tx);
+        result
+    }
+
     /// Tries to poll for a completed persistence task (non-blocking).
     ///
     /// Returns `true` if a persistence task was completed, `false` otherwise.
@@ -1794,33 +1918,90 @@ where
         }
     }
 
-    /// Handles a completed persistence task.
+    fn try_poll_legacy_persistence(&mut self) -> Result<bool, AdvancePersistenceError> {
+        let Some((rx, start_time, action)) = self.persistence_state.rx.take() else {
+            return Ok(false);
+        };
+
+        match rx.try_recv() {
+            Ok(result) => {
+                self.on_legacy_persistence_complete(result, start_time)?;
+                Ok(true)
+            }
+            Err(crossbeam_channel::TryRecvError::Empty) => {
+                // Not ready yet, put it back
+                self.persistence_state.rx = Some((rx, start_time, action));
+                Ok(false)
+            }
+            Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                Err(AdvancePersistenceError::ChannelClosed)
+            }
+        }
+    }
+
+    /// Handles a pipe/SDK completion immediately, independently of legacy payload leases.
     fn on_persistence_complete(
         &mut self,
         result: PersistenceResult,
         start_time: Instant,
     ) -> Result<(), AdvancePersistenceError> {
-        self.metrics.engine.persistence_duration.record(start_time.elapsed());
+        if let Some(result) = self.record_persistence_complete(result, start_time) {
+            self.apply_persisted_handoff(result)?;
+        }
+        Ok(())
+    }
 
-        let commit_duration = result.commit_duration;
-        let Some(BlockNumHash {
-            hash: last_persisted_block_hash,
-            number: last_persisted_block_number,
-        }) = result.last_block
-        else {
-            // if this happened, then we persisted no blocks because we sent an empty vec of blocks
+    fn record_persistence_complete(
+        &mut self,
+        result: PersistenceResult,
+        start_time: Instant,
+    ) -> Option<PersistenceResult> {
+        self.metrics.engine.persistence_duration.record(start_time.elapsed());
+        let Some(last) = result.last_block else {
             warn!(target: "engine::tree", "Persistence task completed but did not persist any blocks");
+            return None
+        };
+        self.persistence_state.finish(last.hash, last.number);
+        self.persistence_waiters.notify_waiters(last.number);
+        Some(result)
+    }
+
+    fn apply_persisted_handoff(
+        &mut self,
+        result: PersistenceResult,
+    ) -> Result<(), AdvancePersistenceError> {
+        if let Some(last) = result.last_block {
+            self.on_new_persisted_block()?;
+            self.purge_timing_stats(last.number, result.commit_duration);
+        }
+        Ok(())
+    }
+
+    fn on_legacy_persistence_complete(
+        &mut self,
+        result: PersistenceResult,
+        start_time: Instant,
+    ) -> Result<(), AdvancePersistenceError> {
+        let Some(result) = self.record_persistence_complete(result, start_time) else {
             return Ok(())
         };
+        if self.payload_builds.is_active() {
+            debug_assert!(self.pending_persisted_handoff.is_none());
+            self.pending_persisted_handoff = Some(result);
+            return Ok(())
+        }
+        self.apply_persisted_handoff(result)
+    }
 
-        debug!(target: "engine::tree", ?last_persisted_block_hash, ?last_persisted_block_number, elapsed=?start_time.elapsed(), "Finished persisting, calling finish");
-        self.persistence_state.finish(last_persisted_block_hash, last_persisted_block_number);
-        self.persistence_waiters.notify_waiters(last_persisted_block_number);
-
-        self.on_new_persisted_block()?;
-
-        self.purge_timing_stats(last_persisted_block_number, commit_duration);
-
+    fn on_payload_build_finished(&mut self) -> Result<(), AdvancePersistenceError> {
+        if !self.payload_builds.is_active() &&
+            let Some(result) = self.pending_persisted_handoff.take()
+        {
+            // A completed disk reorg may invalidate an older handoff.
+            if result.last_block == Some(self.persistence_state.last_persisted_block) {
+                self.apply_persisted_handoff(result)?;
+            }
+        }
         Ok(())
     }
 
@@ -1842,7 +2023,7 @@ where
                 }
                 FromOrchestrator::Terminate { tx } => {
                     debug!(target: "engine::tree", "received terminate request");
-                    if let Err(err) = self.finish_termination(tx) {
+                    if let Err(err) = self.finish_legacy_termination(tx) {
                         error!(target: "engine::tree", %err, "Termination failed");
                     }
                     return Ok(ops::ControlFlow::Break(()))
@@ -1910,7 +2091,7 @@ where
                                     ));
 
                                     // handle the event if any
-                                    self.on_maybe_tree_event(res.event.take())?;
+                                    self.on_legacy_maybe_tree_event(res.event.take())?;
                                 }
 
                                 if let Err(ref err) = output {
@@ -1967,7 +2148,7 @@ where
                                 }
 
                                 // handle the event if any
-                                self.on_maybe_tree_event(maybe_event)?;
+                                self.on_legacy_maybe_tree_event(maybe_event)?;
                             }
                             BeaconEngineMessage::RethNewPayload {
                                 cause,
@@ -1996,8 +2177,9 @@ where
                                         let wait_start = Instant::now();
                                         match rx.recv() {
                                             Ok(result) => {
-                                                let _ = self
-                                                    .on_persistence_complete(result, start_time);
+                                                let _ = self.on_legacy_persistence_complete(
+                                                    result, start_time,
+                                                );
                                             }
                                             Err(_) => {
                                                 warn!(target: "engine::tree", "persistence channel closed while waiting");
@@ -2044,7 +2226,7 @@ where
                                         .increment(1);
                                 }
 
-                                self.on_maybe_tree_event(maybe_event)?;
+                                self.on_legacy_maybe_tree_event(maybe_event)?;
                             }
                         }
                     }
@@ -2052,7 +2234,7 @@ where
             }
             FromEngine::DownloadedBlocks(blocks) => {
                 if let Some(event) = self.on_downloaded(blocks)? {
-                    self.on_tree_event(event)?;
+                    self.on_legacy_tree_event(event)?;
                 }
             }
         }
@@ -2174,9 +2356,9 @@ where
             })
         {
             // request another backfill run
-            self.emit_event(EngineApiEvent::BackfillAction(BackfillAction::Start(
+            self.on_legacy_tree_event(TreeEvent::BackfillAction(BackfillAction::Start(
                 backfill_target.into(),
-            )));
+            )))?;
             return Ok(())
         };
 
@@ -2262,12 +2444,21 @@ where
     }
 
     /// Convenience function to handle an optional tree event.
-    fn on_maybe_tree_event(&mut self, event: Option<TreeEvent>) -> ProviderResult<()> {
+    fn on_legacy_maybe_tree_event(&mut self, event: Option<TreeEvent>) -> ProviderResult<()> {
         if let Some(event) = event {
-            self.on_tree_event(event)?;
+            self.on_legacy_tree_event(event)?;
         }
 
         Ok(())
+    }
+
+    /// Queues retained backfill requests until old-view readers and background writes drain.
+    fn on_legacy_tree_event(&mut self, event: TreeEvent) -> ProviderResult<()> {
+        if let TreeEvent::BackfillAction(BackfillAction::Start(_)) = event {
+            self.backfill_sync_state = BackfillSyncState::PendingRevalidation;
+            return Ok(())
+        }
+        self.on_tree_event(event)
     }
 
     /// Handles a tree event.
@@ -2336,6 +2527,10 @@ where
             return false
         }
 
+        self.should_persist_without_payload_suppression()
+    }
+
+    fn should_persist_without_payload_suppression(&self) -> bool {
         if !self.backfill_sync_state.is_idle() {
             // can't persist if backfill is running
             return false
@@ -3661,19 +3856,13 @@ where
         //    payloadAttributes is not null and the forkchoice state has been updated successfully.
         //    The build process is specified in the Payload building section.
 
-        // gravity(route-A): the baseline validator exposes no cache/sparse-trie sharing
-        // APIs (`cache_for`/`sparse_trie_handle_for` are v2.3.0-only), so the payload
-        // builder handoff always starts without shared caches or a background trie task.
-        let cache = None;
-        let trie_handle = None;
-
-        // send the payload to the builder and return the receiver for the pending payload
-        // id, initiating payload job is handled asynchronously
+        // Optional cache/root sharing remains disabled; the lease tracks actual job lifetime.
+        let resources = PayloadBuilderResources::default()
+            .with_lease(PayloadBuilderLease::new(self.payload_builds.acquire()));
         let pending_payload_id = self.payload_builder.send_new_payload(BuildNewPayload {
             parent_hash: state.head_block_hash,
             attributes,
-            cache,
-            trie_handle,
+            resources,
         });
 
         // Client software MUST respond to this method call in the following way:
@@ -3770,6 +3959,8 @@ where
         /// When the persistence operation started.
         start_time: Instant,
     },
+    /// The last retained payload reader may have released its view.
+    PayloadBuildFinished,
     /// A channel was disconnected.
     Disconnected,
 }
@@ -3862,4 +4053,56 @@ pub trait WaitForCaches {
     ///
     /// Returns the time spent waiting for each cache separately.
     fn wait_for_caches(&self) -> CacheWaitDurations;
+}
+
+/// Tracks payload jobs that may access the current in-memory overlay.
+#[derive(Clone, Debug)]
+struct PayloadBuildTracker {
+    active: Arc<std::sync::atomic::AtomicUsize>,
+    finished_tx: Sender<()>,
+}
+
+impl PayloadBuildTracker {
+    /// Creates a tracker and a receiver notified when its active count reaches zero.
+    fn new() -> (Self, Receiver<()>) {
+        let (finished_tx, finished_rx) = crossbeam_channel::bounded(1);
+        (
+            Self { active: Arc::new(std::sync::atomic::AtomicUsize::new(0)), finished_tx },
+            finished_rx,
+        )
+    }
+
+    /// Acquires a lease for one payload job.
+    fn acquire(&self) -> PayloadBuildLease {
+        self.active.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        PayloadBuildLease {
+            active: Arc::clone(&self.active),
+            finished_tx: self.finished_tx.clone(),
+        }
+    }
+
+    /// Returns whether at least one payload job is active.
+    fn is_active(&self) -> bool {
+        self.active.load(std::sync::atomic::Ordering::Acquire) != 0
+    }
+}
+
+/// A lease held for the lifetime of a payload job.
+#[derive(Debug)]
+struct PayloadBuildLease {
+    active: Arc<std::sync::atomic::AtomicUsize>,
+    finished_tx: Sender<()>,
+}
+
+impl Drop for PayloadBuildLease {
+    fn drop(&mut self) {
+        let previous = self.active.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        debug_assert!(previous > 0, "payload build lease count underflow");
+
+        if previous == 1 {
+            // The bounded channel coalesces completion notifications. The engine always checks
+            // the counter again before applying a pending handoff.
+            let _ = self.finished_tx.try_send(());
+        }
+    }
 }

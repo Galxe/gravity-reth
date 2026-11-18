@@ -26,6 +26,8 @@ pub enum BackfillSyncState {
     /// A backfill synchronization has been requested or planned, but processing has not started
     /// yet.
     Pending,
+    /// A retained backfill request waits for readers/writes, then re-evaluates its current target.
+    PendingRevalidation,
     /// The node is actively engaged in backfill synchronization.
     Active,
 }
@@ -39,6 +41,11 @@ impl BackfillSyncState {
     /// Returns true if the state is pending.
     pub const fn is_pending(&self) -> bool {
         matches!(self, Self::Pending)
+    }
+
+    /// Returns true if retained backfill must be re-evaluated before it can start.
+    pub const fn is_pending_revalidation(&self) -> bool {
+        matches!(self, Self::PendingRevalidation)
     }
 
     /// Returns true if the state is active.

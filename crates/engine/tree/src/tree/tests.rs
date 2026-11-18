@@ -1858,3 +1858,320 @@ fn forkchoice_notifies_active_backfill_of_a_new_head() {
     ));
     assert!(harness.tree.backfill_sync_state.is_active());
 }
+
+#[test]
+fn payload_build_tracker_notifies_after_last_lease_drops() {
+    let (tracker, finished) = PayloadBuildTracker::new();
+    let first = tracker.acquire();
+    let second = tracker.acquire();
+    drop(first);
+    assert!(tracker.is_active());
+    assert!(finished.try_recv().is_err());
+    drop(second);
+    assert!(!tracker.is_active());
+    assert_eq!(finished.try_recv(), Ok(()));
+}
+
+#[test]
+fn legacy_handoff_waits_for_jobs_but_pipe_handoff_does_not() {
+    for legacy in [true, false] {
+        let blocks: Vec<_> = TestBlockBuilder::eth().get_executed_blocks(1..4).collect();
+        let mut harness = TestHarness::new(MAINNET.clone()).with_blocks(blocks.clone());
+        let persisted = blocks[0].recovered_block().num_hash();
+        let first = harness.tree.payload_builds.acquire();
+        let second = harness.tree.payload_builds.acquire();
+        let result = PersistenceResult { last_block: Some(persisted), commit_duration: None };
+        if legacy {
+            harness.tree.on_legacy_persistence_complete(result, Instant::now()).unwrap();
+        } else {
+            harness.tree.on_persistence_complete(result, Instant::now()).unwrap();
+        }
+        assert_eq!(harness.tree.persistence_state.last_persisted_block, persisted);
+        assert_eq!(harness.tree.pending_persisted_handoff.is_some(), legacy);
+        assert_eq!(
+            harness.tree.state.tree_state.executed_block_by_hash(persisted.hash).is_some(),
+            legacy
+        );
+        if legacy {
+            harness.tree.advance_legacy_persistence().unwrap();
+            assert!(harness.action_rx.try_recv().is_err());
+        }
+        drop(first);
+        assert!(harness.tree.payload_build_finished.try_recv().is_err());
+        drop(second);
+        if legacy {
+            assert!(matches!(harness.tree.wait_for_event(), LoopEvent::PayloadBuildFinished));
+            harness.tree.on_payload_build_finished().unwrap();
+            assert!(harness.tree.pending_persisted_handoff.is_none());
+            assert!(harness.tree.state.tree_state.executed_block_by_hash(persisted.hash).is_none());
+        }
+    }
+}
+
+#[test]
+fn pending_legacy_handoff_blocks_engine_messages_until_jobs_finish() {
+    let blocks: Vec<_> = TestBlockBuilder::eth().get_executed_blocks(1..4).collect();
+    let mut harness = TestHarness::new(MAINNET.clone()).with_blocks(blocks.clone());
+    let lease = harness.tree.payload_builds.acquire();
+    harness
+        .tree
+        .on_legacy_persistence_complete(
+            PersistenceResult {
+                last_block: Some(blocks[0].recovered_block().num_hash()),
+                commit_duration: None,
+            },
+            Instant::now(),
+        )
+        .unwrap();
+    harness.to_tree_tx.send(FromEngine::Event(FromOrchestrator::BackfillSyncStarted)).unwrap();
+    std::thread::scope(|scope| {
+        let (entered, ready) = std::sync::mpsc::channel();
+        let (done, result) = std::sync::mpsc::channel();
+        let tree = &mut harness.tree;
+        scope.spawn(move || {
+            entered.send(()).unwrap();
+            done.send(matches!(tree.wait_for_event(), LoopEvent::PayloadBuildFinished)).unwrap();
+        });
+        ready.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(result.recv_timeout(Duration::from_millis(100)).is_err());
+        drop(lease);
+        assert!(result.recv_timeout(Duration::from_secs(5)).unwrap());
+    });
+    harness.tree.on_payload_build_finished().unwrap();
+    assert_matches!(
+        harness.tree.wait_for_event(),
+        LoopEvent::EngineMessage(FromEngine::Event(FromOrchestrator::BackfillSyncStarted))
+    );
+}
+
+fn legacy_deferred_backfill_harness() -> (TestHarness, B256) {
+    let blocks: Vec<_> = TestBlockBuilder::eth().get_executed_blocks(1..8).collect();
+    let mut harness = TestHarness::new(MAINNET.clone()).with_blocks(blocks[..2].to_vec());
+    harness.tree.config = harness.tree.config.clone().with_backfill_run_threshold(2);
+    let target = blocks.last().unwrap().recovered_block().clone();
+    let hash = target.hash();
+    harness.tree.state.buffer.insert_block(target);
+    harness.tree.state.forkchoice_state_tracker.set_latest(
+        ForkchoiceState {
+            head_block_hash: hash,
+            safe_block_hash: hash,
+            finalized_block_hash: hash,
+        },
+        ForkchoiceStatus::Syncing,
+    );
+    (harness, hash)
+}
+
+fn advance_legacy_through_barrier(harness: &mut TestHarness, expected: B256) {
+    std::thread::scope(|scope| {
+        let tree = &mut harness.tree;
+        let task = scope.spawn(move || tree.advance_legacy_persistence());
+        let PersistenceAction::Barrier(ack) =
+            harness.action_rx.recv_timeout(Duration::from_secs(5)).unwrap()
+        else {
+            panic!("expected idle barrier before legacy backfill")
+        };
+        assert!(harness.from_tree_rx.try_recv().is_err());
+        ack.send(()).unwrap();
+        task.join().unwrap().unwrap();
+    });
+    assert_matches!(harness.from_tree_rx.try_recv().unwrap(), EngineApiEvent::BackfillAction(BackfillAction::Start(target)) => {
+        assert_eq!(target.sync_target(), Some(expected));
+    });
+    assert!(harness.tree.backfill_sync_state.is_pending());
+}
+
+#[test]
+fn backfill_action_waits_while_payload_build_is_active() {
+    let (mut harness, target) = legacy_deferred_backfill_harness();
+    let lease = harness.tree.payload_builds.acquire();
+    harness
+        .tree
+        .on_legacy_tree_event(TreeEvent::BackfillAction(BackfillAction::Start(target.into())))
+        .unwrap();
+    harness.tree.advance_legacy_persistence().unwrap();
+    assert!(harness.tree.backfill_sync_state.is_pending_revalidation());
+    assert!(harness.action_rx.try_recv().is_err());
+    assert!(harness.from_tree_rx.try_recv().is_err());
+    drop(lease);
+    assert_matches!(harness.tree.wait_for_event(), LoopEvent::PayloadBuildFinished);
+    harness.tree.on_payload_build_finished().unwrap();
+    advance_legacy_through_barrier(&mut harness, target);
+}
+
+#[test]
+fn deferred_backfill_uses_latest_sync_target_or_drops_local_target() {
+    for local in [false, true] {
+        let (mut harness, old_target) = legacy_deferred_backfill_harness();
+        harness
+            .tree
+            .on_legacy_tree_event(TreeEvent::BackfillAction(BackfillAction::Start(
+                old_target.into(),
+            )))
+            .unwrap();
+        let target = if local {
+            harness.tree.state.tree_state.canonical_block_hash()
+        } else {
+            let block = harness.block_builder.generate_random_block(10, B256::ZERO);
+            let hash = block.hash();
+            harness.tree.state.buffer.insert_block(block);
+            hash
+        };
+        harness.tree.state.forkchoice_state_tracker.set_latest(
+            ForkchoiceState {
+                head_block_hash: target,
+                safe_block_hash: target,
+                finalized_block_hash: target,
+            },
+            ForkchoiceStatus::Syncing,
+        );
+        if local {
+            harness.tree.advance_legacy_persistence().unwrap();
+            assert!(harness.tree.backfill_sync_state.is_idle());
+            assert!(harness.from_tree_rx.try_recv().is_err());
+            assert!(harness.action_rx.try_recv().is_err());
+        } else {
+            advance_legacy_through_barrier(&mut harness, target);
+        }
+    }
+}
+
+#[test]
+fn backfill_request_survives_save_ack_and_waits_for_backend_barrier() {
+    let (mut harness, target) = legacy_deferred_backfill_harness();
+    let last = harness.blocks[0].recovered_block().num_hash();
+    let (saved, rx) = crossbeam_channel::bounded(1);
+    harness.tree.persistence_state.start_save(last, rx);
+    harness
+        .tree
+        .on_legacy_tree_event(TreeEvent::BackfillAction(BackfillAction::Start(target.into())))
+        .unwrap();
+    harness.tree.advance_legacy_persistence().unwrap();
+    assert!(harness.action_rx.try_recv().is_err());
+    // A save acknowledgement does not imply that the worker's subsequent pruning has finished.
+    saved.send(PersistenceResult { last_block: Some(last), commit_duration: None }).unwrap();
+    assert!(harness.tree.try_poll_legacy_persistence().unwrap());
+    assert!(harness.from_tree_rx.try_recv().is_err());
+    advance_legacy_through_barrier(&mut harness, target);
+}
+
+#[test]
+fn failed_legacy_backfill_barrier_is_fatal_without_starting_pipeline() {
+    let (mut harness, target) = legacy_deferred_backfill_harness();
+    harness
+        .tree
+        .on_legacy_tree_event(TreeEvent::BackfillAction(BackfillAction::Start(target.into())))
+        .unwrap();
+    std::thread::scope(|scope| {
+        let tree = &mut harness.tree;
+        let task = scope.spawn(move || tree.advance_legacy_persistence());
+        let PersistenceAction::Barrier(ack) =
+            harness.action_rx.recv_timeout(Duration::from_secs(5)).unwrap()
+        else {
+            panic!("expected barrier")
+        };
+        drop(ack);
+        assert_matches!(task.join().unwrap(), Err(AdvancePersistenceError::ChannelClosed));
+    });
+    assert!(harness.from_tree_rx.try_recv().is_err());
+    assert!(harness.tree.backfill_sync_state.is_pending_revalidation());
+}
+
+#[test]
+fn forkchoice_does_not_notify_a_backfill_awaiting_revalidation() {
+    let (mut harness, target) = legacy_deferred_backfill_harness();
+    harness.tree.backfill_sync_state = BackfillSyncState::PendingRevalidation;
+    harness
+        .tree
+        .validate_forkchoice_state(ForkchoiceState {
+            head_block_hash: target,
+            safe_block_hash: B256::ZERO,
+            finalized_block_hash: B256::ZERO,
+        })
+        .unwrap();
+    assert!(harness.from_tree_rx.try_recv().is_err());
+}
+
+#[test]
+fn sdk_start_dispatch_and_persistence_ignore_legacy_readers() {
+    let (mut harness, target) = legacy_deferred_backfill_harness();
+    let lease = harness.tree.payload_builds.acquire();
+    // The shared SDK/event helper retains its immediate Start behavior even with active readers.
+    harness.tree.emit_event(EngineApiEvent::BackfillAction(BackfillAction::Start(target.into())));
+    assert!(harness.tree.backfill_sync_state.is_pending());
+    assert_matches!(
+        harness.from_tree_rx.try_recv().unwrap(),
+        EngineApiEvent::BackfillAction(BackfillAction::Start(_))
+    );
+    assert!(harness.action_rx.try_recv().is_err());
+    drop(lease);
+}
+
+#[test]
+fn payload_attributes_command_holds_actual_job_lease_without_binding_caches() {
+    let mut harness = TestHarness::new(MAINNET.clone());
+    let (sender, mut commands) = unbounded_channel();
+    harness.tree.payload_builder = PayloadBuilderHandle::new(sender);
+    let head = Header::default();
+    let attributes =
+        alloy_rpc_types_engine::PayloadAttributes { timestamp: 1, ..Default::default() };
+    let _response = harness.tree.process_payload_attributes(
+        attributes,
+        &head,
+        ForkchoiceState {
+            head_block_hash: B256::ZERO,
+            safe_block_hash: B256::ZERO,
+            finalized_block_hash: B256::ZERO,
+        },
+    );
+    let reth_payload_builder::PayloadServiceCommand::BuildNewPayload(input, _, _) =
+        commands.try_recv().unwrap()
+    else {
+        panic!("expected an actual queued payload job")
+    };
+    assert!(harness.tree.payload_builds.is_active());
+    assert!(input.resources.execution_cache().is_none());
+    assert!(input.resources.state_root_handle().is_none());
+    drop(input);
+    assert!(!harness.tree.payload_builds.is_active());
+}
+
+#[test]
+fn configured_legacy_suppression_uses_live_jobs_not_last_fcu_attributes() {
+    let blocks: Vec<_> = TestBlockBuilder::eth().get_executed_blocks(1..4).collect();
+    let mut harness = TestHarness::new(MAINNET.clone()).with_blocks(blocks);
+    harness.tree.config = harness
+        .tree
+        .config
+        .clone()
+        .with_persistence_threshold(0)
+        .with_memory_block_buffer_target(0)
+        .with_suppress_persistence_during_build(true);
+    harness.tree.building_payload = true;
+    let lease = harness.tree.payload_builds.acquire();
+    harness.tree.advance_legacy_persistence().unwrap();
+    assert!(harness.action_rx.try_recv().is_err());
+    drop(lease);
+    harness.tree.advance_legacy_persistence().unwrap();
+    assert_matches!(harness.action_rx.try_recv().unwrap(), PersistenceAction::SaveBlocks(_, _));
+    // The unchanged pipe policy still uses its original flag, rather than the new tracker.
+    assert!(!harness.tree.should_persist());
+}
+
+#[test]
+fn legacy_shutdown_records_durability_without_destructive_handoff() {
+    let blocks: Vec<_> = TestBlockBuilder::eth().get_executed_blocks(1..4).collect();
+    let mut harness = TestHarness::new(MAINNET.clone()).with_blocks(blocks.clone());
+    let last = blocks.last().unwrap().recovered_block().num_hash();
+    let lease = harness.tree.payload_builds.acquire();
+    let (done, rx) = crossbeam_channel::bounded(1);
+    harness.tree.persistence_state.start_save(last, rx);
+    done.send(PersistenceResult { last_block: Some(last), commit_duration: None }).unwrap();
+    harness.tree.persist_legacy_until_complete().unwrap();
+    assert_eq!(harness.tree.persistence_state.last_persisted_block, last);
+    assert!(!harness.tree.persistence_state.in_progress());
+    assert!(harness.tree.pending_persisted_handoff.is_none());
+    assert!(harness.tree.state.tree_state.executed_block_by_hash(last.hash).is_some());
+    assert!(harness.tree.canonical_in_memory_state.state_by_hash(last.hash).is_some());
+    drop(lease);
+}

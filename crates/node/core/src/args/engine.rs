@@ -512,9 +512,9 @@ pub struct EngineArgs {
 
     /// Suppress persistence while building a payload.
     ///
-    /// When enabled, persistence cycles are deferred from the moment an FCU with payload
-    /// attributes arrives until the next FCU clears the build. Useful on chains with short
-    /// block times where persistence I/O can interfere with block building latency.
+    /// When enabled, retained-engine persistence cycles are deferred while a payload job is
+    /// active. Useful on chains with short block times where persistence I/O can interfere
+    /// with building.
     #[arg(
         long = "engine.suppress-persistence-during-build",
         default_value_t = DefaultEngineValues::get_global().suppress_persistence_during_build,

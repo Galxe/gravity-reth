@@ -22,6 +22,13 @@ use reth_storage_api::{
 };
 use tokio::sync::oneshot;
 
+mod scheduler;
+pub use scheduler::{
+    StateRangeRequest, StateRangeRequestError, StateRangeRequests,
+    MAX_CONCURRENT_STATE_RANGE_REQUESTS, MAX_QUEUED_STATE_RANGE_REQUESTS,
+    STATE_RANGE_REQUEST_QUEUE_TIMEOUT,
+};
+
 /// A read-only SNAP/2 responder backed by real, caller-supplied state and BAL readers.
 ///
 /// It is independent of the network session and manager. The provider must resolve each retained
