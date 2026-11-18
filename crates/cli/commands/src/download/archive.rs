@@ -15,11 +15,7 @@ use eyre::Result;
 use futures::stream::{self, StreamExt};
 use reth_cli_util::cancellation::CancellationToken;
 use reth_fs_util as fs;
-use std::{
-    path::Path,
-    sync::{atomic::Ordering, Arc},
-    time::Duration,
-};
+use std::{path::Path, sync::Arc, time::Duration};
 use tracing::{debug, info, warn};
 
 const DOWNLOAD_CACHE_DIR: &str = ".download-cache";
@@ -81,7 +77,7 @@ impl ModularDownloadJob {
             .collect()
             .await;
 
-        shared.done.store(true, Ordering::Relaxed);
+        shared.done.notify_one();
         let _ = progress_handle.await;
 
         for result in results {
