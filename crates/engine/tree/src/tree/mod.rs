@@ -862,9 +862,17 @@ where
     /// unblock further writes.
     fn wait_for_event(&mut self) -> LoopEvent<T, N> {
         if self.pending_persisted_handoff.is_some() {
-            return match self.payload_build_finished.recv() {
-                Ok(()) => LoopEvent::PayloadBuildFinished,
-                Err(_) => LoopEvent::Disconnected,
+            // Keep replies and termination responsive while leases protect the old view.
+            // Prioritize the last-reader notification before admitting another queued message.
+            return crossbeam_channel::select_biased! {
+                recv(self.payload_build_finished) -> result => match result {
+                    Ok(()) => LoopEvent::PayloadBuildFinished,
+                    Err(_) => LoopEvent::Disconnected,
+                },
+                recv(self.incoming) -> msg => match msg {
+                    Ok(msg) => LoopEvent::EngineMessage(msg),
+                    Err(_) => LoopEvent::Disconnected,
+                },
             }
         }
         // Take ownership of persistence rx if present

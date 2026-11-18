@@ -5,8 +5,8 @@ use super::{
 use crate::{
     changeset_walker::{StaticFileAccountChangesetWalker, StaticFileStorageChangesetWalker},
     to_range, BlockHashReader, BlockNumReader, BlockReader, BlockSource, HeaderProvider,
-    ReceiptProvider, StageCheckpointReader, StatsReader, TransactionVariant, TransactionsProvider,
-    TransactionsProviderExt,
+    PruneCheckpointReader, ReceiptProvider, StageCheckpointReader, StatsReader, TransactionVariant,
+    TransactionsProvider, TransactionsProviderExt,
 };
 use alloy_consensus::{
     transaction::{SignerRecoverable, TransactionMeta},
@@ -931,7 +931,11 @@ impl<N: NodePrimitives> StaticFileProvider<N> {
         has_receipt_pruning: bool,
     ) -> ProviderResult<Option<PipelineTarget>>
     where
-        Provider: DBProvider + BlockReader + StageCheckpointReader + ChainSpecProvider,
+        Provider: DBProvider
+            + BlockReader
+            + StageCheckpointReader
+            + PruneCheckpointReader
+            + ChainSpecProvider,
         N: NodePrimitives<Receipt: Value, BlockHeader: Value, SignedTx: Value>,
     {
         if !get_gravity_config().disable_pipe_execution {
@@ -951,7 +955,11 @@ impl<N: NodePrimitives> StaticFileProvider<N> {
         has_receipt_pruning: bool,
     ) -> ProviderResult<Option<PipelineTarget>>
     where
-        Provider: DBProvider + BlockReader + StageCheckpointReader + ChainSpecProvider,
+        Provider: DBProvider
+            + BlockReader
+            + StageCheckpointReader
+            + PruneCheckpointReader
+            + ChainSpecProvider,
         N: NodePrimitives<Receipt: Value, BlockHeader: Value, SignedTx: Value>,
     {
         // OVM historical import is broken and does not work with this check. It's importing
@@ -1155,7 +1163,7 @@ impl<N: NodePrimitives> StaticFileProvider<N> {
         highest_static_file_block: Option<BlockNumber>,
     ) -> ProviderResult<Option<BlockNumber>>
     where
-        Provider: DBProvider + BlockReader + StageCheckpointReader,
+        Provider: DBProvider + BlockReader + StageCheckpointReader + PruneCheckpointReader,
     {
         let mut db_cursor = provider.tx_ref().cursor_read::<T>()?;
 
@@ -1202,16 +1210,29 @@ impl<N: NodePrimitives> StaticFileProvider<N> {
             .unwrap_or_default()
             .block_number;
 
-        // If the checkpoint is ahead, then we lost static file data. May be data corruption.
-        if checkpoint_block_number > highest_static_file_block {
+        // Only receipts can be intentionally pruned from Gravity's v1 static segments.
+        // Missing headers and transactions must still be treated as data loss.
+        let effective_coverage_block = if segment.is_receipts() {
+            highest_static_file_block.max(
+                provider
+                    .get_prune_checkpoint(reth_prune_types::PruneSegment::Receipts)?
+                    .and_then(|checkpoint| checkpoint.block_number)
+                    .unwrap_or_default(),
+            )
+        } else {
+            highest_static_file_block
+        };
+
+        // A checkpoint beyond both available and intentionally pruned data indicates data loss.
+        if checkpoint_block_number > effective_coverage_block {
             info!(
                 target: "reth::providers::static_file",
                 checkpoint_block_number,
-                unwind_target = highest_static_file_block,
+                unwind_target = effective_coverage_block,
                 ?segment,
                 "Setting unwind target."
             );
-            return Ok(Some(highest_static_file_block))
+            return Ok(Some(effective_coverage_block))
         }
 
         // If the checkpoint is behind, then we failed to do a database commit **but committed** to

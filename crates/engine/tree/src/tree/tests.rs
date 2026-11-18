@@ -1909,35 +1909,33 @@ fn legacy_handoff_waits_for_jobs_but_pipe_handoff_does_not() {
 }
 
 #[test]
-fn pending_legacy_handoff_blocks_engine_messages_until_jobs_finish() {
+fn pending_legacy_handoff_keeps_messages_responsive_and_prioritizes_release() {
     let blocks: Vec<_> = TestBlockBuilder::eth().get_executed_blocks(1..4).collect();
     let mut harness = TestHarness::new(MAINNET.clone()).with_blocks(blocks.clone());
+    let persisted = blocks[0].recovered_block().num_hash();
     let lease = harness.tree.payload_builds.acquire();
     harness
         .tree
         .on_legacy_persistence_complete(
-            PersistenceResult {
-                last_block: Some(blocks[0].recovered_block().num_hash()),
-                commit_duration: None,
-            },
+            PersistenceResult { last_block: Some(persisted), commit_duration: None },
             Instant::now(),
         )
         .unwrap();
     harness.to_tree_tx.send(FromEngine::Event(FromOrchestrator::BackfillSyncStarted)).unwrap();
-    std::thread::scope(|scope| {
-        let (entered, ready) = std::sync::mpsc::channel();
-        let (done, result) = std::sync::mpsc::channel();
-        let tree = &mut harness.tree;
-        scope.spawn(move || {
-            entered.send(()).unwrap();
-            done.send(matches!(tree.wait_for_event(), LoopEvent::PayloadBuildFinished)).unwrap();
-        });
-        ready.recv_timeout(Duration::from_secs(5)).unwrap();
-        assert!(result.recv_timeout(Duration::from_millis(100)).is_err());
-        drop(lease);
-        assert!(result.recv_timeout(Duration::from_secs(5)).unwrap());
-    });
+    assert_matches!(
+        harness.tree.wait_for_event(),
+        LoopEvent::EngineMessage(FromEngine::Event(FromOrchestrator::BackfillSyncStarted))
+    );
+    assert!(harness.tree.pending_persisted_handoff.is_some());
+    assert!(harness.tree.state.tree_state.executed_block_by_hash(persisted.hash).is_some());
+    assert!(harness.tree.canonical_in_memory_state.state_by_hash(persisted.hash).is_some());
+    harness.to_tree_tx.send(FromEngine::Event(FromOrchestrator::BackfillSyncStarted)).unwrap();
+    drop(lease);
+    assert_matches!(harness.tree.wait_for_event(), LoopEvent::PayloadBuildFinished);
     harness.tree.on_payload_build_finished().unwrap();
+    assert!(harness.tree.pending_persisted_handoff.is_none());
+    assert!(harness.tree.state.tree_state.executed_block_by_hash(persisted.hash).is_none());
+    assert!(harness.tree.canonical_in_memory_state.state_by_hash(persisted.hash).is_none());
     assert_matches!(
         harness.tree.wait_for_event(),
         LoopEvent::EngineMessage(FromEngine::Event(FromOrchestrator::BackfillSyncStarted))

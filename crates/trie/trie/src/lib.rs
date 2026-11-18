@@ -68,3 +68,7 @@ pub mod mock;
 
 /// Verification of existing stored trie nodes against state data.
 pub mod verify;
+
+/// Opt-in parallel verification over a shared immutable legacy trie view.
+#[cfg(not(target_family = "wasm"))]
+pub mod parallel_verify;
