@@ -176,6 +176,13 @@ impl SharedCapabilities {
             .ok_or(P2PStreamError::CapabilityNotShared)
     }
 
+    /// Returns `true` if the shared capabilities are exactly `eth` and `snap/2` (EIP-8189), the
+    /// layout handled by the dedicated [`EthSnapStream`](crate::EthSnapStream).
+    #[inline]
+    pub fn is_exact_eth_snap_v2(&self) -> bool {
+        self.len() == 2 && self.ensure_matching_capability(&Capability::snap_2()).is_ok()
+    }
+
     /// Returns true if the shared capabilities contain the given capability.
     #[inline]
     pub fn contains(&self, cap: &Capability) -> bool {
@@ -252,7 +259,8 @@ impl SharedCapabilities {
             cap = next
         }
 
-        Some(cap)
+        let end = u16::from(cap.message_id_offset()) + u16::from(cap.num_messages());
+        (u16::from(offset) < end).then_some(cap)
     }
 
     /// Returns the shared capability for the given capability or an error if it's not compatible.
@@ -341,16 +349,23 @@ pub fn shared_capability_offsets(
     // Message IDs are assumed to be compact from ID 0x10 onwards (0x00-0x0f is reserved for the
     // "p2p" capability) and given to each shared (equal-version, equal-name) capability in
     // alphabetic order.
-    let mut offset = MAX_RESERVED_MESSAGE_ID + 1;
+    //
+    // Message IDs are a single byte, so offsets are accumulated in u16 and the shared capabilities
+    // must fit in IDs 0x10..=0xff.
+    let mut offset = u16::from(MAX_RESERVED_MESSAGE_ID) + 1;
     for name in shared_capability_names {
         let proto_version = &shared_capabilities[&name];
+        let start = u8::try_from(offset).map_err(|_| SharedCapabilityError::MessageIdOverflow)?;
         let shared_capability = SharedCapability::new(
             &name,
             proto_version.version as u8,
-            offset,
+            start,
             proto_version.messages,
         )?;
-        offset += shared_capability.num_messages();
+        offset += u16::from(shared_capability.num_messages());
+        if offset > u16::from(u8::MAX) + 1 {
+            return Err(SharedCapabilityError::MessageIdOverflow.into())
+        }
         shared_with_offsets.push(shared_capability);
     }
 
@@ -371,6 +386,10 @@ pub enum SharedCapabilityError {
     /// message id space [`MAX_RESERVED_MESSAGE_ID`].
     #[error("message id offset `{0}` is reserved")]
     ReservedMessageIdOffset(u8),
+    /// Thrown when the shared capabilities need more message ids than fit in the single-byte
+    /// message id space.
+    #[error("shared capabilities exceed the message id space")]
+    MessageIdOverflow,
 }
 
 /// An error thrown when capabilities mismatch.
@@ -457,6 +476,18 @@ mod tests {
         assert!(capabilities.supports_eth_v68());
         assert!(capabilities.supports_eth_v69());
         assert!(capabilities.supports_eth_v70());
+    }
+
+    #[test]
+    fn lookup_rejects_message_ids_past_last_capability() {
+        let cap = Capability::new_static("test", 1);
+        let shared =
+            SharedCapabilities::try_new(vec![Protocol::new(cap.clone(), 1)], vec![cap.clone()])
+                .unwrap();
+        let offset = shared.find(&cap).unwrap().message_id_offset();
+
+        assert_eq!(shared.find_by_offset(offset).unwrap().capability().as_ref(), &cap);
+        assert!(shared.find_by_offset(offset + 1).is_none());
     }
 
     #[test]
@@ -558,12 +589,51 @@ mod tests {
         assert_eq!(shared_eth.name(), "eth");
     }
 
+    /// Negotiates `(name, messages)` protocols with a peer that shares all of them.
+    fn negotiate_all(
+        protocols: &[(&'static str, u8)],
+    ) -> Result<Vec<SharedCapability>, P2PStreamError> {
+        let local_protocols: Vec<_> = protocols
+            .iter()
+            .map(|&(name, messages)| Protocol::new(Capability::new_static(name, 1), messages))
+            .collect();
+        let peer_capabilities = local_protocols.iter().map(|p| p.cap.clone()).collect();
+        shared_capability_offsets(local_protocols, peer_capabilities)
+    }
+
+    #[test]
+    fn shared_capability_offsets_reject_last_capability_past_message_id_space() {
+        // 0x10 + 120 + 121 ends one message id past 0xff.
+        assert!(matches!(
+            negotiate_all(&[("aaa", 120), ("bbb", 121)]),
+            Err(P2PStreamError::ParseSharedCapability(SharedCapabilityError::MessageIdOverflow))
+        ));
+    }
+
+    #[test]
+    fn shared_capability_offsets_reject_capability_after_full_message_id_space() {
+        // 0x10 + 120 + 120 uses every message id, so ccc would start at 0x100.
+        assert!(matches!(
+            negotiate_all(&[("aaa", 120), ("bbb", 120), ("ccc", 1)]),
+            Err(P2PStreamError::ParseSharedCapability(SharedCapabilityError::MessageIdOverflow))
+        ));
+    }
+
+    #[test]
+    fn shared_capability_offsets_fill_message_id_space() {
+        // 0x10 + 120 + 120 uses every message id up to and including 0xff.
+        let shared = SharedCapabilities(negotiate_all(&[("aaa", 120), ("bbb", 120)]).unwrap());
+
+        assert_eq!(shared[1].message_id_offset(), MAX_RESERVED_MESSAGE_ID + 1 + 120);
+        assert_eq!(shared.find_by_offset(u8::MAX).unwrap().name(), "bbb");
+    }
+
     #[test]
     fn relative_message_id_accounts_for_intermediate_capabilities() {
         let intermediate_cap = Capability::new_static("foo", 1);
         let intermediate = Protocol::new(intermediate_cap.clone(), 3);
         let snap = Capability::snap(SnapVersion::V1);
-        let eth = Capability::eth(EthVersion::Eth69);
+        let eth = Capability::eth_69();
         let local_capabilities =
             vec![EthVersion::Eth69.into(), intermediate, Protocol::snap(SnapVersion::V1)];
         let peer_capabilities = vec![eth, intermediate_cap, snap.clone()];
@@ -582,8 +652,7 @@ mod tests {
         let snap = Capability::snap(SnapVersion::V1);
         let local_capabilities =
             vec![EthVersion::Eth69.into(), intermediate, Protocol::snap(SnapVersion::V1)];
-        let peer_capabilities =
-            vec![Capability::eth(EthVersion::Eth69), intermediate_cap.clone(), snap.clone()];
+        let peer_capabilities = vec![Capability::eth_69(), intermediate_cap.clone(), snap.clone()];
 
         let shared = SharedCapabilities::try_new(local_capabilities, peer_capabilities).unwrap();
         let intermediate_id = shared.relative_message_id(&intermediate_cap, 1).unwrap();
@@ -605,5 +674,49 @@ mod tests {
 
         // Verify that the decoded message matches the original
         assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn is_exact_eth_snap_v2_accepts_eth_and_snap() {
+        let shared = SharedCapabilities::try_new(
+            vec![EthVersion::Eth68.into(), Protocol::snap_2()],
+            vec![EthVersion::Eth68.into(), Capability::snap_2()],
+        )
+        .unwrap();
+        assert!(shared.is_exact_eth_snap_v2());
+    }
+
+    #[test]
+    fn is_exact_eth_snap_v2_rejects_eth_only() {
+        let shared = SharedCapabilities::try_new(
+            vec![EthVersion::Eth68.into()],
+            vec![EthVersion::Eth68.into()],
+        )
+        .unwrap();
+        assert!(!shared.is_exact_eth_snap_v2());
+    }
+
+    #[test]
+    fn is_exact_eth_snap_v2_rejects_eth_without_snap() {
+        // eth + a non-snap capability is not the dedicated layout.
+        let cap = Capability::new_static("les", 1);
+        let shared = SharedCapabilities::try_new(
+            vec![EthVersion::Eth68.into(), Protocol::new(cap.clone(), 5)],
+            vec![EthVersion::Eth68.into(), cap],
+        )
+        .unwrap();
+        assert!(!shared.is_exact_eth_snap_v2());
+    }
+
+    #[test]
+    fn is_exact_eth_snap_v2_rejects_eth_snap_plus_extra() {
+        // eth + snap/2 + another capability belongs on the general satellite multiplexer.
+        let cap = Capability::new_static("les", 1);
+        let shared = SharedCapabilities::try_new(
+            vec![EthVersion::Eth68.into(), Protocol::snap_2(), Protocol::new(cap.clone(), 5)],
+            vec![EthVersion::Eth68.into(), Capability::snap_2(), cap],
+        )
+        .unwrap();
+        assert!(!shared.is_exact_eth_snap_v2());
     }
 }

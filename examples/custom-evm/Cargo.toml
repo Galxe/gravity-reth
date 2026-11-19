@@ -11,6 +11,7 @@ reth-tracing.workspace = true
 alloy-evm.workspace = true
 alloy-genesis.workspace = true
 alloy-primitives.workspace = true
+alloy-rpc-types-engine.workspace = true
 
 eyre.workspace = true
 tokio.workspace = true

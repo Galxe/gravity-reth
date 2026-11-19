@@ -12,22 +12,33 @@ use alloy_rpc_types_engine::{
     ForkchoiceUpdateError,
 };
 use assert_matches::assert_matches;
+use futures::FutureExt;
 use reth_chain_state::{test_utils::TestBlockBuilder, BlockState};
 use reth_chainspec::{ChainSpec, HOLESKY, MAINNET};
-use reth_engine_primitives::{EngineApiValidator, ForkchoiceStatus, NoopInvalidBlockHook};
+use reth_engine_primitives::{
+    ConsensusEngineHandle, EngineApiValidator, ForkchoiceStatus, NoopInvalidBlockHook,
+};
 use reth_ethereum_consensus::EthBeaconConsensus;
 use reth_ethereum_engine_primitives::EthEngineTypes;
 use reth_ethereum_primitives::{Block, EthPrimitives};
 use reth_evm_ethereum::MockEvmConfig;
 use reth_primitives_traits::Block as _;
-use reth_provider::{test_utils::MockEthProvider, ExecutionOutcome};
+use reth_provider::{test_utils::MockEthProvider, ExecutionOutcome, HeaderProvider};
 use reth_trie::HashedPostState;
 use std::{
     collections::BTreeMap,
     str::FromStr,
     sync::mpsc::{channel, Receiver, Sender},
 };
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc::unbounded_channel, oneshot};
+use tracing::{
+    span::{Attributes, Id},
+    Subscriber,
+};
+use tracing_subscriber::{
+    layer::{Context, Layer, SubscriberExt},
+    registry::LookupSpan,
+};
 
 /// Mock engine validator for tests
 #[derive(Debug, Clone)]
@@ -291,6 +302,7 @@ impl TestHarness {
             .tree
             .on_engine_message(FromEngine::Request(
                 BeaconEngineMessage::ForkchoiceUpdated {
+                    cause: tracing::Span::none(),
                     state: fcu_state,
                     payload_attrs: None,
                     tx,
@@ -550,6 +562,7 @@ async fn test_engine_request_during_backfill() {
         .tree
         .on_engine_message(FromEngine::Request(
             BeaconEngineMessage::ForkchoiceUpdated {
+                cause: tracing::Span::none(),
                 state: ForkchoiceState {
                     head_block_hash: B256::random(),
                     safe_block_hash: B256::random(),
@@ -627,6 +640,7 @@ async fn test_holesky_payload() {
         .tree
         .on_engine_message(FromEngine::Request(
             BeaconEngineMessage::NewPayload {
+                cause: tracing::Span::none(),
                 payload: ExecutionData {
                     payload: payload.clone().into(),
                     sidecar: ExecutionPayloadSidecar::none(),
@@ -946,7 +960,12 @@ async fn test_invalid_safe_does_not_update_finalized() {
         .unwrap()
         .expect("canonical head should produce an outcome")
         .outcome;
-    assert_matches!(outcome.await, Err(ForkchoiceUpdateError::InvalidState));
+    assert_matches!(
+        outcome.await,
+        Err(reth_engine_primitives::BeaconForkChoiceUpdateError::ForkchoiceUpdateError(
+            ForkchoiceUpdateError::InvalidState
+        ))
+    );
     assert_eq!(
         test_harness.tree.canonical_in_memory_state.get_finalized_num_hash(),
         Some(previous_finalized.num_hash())
@@ -1063,6 +1082,7 @@ async fn test_fcu_with_canonical_ancestor_updates_latest_block() {
         .tree
         .on_engine_message(FromEngine::Request(
             BeaconEngineMessage::ForkchoiceUpdated {
+                cause: tracing::Span::none(),
                 state: ForkchoiceState {
                     head_block_hash: ancestor_block.hash(),
                     safe_block_hash: B256::ZERO,
@@ -1326,7 +1346,7 @@ fn test_make_executed_block_canonical_sets_safe_and_finalized() {
     );
 
     // Call make_executed_block_canonical
-    test_harness.tree.make_executed_block_canonical(block.clone());
+    test_harness.tree.make_executed_block_canonical(block);
 
     // Verify safe block is set correctly
     let safe_num_hash = test_harness.tree.canonical_in_memory_state.get_safe_num_hash();
@@ -1492,4 +1512,664 @@ fn test_gravity_chain_make_canonical_e2e_flow() {
         last_block.recovered_block.hash(),
         "Final canonical head should be the last block"
     );
+}
+
+/// An old persisted tip remains addressable by hash until disk reorg cleanup completes.
+async fn assert_fcu_restores_stale_persisted_head(sibling_len: u64) {
+    let mut harness = TestHarness::new(MAINNET.clone());
+    let old: Vec<_> = harness.block_builder.get_executed_blocks(0..4).collect();
+    harness = harness.with_blocks(old.clone());
+    let old_tip = old[3].recovered_block().hash();
+    let mut parent_hash = old[0].recovered_block().hash();
+    let mut new = Vec::new();
+    for number in 1..=sibling_len {
+        let block = harness.block_builder.get_executed_block_with_number(number, parent_hash);
+        parent_hash = block.recovered_block().hash();
+        harness.tree.state.tree_state.insert_executed(block.clone());
+        new.push(block);
+    }
+    let new_tip = new.last().unwrap().recovered_block().hash();
+    let fcu = |head_block_hash| ForkchoiceState {
+        head_block_hash,
+        safe_block_hash: B256::ZERO,
+        finalized_block_hash: B256::ZERO,
+    };
+    let outcome = harness.tree.on_forkchoice_updated(fcu(new_tip), None).unwrap();
+    assert_eq!(outcome.outcome.forkchoice_status(), ForkchoiceStatus::Valid);
+    assert_eq!(harness.tree.canonical_in_memory_state.get_canonical_head().hash(), new_tip);
+    assert!(harness.provider.header(&old_tip).unwrap().is_some());
+    assert!(harness.tree.find_canonical_header(old_tip).unwrap().is_none());
+    let outcome = harness.tree.on_forkchoice_updated(fcu(old_tip), None).unwrap();
+    assert_eq!(outcome.outcome.forkchoice_status(), ForkchoiceStatus::Valid);
+    assert_eq!(harness.tree.canonical_in_memory_state.get_canonical_head().hash(), old_tip);
+}
+
+#[tokio::test]
+async fn fcu_restores_reorged_out_persisted_head_before_disk_cleanup() {
+    assert_fcu_restores_stale_persisted_head(3).await;
+}
+
+#[tokio::test]
+async fn fcu_restores_stale_persisted_head_above_shorter_branch() {
+    assert_fcu_restores_stale_persisted_head(1).await;
+}
+
+#[test]
+fn test_exceeds_backfill_run_threshold_uses_configured_value() {
+    let mut test_harness = TestHarness::new(MAINNET.clone());
+    let default_threshold = MIN_BLOCKS_FOR_PIPELINE_RUN;
+    assert!(!test_harness.tree.exceeds_backfill_run_threshold(0, default_threshold));
+    assert!(test_harness.tree.exceeds_backfill_run_threshold(0, default_threshold + 1));
+
+    test_harness.tree.config = TreeConfig::default().with_backfill_run_threshold(100);
+    assert!(!test_harness.tree.exceeds_backfill_run_threshold(10, 110));
+    assert!(test_harness.tree.exceeds_backfill_run_threshold(10, 111));
+    assert!(!test_harness.tree.exceeds_backfill_run_threshold(10, 9));
+}
+
+proptest::proptest! {
+    // Each case constructs a full engine harness.
+    #![proptest_config(proptest::test_runner::Config::with_cases(32))]
+
+    #[test]
+    fn engine_messages_keep_sender_parent_on_another_thread(
+        requests in proptest::collection::vec((0..2usize, 0..3u8), 1..16),
+    ) {
+        let parents = EngineSpanParents::default();
+        let dispatch = tracing::Dispatch::new(tracing_subscriber::registry().with(parents.clone()));
+        tracing::dispatcher::with_default(&dispatch, || {
+            let (tx, mut rx) = unbounded_channel();
+            let engine = ConsensusEngineHandle::<EthEngineTypes>::new(tx);
+            let callers = [tracing::info_span!("view_a"), tracing::info_span!("view_b")];
+            let payload = || ExecutionData {
+                payload: ExecutionPayloadV1::from_block_slow(&Block::default()).into(),
+                sidecar: ExecutionPayloadSidecar::none(),
+            };
+            for &(caller, kind) in &requests {
+                callers[caller].in_scope(|| match kind {
+                    0 => assert!(engine.new_payload(payload()).now_or_never().is_none()),
+                    1 => assert!(engine
+                        .fork_choice_updated(ForkchoiceState::default(), None)
+                        .now_or_never()
+                        .is_none()),
+                    _ => assert!(engine
+                        .reth_new_payload(payload(), false, false)
+                        .now_or_never()
+                        .is_none()),
+                });
+            }
+            let messages = (0..requests.len()).map(|_| rx.try_recv().unwrap()).collect::<Vec<_>>();
+            let expected = requests.iter().map(|&(caller, _)| callers[caller].id()).collect::<Vec<_>>();
+            std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    let worker_dispatch = tracing::Dispatch::new(tracing_subscriber::registry());
+                    tracing::dispatcher::with_default(&worker_dispatch, || {
+                        let mut harness = TestHarness::new(MAINNET.clone());
+                        let unrelated = tracing::info_span!("worker_background");
+                        let _entered = unrelated.enter();
+                        for message in messages {
+                            let _ = harness.tree.on_engine_message(
+                                FromEngine::Request(EngineApiRequest::Beacon(message)),
+                            ).unwrap();
+                            assert_eq!(tracing::Span::current().id(), unrelated.id());
+                        }
+                    });
+                }).join().unwrap();
+            });
+            assert_eq!(*parents.0.lock().unwrap(), expected);
+        });
+    }
+}
+
+#[derive(Clone, Default)]
+struct EngineSpanParents(Arc<std::sync::Mutex<Vec<Option<Id>>>>);
+
+impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for EngineSpanParents {
+    fn on_new_span(&self, attrs: &Attributes<'_>, id: &Id, ctx: Context<'_, S>) {
+        if matches!(attrs.metadata().name(), "on_new_payload" | "on_forkchoice_updated") {
+            self.0.lock().unwrap().push(ctx.span(id).unwrap().parent().map(|parent| parent.id()));
+        }
+    }
+}
+
+/// Source #27247: a stale persisted hash cannot serve as a proposed branch's canonical prefix.
+#[test]
+fn test_forkchoice_rejects_stale_persisted_prefix_hash() {
+    let mut harness = TestHarness::new(MAINNET.clone());
+    let old: Vec<_> = harness.block_builder.get_executed_blocks(0..3).collect();
+    harness = harness.with_blocks(old.clone());
+    let first =
+        harness.block_builder.get_executed_block_with_number(1, old[0].recovered_block().hash());
+    let second =
+        harness.block_builder.get_executed_block_with_number(2, first.recovered_block().hash());
+    harness.tree.canonical_in_memory_state.update_chain(NewCanonicalChain::Reorg {
+        new: vec![first.clone()],
+        old: old[1..].iter().map(|b| b.block.clone()).collect(),
+    });
+    let state = ForkchoiceState {
+        head_block_hash: second.recovered_block().hash(),
+        safe_block_hash: old[1].recovered_block().hash(),
+        finalized_block_hash: old[0].recovered_block().hash(),
+    };
+    let proposed = NewCanonicalChain::Commit { new: vec![second] };
+    assert!(!harness.tree.is_consistent_forkchoice_state(state, Some(&proposed)).unwrap());
+    assert!(harness
+        .tree
+        .is_consistent_forkchoice_state(
+            ForkchoiceState { safe_block_hash: first.recovered_block().hash(), ..state },
+            Some(&proposed),
+        )
+        .unwrap());
+}
+
+/// Ports the source RPC atomicity matrix to the actual retained tree fixture (no SDK harness).
+#[tokio::test]
+async fn invalid_forkchoice_preserves_canonical_state() {
+    let mut harness = TestHarness::new(MAINNET.clone());
+    let old: Vec<_> = harness.block_builder.get_executed_blocks(0..4).collect();
+    harness = harness.with_blocks(old.clone());
+    let first =
+        harness.block_builder.get_executed_block_with_number(1, old[0].recovered_block().hash());
+    let second =
+        harness.block_builder.get_executed_block_with_number(2, first.recovered_block().hash());
+    harness.tree.state.tree_state.insert_executed(first.clone());
+    harness.tree.state.tree_state.insert_executed(second.clone());
+    harness.tree.config = harness
+        .tree
+        .config
+        .with_always_process_payload_attributes_on_canonical_head(true)
+        .with_unwind_canonical_header(true);
+    let original_head = old[3].recovered_block().num_hash();
+    let original_marker = old[0].recovered_block().clone_sealed_header();
+    harness.tree.canonical_in_memory_state.set_safe(original_marker.clone());
+    harness.tree.canonical_in_memory_state.set_finalized(original_marker.clone());
+    let hash = |index: usize| old[index].recovered_block().hash();
+    for state in [
+        ForkchoiceState {
+            head_block_hash: second.recovered_block().hash(),
+            safe_block_hash: hash(2),
+            finalized_block_hash: hash(0),
+        },
+        ForkchoiceState {
+            head_block_hash: second.recovered_block().hash(),
+            safe_block_hash: second.recovered_block().hash(),
+            finalized_block_hash: hash(1),
+        },
+        ForkchoiceState {
+            head_block_hash: hash(3),
+            safe_block_hash: B256::random(),
+            finalized_block_hash: hash(1),
+        },
+        ForkchoiceState {
+            head_block_hash: hash(2),
+            safe_block_hash: hash(3),
+            finalized_block_hash: hash(0),
+        },
+    ] {
+        let outcome = harness.tree.on_forkchoice_updated(state, None).unwrap().outcome;
+        assert_matches!(
+            outcome.await,
+            Err(reth_engine_primitives::BeaconForkChoiceUpdateError::ForkchoiceUpdateError(
+                ForkchoiceUpdateError::InvalidState
+            ))
+        );
+        assert_eq!(harness.tree.state.tree_state.current_canonical_head, original_head);
+        assert_eq!(
+            harness.tree.canonical_in_memory_state.get_canonical_head().num_hash(),
+            original_head
+        );
+        assert_eq!(
+            harness.tree.canonical_in_memory_state.get_safe_num_hash(),
+            Some(original_marker.num_hash())
+        );
+        assert_eq!(
+            harness.tree.canonical_in_memory_state.get_finalized_num_hash(),
+            Some(original_marker.num_hash())
+        );
+        assert!(harness.action_rx.try_recv().is_err(), "invalid FCU wrote a persistence marker");
+    }
+    let accepted = ForkchoiceState {
+        head_block_hash: second.recovered_block().hash(),
+        safe_block_hash: second.recovered_block().hash(),
+        finalized_block_hash: first.recovered_block().hash(),
+    };
+    // Invalid attributes must not roll back an otherwise valid head/safe/finalized update.
+    let attrs = alloy_rpc_types_engine::PayloadAttributes { timestamp: 0, ..Default::default() };
+    let outcome = harness.tree.on_forkchoice_updated(accepted, Some(attrs)).unwrap().outcome;
+    assert_matches!(
+        outcome.await,
+        Err(reth_engine_primitives::BeaconForkChoiceUpdateError::ForkchoiceUpdateError(
+            ForkchoiceUpdateError::UpdatedInvalidPayloadAttributes
+        ))
+    );
+    assert_eq!(harness.tree.state.tree_state.current_canonical_head.hash, accepted.head_block_hash);
+    assert_eq!(
+        harness.tree.canonical_in_memory_state.get_safe_num_hash().unwrap().hash,
+        accepted.safe_block_hash
+    );
+    assert_eq!(
+        harness.tree.canonical_in_memory_state.get_finalized_num_hash().unwrap().hash,
+        accepted.finalized_block_hash
+    );
+}
+
+/// Source #26983: reaching the tracked head applies its markers without waiting for another FCU.
+#[test]
+fn test_backfill_reaching_sync_target_head_updates_finalized() {
+    let mut harness = TestHarness::new(MAINNET.clone());
+    let blocks: Vec<_> = harness.block_builder.get_executed_blocks(0..3).collect();
+    let initial = blocks[0].recovered_block().num_hash();
+    let target = blocks[2].recovered_block().num_hash();
+    harness = harness.with_blocks(blocks);
+    harness.tree.state.tree_state.set_canonical_head(initial);
+    let state = ForkchoiceState {
+        head_block_hash: target.hash,
+        safe_block_hash: target.hash,
+        finalized_block_hash: target.hash,
+    };
+    harness.tree.state.forkchoice_state_tracker.set_latest(state, ForkchoiceStatus::Syncing);
+    harness
+        .tree
+        .on_backfill_sync_finished(ControlFlow::Continue { block_number: target.number })
+        .unwrap();
+    assert_eq!(harness.tree.state.tree_state.current_canonical_head, target);
+    assert_eq!(harness.tree.canonical_in_memory_state.get_finalized_num_hash(), Some(target));
+    assert_eq!(harness.tree.canonical_in_memory_state.get_safe_num_hash(), Some(target));
+    assert_eq!(harness.tree.state.forkchoice_state_tracker.last_valid_state(), Some(state));
+    assert!(harness.tree.state.forkchoice_state_tracker.sync_target_state().is_none());
+    assert!(
+        harness.from_tree_rx.try_recv().is_err(),
+        "already reached target was downloaded again"
+    );
+}
+
+#[test]
+fn backfill_unwind_does_not_apply_invalidated_sync_markers() {
+    let mut harness = TestHarness::new(MAINNET.clone());
+    let blocks: Vec<_> = harness.block_builder.get_executed_blocks(0..3).collect();
+    let target = blocks[2].recovered_block().num_hash();
+    let initial = blocks[0].recovered_block().clone_sealed_header();
+    let bad_block = blocks[2].recovered_block().sealed_block().block_with_parent();
+    harness = harness.with_blocks(blocks);
+    harness.tree.canonical_in_memory_state.set_safe(initial.clone());
+    harness.tree.canonical_in_memory_state.set_finalized(initial.clone());
+    harness.tree.state.forkchoice_state_tracker.set_latest(
+        ForkchoiceState {
+            head_block_hash: target.hash,
+            safe_block_hash: target.hash,
+            finalized_block_hash: target.hash,
+        },
+        ForkchoiceStatus::Syncing,
+    );
+    harness
+        .tree
+        .on_backfill_sync_finished(ControlFlow::Unwind {
+            target: 0,
+            bad_block: Box::new(bad_block),
+        })
+        .unwrap();
+    assert_eq!(
+        harness.tree.canonical_in_memory_state.get_safe_num_hash(),
+        Some(initial.num_hash())
+    );
+    assert_eq!(
+        harness.tree.canonical_in_memory_state.get_finalized_num_hash(),
+        Some(initial.num_hash())
+    );
+    assert!(harness.tree.state.forkchoice_state_tracker.last_valid_state().is_none());
+}
+
+/// Recovery/input errors may invalidate a block; provider and internal failures must stay fatal.
+#[test]
+fn input_error_classification_preserves_provider_and_internal_failures() {
+    use super::error::{InsertBlockErrorKind, InsertBlockValidationError};
+    use reth_errors::{BlockExecutionError, BlockValidationError, ProviderError};
+    let recovery = BlockValidationError::other(std::io::Error::other("signature recovery failed"));
+    assert!(matches!(
+        InsertBlockErrorKind::Execution(recovery.into()).ensure_validation_error(),
+        Ok(InsertBlockValidationError::Validation(_))
+    ));
+    assert!(matches!(
+        InsertBlockErrorKind::Provider(ProviderError::HeaderNotFound(B256::ZERO.into()))
+            .ensure_validation_error(),
+        Err(InsertBlockFatalError::Provider(_))
+    ));
+    assert!(matches!(
+        InsertBlockErrorKind::Execution(BlockExecutionError::msg("internal execution failure"))
+            .ensure_validation_error(),
+        Err(InsertBlockFatalError::BlockExecutionError(_))
+    ));
+}
+
+#[test]
+fn forkchoice_notifies_active_backfill_of_a_new_head() {
+    let mut harness = TestHarness::new(MAINNET.clone());
+    harness.tree.backfill_sync_state = BackfillSyncState::Active;
+    let head = B256::repeat_byte(0x42);
+    let state = ForkchoiceState {
+        head_block_hash: head,
+        safe_block_hash: B256::ZERO,
+        finalized_block_hash: B256::ZERO,
+    };
+    assert!(harness.tree.validate_forkchoice_state(state).unwrap().is_some());
+    assert!(matches!(
+        harness.from_tree_rx.try_recv().unwrap(),
+        EngineApiEvent::BackfillAction(BackfillAction::UpdateTarget(target)) if target == head
+    ));
+    assert!(harness.tree.backfill_sync_state.is_active());
+}
+
+#[test]
+fn payload_build_tracker_notifies_after_last_lease_drops() {
+    let (tracker, finished) = PayloadBuildTracker::new();
+    let first = tracker.acquire();
+    let second = tracker.acquire();
+    drop(first);
+    assert!(tracker.is_active());
+    assert!(finished.try_recv().is_err());
+    drop(second);
+    assert!(!tracker.is_active());
+    assert_eq!(finished.try_recv(), Ok(()));
+}
+
+#[test]
+fn legacy_handoff_waits_for_jobs_but_pipe_handoff_does_not() {
+    for legacy in [true, false] {
+        let blocks: Vec<_> = TestBlockBuilder::eth().get_executed_blocks(1..4).collect();
+        let mut harness = TestHarness::new(MAINNET.clone()).with_blocks(blocks.clone());
+        let persisted = blocks[0].recovered_block().num_hash();
+        let first = harness.tree.payload_builds.acquire();
+        let second = harness.tree.payload_builds.acquire();
+        let result = PersistenceResult { last_block: Some(persisted), commit_duration: None };
+        if legacy {
+            harness.tree.on_legacy_persistence_complete(result, Instant::now()).unwrap();
+        } else {
+            harness.tree.on_persistence_complete(result, Instant::now()).unwrap();
+        }
+        assert_eq!(harness.tree.persistence_state.last_persisted_block, persisted);
+        assert_eq!(harness.tree.pending_persisted_handoff.is_some(), legacy);
+        assert_eq!(
+            harness.tree.state.tree_state.executed_block_by_hash(persisted.hash).is_some(),
+            legacy
+        );
+        if legacy {
+            harness.tree.advance_legacy_persistence().unwrap();
+            assert!(harness.action_rx.try_recv().is_err());
+        }
+        drop(first);
+        assert!(harness.tree.payload_build_finished.try_recv().is_err());
+        drop(second);
+        if legacy {
+            assert!(matches!(harness.tree.wait_for_event(), LoopEvent::PayloadBuildFinished));
+            harness.tree.on_payload_build_finished().unwrap();
+            assert!(harness.tree.pending_persisted_handoff.is_none());
+            assert!(harness.tree.state.tree_state.executed_block_by_hash(persisted.hash).is_none());
+        }
+    }
+}
+
+#[test]
+fn pending_legacy_handoff_keeps_messages_responsive_and_prioritizes_release() {
+    let blocks: Vec<_> = TestBlockBuilder::eth().get_executed_blocks(1..4).collect();
+    let mut harness = TestHarness::new(MAINNET.clone()).with_blocks(blocks.clone());
+    let persisted = blocks[0].recovered_block().num_hash();
+    let lease = harness.tree.payload_builds.acquire();
+    harness
+        .tree
+        .on_legacy_persistence_complete(
+            PersistenceResult { last_block: Some(persisted), commit_duration: None },
+            Instant::now(),
+        )
+        .unwrap();
+    harness.to_tree_tx.send(FromEngine::Event(FromOrchestrator::BackfillSyncStarted)).unwrap();
+    assert_matches!(
+        harness.tree.wait_for_event(),
+        LoopEvent::EngineMessage(FromEngine::Event(FromOrchestrator::BackfillSyncStarted))
+    );
+    assert!(harness.tree.pending_persisted_handoff.is_some());
+    assert!(harness.tree.state.tree_state.executed_block_by_hash(persisted.hash).is_some());
+    assert!(harness.tree.canonical_in_memory_state.state_by_hash(persisted.hash).is_some());
+    harness.to_tree_tx.send(FromEngine::Event(FromOrchestrator::BackfillSyncStarted)).unwrap();
+    drop(lease);
+    assert_matches!(harness.tree.wait_for_event(), LoopEvent::PayloadBuildFinished);
+    harness.tree.on_payload_build_finished().unwrap();
+    assert!(harness.tree.pending_persisted_handoff.is_none());
+    assert!(harness.tree.state.tree_state.executed_block_by_hash(persisted.hash).is_none());
+    assert!(harness.tree.canonical_in_memory_state.state_by_hash(persisted.hash).is_none());
+    assert_matches!(
+        harness.tree.wait_for_event(),
+        LoopEvent::EngineMessage(FromEngine::Event(FromOrchestrator::BackfillSyncStarted))
+    );
+}
+
+fn legacy_deferred_backfill_harness() -> (TestHarness, B256) {
+    let blocks: Vec<_> = TestBlockBuilder::eth().get_executed_blocks(1..8).collect();
+    let mut harness = TestHarness::new(MAINNET.clone()).with_blocks(blocks[..2].to_vec());
+    harness.tree.config = harness.tree.config.clone().with_backfill_run_threshold(2);
+    let target = blocks.last().unwrap().recovered_block().clone();
+    let hash = target.hash();
+    harness.tree.state.buffer.insert_block(target);
+    harness.tree.state.forkchoice_state_tracker.set_latest(
+        ForkchoiceState {
+            head_block_hash: hash,
+            safe_block_hash: hash,
+            finalized_block_hash: hash,
+        },
+        ForkchoiceStatus::Syncing,
+    );
+    (harness, hash)
+}
+
+fn advance_legacy_through_barrier(harness: &mut TestHarness, expected: B256) {
+    std::thread::scope(|scope| {
+        let tree = &mut harness.tree;
+        let task = scope.spawn(move || tree.advance_legacy_persistence());
+        let PersistenceAction::Barrier(ack) =
+            harness.action_rx.recv_timeout(Duration::from_secs(5)).unwrap()
+        else {
+            panic!("expected idle barrier before legacy backfill")
+        };
+        assert!(harness.from_tree_rx.try_recv().is_err());
+        ack.send(()).unwrap();
+        task.join().unwrap().unwrap();
+    });
+    assert_matches!(harness.from_tree_rx.try_recv().unwrap(), EngineApiEvent::BackfillAction(BackfillAction::Start(target)) => {
+        assert_eq!(target.sync_target(), Some(expected));
+    });
+    assert!(harness.tree.backfill_sync_state.is_pending());
+}
+
+#[test]
+fn backfill_action_waits_while_payload_build_is_active() {
+    let (mut harness, target) = legacy_deferred_backfill_harness();
+    let lease = harness.tree.payload_builds.acquire();
+    harness
+        .tree
+        .on_legacy_tree_event(TreeEvent::BackfillAction(BackfillAction::Start(target.into())))
+        .unwrap();
+    harness.tree.advance_legacy_persistence().unwrap();
+    assert!(harness.tree.backfill_sync_state.is_pending_revalidation());
+    assert!(harness.action_rx.try_recv().is_err());
+    assert!(harness.from_tree_rx.try_recv().is_err());
+    drop(lease);
+    assert_matches!(harness.tree.wait_for_event(), LoopEvent::PayloadBuildFinished);
+    harness.tree.on_payload_build_finished().unwrap();
+    advance_legacy_through_barrier(&mut harness, target);
+}
+
+#[test]
+fn deferred_backfill_uses_latest_sync_target_or_drops_local_target() {
+    for local in [false, true] {
+        let (mut harness, old_target) = legacy_deferred_backfill_harness();
+        harness
+            .tree
+            .on_legacy_tree_event(TreeEvent::BackfillAction(BackfillAction::Start(
+                old_target.into(),
+            )))
+            .unwrap();
+        let target = if local {
+            harness.tree.state.tree_state.canonical_block_hash()
+        } else {
+            let block = harness.block_builder.generate_random_block(10, B256::ZERO);
+            let hash = block.hash();
+            harness.tree.state.buffer.insert_block(block);
+            hash
+        };
+        harness.tree.state.forkchoice_state_tracker.set_latest(
+            ForkchoiceState {
+                head_block_hash: target,
+                safe_block_hash: target,
+                finalized_block_hash: target,
+            },
+            ForkchoiceStatus::Syncing,
+        );
+        if local {
+            harness.tree.advance_legacy_persistence().unwrap();
+            assert!(harness.tree.backfill_sync_state.is_idle());
+            assert!(harness.from_tree_rx.try_recv().is_err());
+            assert!(harness.action_rx.try_recv().is_err());
+        } else {
+            advance_legacy_through_barrier(&mut harness, target);
+        }
+    }
+}
+
+#[test]
+fn backfill_request_survives_save_ack_and_waits_for_backend_barrier() {
+    let (mut harness, target) = legacy_deferred_backfill_harness();
+    let last = harness.blocks[0].recovered_block().num_hash();
+    let (saved, rx) = crossbeam_channel::bounded(1);
+    harness.tree.persistence_state.start_save(last, rx);
+    harness
+        .tree
+        .on_legacy_tree_event(TreeEvent::BackfillAction(BackfillAction::Start(target.into())))
+        .unwrap();
+    harness.tree.advance_legacy_persistence().unwrap();
+    assert!(harness.action_rx.try_recv().is_err());
+    // A save acknowledgement does not imply that the worker's subsequent pruning has finished.
+    saved.send(PersistenceResult { last_block: Some(last), commit_duration: None }).unwrap();
+    assert!(harness.tree.try_poll_legacy_persistence().unwrap());
+    assert!(harness.from_tree_rx.try_recv().is_err());
+    advance_legacy_through_barrier(&mut harness, target);
+}
+
+#[test]
+fn failed_legacy_backfill_barrier_is_fatal_without_starting_pipeline() {
+    let (mut harness, target) = legacy_deferred_backfill_harness();
+    harness
+        .tree
+        .on_legacy_tree_event(TreeEvent::BackfillAction(BackfillAction::Start(target.into())))
+        .unwrap();
+    std::thread::scope(|scope| {
+        let tree = &mut harness.tree;
+        let task = scope.spawn(move || tree.advance_legacy_persistence());
+        let PersistenceAction::Barrier(ack) =
+            harness.action_rx.recv_timeout(Duration::from_secs(5)).unwrap()
+        else {
+            panic!("expected barrier")
+        };
+        drop(ack);
+        assert_matches!(task.join().unwrap(), Err(AdvancePersistenceError::ChannelClosed));
+    });
+    assert!(harness.from_tree_rx.try_recv().is_err());
+    assert!(harness.tree.backfill_sync_state.is_pending_revalidation());
+}
+
+#[test]
+fn forkchoice_does_not_notify_a_backfill_awaiting_revalidation() {
+    let (mut harness, target) = legacy_deferred_backfill_harness();
+    harness.tree.backfill_sync_state = BackfillSyncState::PendingRevalidation;
+    harness
+        .tree
+        .validate_forkchoice_state(ForkchoiceState {
+            head_block_hash: target,
+            safe_block_hash: B256::ZERO,
+            finalized_block_hash: B256::ZERO,
+        })
+        .unwrap();
+    assert!(harness.from_tree_rx.try_recv().is_err());
+}
+
+#[test]
+fn sdk_start_dispatch_and_persistence_ignore_legacy_readers() {
+    let (mut harness, target) = legacy_deferred_backfill_harness();
+    let lease = harness.tree.payload_builds.acquire();
+    // The shared SDK/event helper retains its immediate Start behavior even with active readers.
+    harness.tree.emit_event(EngineApiEvent::BackfillAction(BackfillAction::Start(target.into())));
+    assert!(harness.tree.backfill_sync_state.is_pending());
+    assert_matches!(
+        harness.from_tree_rx.try_recv().unwrap(),
+        EngineApiEvent::BackfillAction(BackfillAction::Start(_))
+    );
+    assert!(harness.action_rx.try_recv().is_err());
+    drop(lease);
+}
+
+#[test]
+fn payload_attributes_command_holds_actual_job_lease_without_binding_caches() {
+    let mut harness = TestHarness::new(MAINNET.clone());
+    let (sender, mut commands) = unbounded_channel();
+    harness.tree.payload_builder = PayloadBuilderHandle::new(sender);
+    let head = Header::default();
+    let attributes =
+        alloy_rpc_types_engine::PayloadAttributes { timestamp: 1, ..Default::default() };
+    let _response = harness.tree.process_payload_attributes(
+        attributes,
+        &head,
+        ForkchoiceState {
+            head_block_hash: B256::ZERO,
+            safe_block_hash: B256::ZERO,
+            finalized_block_hash: B256::ZERO,
+        },
+    );
+    let reth_payload_builder::PayloadServiceCommand::BuildNewPayload(input, _, _) =
+        commands.try_recv().unwrap()
+    else {
+        panic!("expected an actual queued payload job")
+    };
+    assert!(harness.tree.payload_builds.is_active());
+    assert!(input.resources.execution_cache().is_none());
+    assert!(input.resources.state_root_handle().is_none());
+    drop(input);
+    assert!(!harness.tree.payload_builds.is_active());
+}
+
+#[test]
+fn configured_legacy_suppression_uses_live_jobs_not_last_fcu_attributes() {
+    let blocks: Vec<_> = TestBlockBuilder::eth().get_executed_blocks(1..4).collect();
+    let mut harness = TestHarness::new(MAINNET.clone()).with_blocks(blocks);
+    harness.tree.config = harness
+        .tree
+        .config
+        .clone()
+        .with_persistence_threshold(0)
+        .with_memory_block_buffer_target(0)
+        .with_suppress_persistence_during_build(true);
+    harness.tree.building_payload = true;
+    let lease = harness.tree.payload_builds.acquire();
+    harness.tree.advance_legacy_persistence().unwrap();
+    assert!(harness.action_rx.try_recv().is_err());
+    drop(lease);
+    harness.tree.advance_legacy_persistence().unwrap();
+    assert_matches!(harness.action_rx.try_recv().unwrap(), PersistenceAction::SaveBlocks(_, _));
+    // The unchanged pipe policy still uses its original flag, rather than the new tracker.
+    assert!(!harness.tree.should_persist());
+}
+
+#[test]
+fn legacy_shutdown_records_durability_without_destructive_handoff() {
+    let blocks: Vec<_> = TestBlockBuilder::eth().get_executed_blocks(1..4).collect();
+    let mut harness = TestHarness::new(MAINNET.clone()).with_blocks(blocks.clone());
+    let last = blocks.last().unwrap().recovered_block().num_hash();
+    let lease = harness.tree.payload_builds.acquire();
+    let (done, rx) = crossbeam_channel::bounded(1);
+    harness.tree.persistence_state.start_save(last, rx);
+    done.send(PersistenceResult { last_block: Some(last), commit_duration: None }).unwrap();
+    harness.tree.persist_legacy_until_complete().unwrap();
+    assert_eq!(harness.tree.persistence_state.last_persisted_block, last);
+    assert!(!harness.tree.persistence_state.in_progress());
+    assert!(harness.tree.pending_persisted_handoff.is_none());
+    assert!(harness.tree.state.tree_state.executed_block_by_hash(last.hash).is_some());
+    assert!(harness.tree.canonical_in_memory_state.state_by_hash(last.hash).is_some());
+    drop(lease);
 }

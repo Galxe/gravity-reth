@@ -1,17 +1,14 @@
-use alloy_eip7928::BAL_RETENTION_PERIOD_SLOTS;
-use alloy_eips::NumHash;
-use alloy_primitives::{BlockHash, BlockNumber, Bytes};
+use alloy_eips::{
+    eip7928::{bal::RawBal, BAL_RETENTION_PERIOD_SLOTS},
+    NumHash,
+};
+use alloy_primitives::{map::B256Map, BlockHash, BlockNumber, Bytes};
 use parking_lot::RwLock;
 use reth_prune_types::PruneMode;
-use reth_storage_api::{
-    BalNotification, BalNotificationStream, BalStore, GetBlockAccessListLimit, SealedBal,
-};
+use reth_storage_api::{BalNotification, BalNotificationStream, BalStore, GetBlockAccessListLimit};
 use reth_storage_errors::provider::ProviderResult;
 use reth_tokio_util::EventSender;
-use std::{
-    collections::{BTreeMap, HashMap},
-    sync::Arc,
-};
+use std::{collections::BTreeMap, sync::Arc};
 
 /// Basic in-memory BAL store keyed by block hash.
 #[derive(Debug, Clone)]
@@ -78,7 +75,7 @@ impl Default for BalConfig {
 
 #[derive(Debug, Default)]
 struct InMemoryBalStoreInner {
-    entries: HashMap<BlockHash, BalEntry>,
+    entries: B256Map<BalEntry>,
     hashes_by_number: BTreeMap<BlockNumber, Vec<BlockHash>>,
     highest_block_number: Option<BlockNumber>,
 }
@@ -129,9 +126,9 @@ struct BalEntry {
 }
 
 impl BalStore for InMemoryBalStore {
-    fn insert(&self, num_hash: NumHash, bal: SealedBal) -> ProviderResult<()> {
+    fn insert(&self, num_hash: NumHash, bal: RawBal) -> ProviderResult<()> {
         let mut inner = self.inner.write();
-        inner.insert(num_hash.hash, num_hash.number, bal.clone_inner());
+        inner.insert(num_hash.hash, num_hash.number, bal.as_raw().clone());
         if let Some(highest_block_number) = inner.highest_block_number {
             // This preserves insert-time cleanup based on the highest inserted BAL block.
             inner.prune(self.config.in_memory_retention, highest_block_number);
@@ -140,7 +137,7 @@ impl BalStore for InMemoryBalStore {
         Ok(())
     }
 
-    fn insert_many(&self, entries: Vec<(NumHash, SealedBal)>) -> ProviderResult<()> {
+    fn insert_many(&self, entries: Vec<(NumHash, RawBal)>) -> ProviderResult<()> {
         if entries.is_empty() {
             return Ok(())
         }
@@ -148,7 +145,7 @@ impl BalStore for InMemoryBalStore {
         let mut inner = self.inner.write();
         inner.entries.reserve(entries.len());
         for (num_hash, bal) in &entries {
-            inner.insert(num_hash.hash, num_hash.number, bal.clone_inner());
+            inner.insert(num_hash.hash, num_hash.number, bal.as_raw().clone());
         }
         if let Some(highest_block_number) = inner.highest_block_number {
             inner.prune(self.config.in_memory_retention, highest_block_number);
@@ -210,11 +207,11 @@ impl BalStore for InMemoryBalStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::{keccak256, Sealed, B256};
+    use alloy_primitives::B256;
     use tokio_stream::StreamExt;
 
-    fn sealed_bal(bal: Bytes) -> SealedBal {
-        Sealed::new_unchecked(bal.clone(), keccak256(&bal))
+    fn sealed_bal(bal: Bytes) -> RawBal {
+        RawBal::new(bal)
     }
 
     #[test]
@@ -246,7 +243,7 @@ mod tests {
 
         assert_eq!(
             store.get_by_hashes(&[hash0, hash1]).unwrap(),
-            vec![Some(bal0.clone_inner()), Some(Bytes::from_static(b"bal1"))]
+            vec![Some(bal0.as_raw().clone()), Some(Bytes::from_static(b"bal1"))]
         );
     }
 
@@ -404,6 +401,21 @@ mod tests {
         store.insert(NumHash::new(2, hash), sealed_bal(bal.clone())).unwrap();
 
         assert_eq!(store.get_by_hashes(&[hash]).unwrap(), vec![Some(bal)]);
+    }
+
+    #[test]
+    fn reinserting_retained_hash_does_not_leave_stale_pruning_index() {
+        let store = InMemoryBalStore::new(BalConfig::with_in_memory_retention_distance(2));
+        let hash = B256::repeat_byte(1);
+        store.insert(NumHash::new(7, hash), sealed_bal(Bytes::from_static(b"old"))).unwrap();
+        let replacement = Bytes::from_static(b"new");
+        store.insert(NumHash::new(8, hash), sealed_bal(replacement.clone())).unwrap();
+
+        // Number7 expires here, while the replacement at number8 must remain available.
+        assert_eq!(store.prune(10).unwrap(), 0);
+        assert_eq!(store.get_by_hash(hash).unwrap(), Some(replacement));
+        assert_eq!(store.prune(11).unwrap(), 1);
+        assert_eq!(store.get_by_hash(hash).unwrap(), None);
     }
 
     #[tokio::test]

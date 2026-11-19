@@ -1,6 +1,8 @@
 #[cfg(feature = "metrics")]
 use crate::metrics::ParallelStateRootMetrics;
-use crate::{stats::ParallelTrieTracker, storage_root_targets::StorageRootTargets};
+use crate::{
+    error::StateRootTaskError, stats::ParallelTrieTracker, storage_root_targets::StorageRootTargets,
+};
 use alloy_primitives::B256;
 use alloy_rlp::{BufMut, Encodable};
 use itertools::Itertools;
@@ -26,7 +28,6 @@ use std::{
     },
     time::Duration,
 };
-use thiserror::Error;
 use tokio::runtime::{Builder, Handle, Runtime};
 use tracing::*;
 
@@ -73,23 +74,18 @@ where
     Factory: DatabaseProviderFactory<Provider: BlockReader> + Clone + Send + Sync + 'static,
 {
     /// Calculate incremental state root in parallel.
-    pub fn incremental_root(self) -> Result<B256, ParallelStateRootError> {
+    pub fn incremental_root(self) -> Result<B256, StateRootTaskError> {
         self.calculate(false).map(|(root, _)| root)
     }
 
     /// Calculate incremental state root with updates in parallel.
-    pub fn incremental_root_with_updates(
-        self,
-    ) -> Result<(B256, TrieUpdates), ParallelStateRootError> {
+    pub fn incremental_root_with_updates(self) -> Result<(B256, TrieUpdates), StateRootTaskError> {
         self.calculate(true)
     }
 
     /// Computes the state root by calculating storage roots in parallel for modified accounts,
     /// then walking the state trie to build the final state root hash.
-    fn calculate(
-        self,
-        retain_updates: bool,
-    ) -> Result<(B256, TrieUpdates), ParallelStateRootError> {
+    fn calculate(self, retain_updates: bool) -> Result<(B256, TrieUpdates), StateRootTaskError> {
         let mut tracker = ParallelTrieTracker::default();
         let trie_nodes_sorted = Arc::new(self.input.nodes.into_sorted());
         let hashed_state_sorted = Arc::new(self.input.state.into_sorted());
@@ -120,7 +116,7 @@ where
 
             // Spawn a blocking task to calculate account's storage root from database I/O
             drop(handle.spawn_blocking(move || {
-                let result = (|| -> Result<_, ParallelStateRootError> {
+                let result = (|| -> Result<_, StateRootTaskError> {
                     let provider_ro = view.provider_ro()?;
                     let trie_cursor_factory = InMemoryTrieCursorFactory::new(
                         DatabaseTrieCursorFactory::new(provider_ro.tx_ref()),
@@ -162,6 +158,7 @@ where
             trie_cursor_factory.account_trie_cursor().map_err(ProviderError::Database)?,
             prefix_sets.account_prefix_set,
         )
+        .map_err(ProviderError::Database)?
         .with_deletions_retained(retain_updates);
         let mut account_node_iter = TrieNodeIter::state_trie(
             walker,
@@ -177,12 +174,8 @@ where
                 }
                 TrieElement::Leaf(hashed_address, account) => {
                     let storage_root_result = match storage_roots.remove(&hashed_address) {
-                        Some(rx) => rx.recv().map_err(|_| {
-                            ParallelStateRootError::StorageRoot(StorageRootError::Database(
-                                DatabaseError::Other(format!(
-                                    "channel closed for {hashed_address}"
-                                )),
-                            ))
+                        Some(rx) => rx.recv().map_err(|error| {
+                            StateRootTaskError::Provider(ProviderError::other(error))
                         })??,
                         // Since we do not store all intermediate nodes in the database, there might
                         // be a possibility of re-adding a non-modified leaf to the hash builder.
@@ -203,7 +196,7 @@ where
                     let (storage_root, _, updates) = match storage_root_result {
                         reth_trie::StorageRootProgress::Complete(root, _, updates) => (root, (), updates),
                         reth_trie::StorageRootProgress::Progress(..) => {
-                            return Err(ParallelStateRootError::StorageRoot(
+                            return Err(StateRootTaskError::StorageRoot(
                                 StorageRootError::Database(DatabaseError::Other(
                                     "StorageRoot returned Progress variant in parallel trie calculation".to_string()
                                 ))
@@ -248,37 +241,8 @@ where
     }
 }
 
-/// Error during parallel state root calculation.
-#[derive(Error, Debug)]
-pub enum ParallelStateRootError {
-    /// Error while calculating storage root.
-    #[error(transparent)]
-    StorageRoot(#[from] StorageRootError),
-    /// Provider error.
-    #[error(transparent)]
-    Provider(#[from] ProviderError),
-    /// Other unspecified error.
-    #[error("{_0}")]
-    Other(String),
-}
-
-impl From<ParallelStateRootError> for ProviderError {
-    fn from(error: ParallelStateRootError) -> Self {
-        match error {
-            ParallelStateRootError::Provider(error) => error,
-            ParallelStateRootError::StorageRoot(StorageRootError::Database(error)) => {
-                Self::Database(error)
-            }
-            ParallelStateRootError::Other(other) => Self::Database(DatabaseError::Other(other)),
-        }
-    }
-}
-
-impl From<alloy_rlp::Error> for ParallelStateRootError {
-    fn from(error: alloy_rlp::Error) -> Self {
-        Self::Provider(ProviderError::Rlp(error))
-    }
-}
+/// Compatibility name for errors returned by the retained parallel root calculator.
+pub use crate::error::StateRootTaskError as ParallelStateRootError;
 
 /// Gets or creates a tokio runtime handle for spawning blocking tasks.
 /// This ensures we always have a runtime available for I/O operations.

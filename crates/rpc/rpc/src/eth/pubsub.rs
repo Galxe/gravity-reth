@@ -1,15 +1,14 @@
 //! `eth_` `PubSub` RPC handler implementation
 
 use std::sync::Arc;
+use tracing::error;
 
-use alloy_consensus::{transaction::TxHashRef, BlockHeader, TxReceipt};
-use alloy_eips::{eip2718::Encodable2718, BlockNumHash};
 use alloy_primitives::TxHash;
 use alloy_rpc_types_eth::{
     pubsub::{
         Params, PubSubSyncStatus, SubscriptionKind, SyncStatusMetadata, TransactionReceiptsParams,
     },
-    Filter, Log,
+    Filter,
 };
 use futures::StreamExt;
 use jsonrpsee::{
@@ -17,12 +16,10 @@ use jsonrpsee::{
 };
 use reth_chain_state::CanonStateSubscriptions;
 use reth_network_api::NetworkInfo;
-use reth_primitives_traits::{BlockBody, TransactionMeta};
-use reth_rpc_convert::{transaction::ConvertReceiptInput, RpcHeader};
+use reth_rpc_convert::{RpcConvert, RpcHeader, RpcLog};
 use reth_rpc_eth_api::{
-    pubsub::EthPubSubApiServer, EthApiTypes, RpcConvert, RpcNodeCore, RpcTransaction,
+    helpers::EthSubscriptions, pubsub::EthPubSubApiServer, RpcNodeCore, RpcTransaction,
 };
-use reth_rpc_eth_types::logs_utils;
 use reth_rpc_server_types::result::{internal_rpc_err, invalid_params_rpc_err};
 use reth_storage_api::BlockNumReader;
 use reth_tasks::Runtime;
@@ -32,7 +29,6 @@ use tokio_stream::{
     wrappers::{BroadcastStream, ReceiverStream},
     Stream,
 };
-use tracing::error;
 
 /// `Eth` pubsub RPC implementation.
 ///
@@ -55,7 +51,7 @@ impl<Eth> EthPubSub<Eth> {
 
 impl<Eth> EthPubSub<Eth>
 where
-    Eth: RpcNodeCore + EthApiTypes<RpcConvert: RpcConvert<Primitives = Eth::Primitives>>,
+    Eth: EthSubscriptions,
 {
     /// Returns the current sync status for the `syncing` subscription
     pub fn sync_status(&self, is_syncing: bool) -> PubSubSyncStatus {
@@ -74,14 +70,14 @@ where
         self.inner.full_pending_transaction_stream()
     }
 
-    /// Returns a stream that yields all new RPC blocks.
+    /// Returns a stream that yields new block headers.
     pub fn new_headers_stream(&self) -> impl Stream<Item = RpcHeader<Eth::NetworkTypes>> {
-        self.inner.new_headers_stream()
+        self.inner.eth_api.header_stream()
     }
 
-    /// Returns a stream that yields all logs that match the given filter.
-    pub fn log_stream(&self, filter: Filter) -> impl Stream<Item = Log> {
-        self.inner.log_stream(filter)
+    /// Returns a stream that yields matching logs.
+    pub fn log_stream(&self, filter: Filter) -> impl Stream<Item = RpcLog<Eth::NetworkTypes>> {
+        self.inner.eth_api.log_stream(filter)
     }
 
     /// The actual handler for an accepted [`EthPubSub::subscribe`] call.
@@ -210,86 +206,11 @@ where
                     }
                 };
 
-                let converter = self.inner.eth_api.converter();
-                let stream = self.inner.eth_api.provider().canonical_state_stream().flat_map(
-                    move |new_chain| {
-                        // for each block in the new chain, build RPC receipts
-                        let results: Vec<_> = new_chain
-                            .committed()
-                            .blocks_and_receipts()
-                            .filter_map(|(block, receipts)| {
-                                let block_hash = block.hash();
-                                let block_number = block.number();
-                                let base_fee = block.base_fee_per_gas();
-                                let excess_blob_gas = block.excess_blob_gas();
-                                let timestamp = block.timestamp();
-
-                                let mut gas_used: u64 = 0;
-                                let mut next_log_index: usize = 0;
-
-                                // build ConvertReceiptInput for each tx+receipt pair
-                                // (same logic as eth_getBlockReceipts HTTP endpoint)
-                                let inputs: Vec<_> = block
-                                    .transactions_recovered()
-                                    .zip(receipts.iter())
-                                    .enumerate()
-                                    .filter_map(|(idx, (tx, receipt))| {
-                                        let gas_used_before = gas_used;
-                                        let next_log_index_before = next_log_index;
-                                        let cumulative_gas_used = receipt.cumulative_gas_used();
-
-                                        gas_used = cumulative_gas_used;
-                                        next_log_index += receipt.logs().len();
-
-                                        // apply transaction hash filter if provided
-                                        let matches = match &filter.transaction_hashes {
-                                            Some(hashes) if !hashes.is_empty() => {
-                                                hashes.contains(tx.tx_hash())
-                                            }
-                                            _ => true,
-                                        };
-
-                                        matches.then(|| ConvertReceiptInput {
-                                            tx,
-                                            gas_used: cumulative_gas_used - gas_used_before,
-                                            next_log_index: next_log_index_before,
-                                            meta: TransactionMeta {
-                                                tx_hash: *tx.tx_hash(),
-                                                index: idx as u64,
-                                                block_hash,
-                                                block_number,
-                                                base_fee,
-                                                excess_blob_gas,
-                                                timestamp,
-                                            },
-                                            receipt: receipt.clone(),
-                                        })
-                                    })
-                                    .collect();
-
-                                if inputs.is_empty() {
-                                    return None;
-                                }
-
-                                match converter.convert_receipts(inputs) {
-                                    Ok(rpc_receipts) => Some(rpc_receipts),
-                                    Err(err) => {
-                                        error!(
-                                            target = "rpc",
-                                            %err,
-                                            "Failed to convert receipts"
-                                        );
-                                        None
-                                    }
-                                }
-                            })
-                            .collect();
-
-                        futures::stream::iter(results)
-                    },
-                );
-
-                pipe_from_stream(accepted_sink, stream).await
+                pipe_from_stream(
+                    accepted_sink,
+                    self.inner.eth_api.transaction_receipts_stream(filter),
+                )
+                .await
             }
             _ => Err(invalid_params_rpc_err("Unsupported subscription kind")),
         }
@@ -299,7 +220,7 @@ where
 #[async_trait::async_trait]
 impl<Eth> EthPubSubApiServer<RpcTransaction<Eth::NetworkTypes>> for EthPubSub<Eth>
 where
-    Eth: RpcNodeCore + EthApiTypes<RpcConvert: RpcConvert<Primitives = Eth::Primitives>>,
+    Eth: EthSubscriptions,
 {
     /// Handler for `eth_subscribe`
     async fn subscribe(
@@ -428,65 +349,5 @@ where
         &self,
     ) -> impl Stream<Item = NewTransactionEvent<<Eth::Pool as TransactionPool>::Transaction>> {
         self.eth_api.pool().new_pending_pool_transactions_listener()
-    }
-}
-
-impl<Eth> EthPubSubInner<Eth>
-where
-    Eth: EthApiTypes<RpcConvert: RpcConvert<Primitives = Eth::Primitives>> + RpcNodeCore,
-{
-    /// Returns a stream that yields all new RPC blocks.
-    fn new_headers_stream(&self) -> impl Stream<Item = RpcHeader<Eth::NetworkTypes>> {
-        let converter = self.eth_api.converter();
-        self.eth_api.provider().canonical_state_stream().flat_map(|new_chain| {
-            let headers = new_chain
-                .committed()
-                .blocks_iter()
-                .filter_map(|block| {
-                    match converter.convert_header(block.clone_sealed_header(), block.rlp_length())
-                    {
-                        Ok(header) => Some(header),
-                        Err(err) => {
-                            error!(target = "rpc", %err, "Failed to convert header");
-                            None
-                        }
-                    }
-                })
-                .collect::<Vec<_>>();
-            futures::stream::iter(headers)
-        })
-    }
-
-    /// Returns a stream that yields all logs that match the given filter.
-    fn log_stream(&self, filter: Filter) -> impl Stream<Item = Log> {
-        self.eth_api.provider().canonical_state_stream().flat_map(move |canon_state| {
-            let mut all_logs = Vec::new();
-            // Reverted logs must precede committed logs, even when bloom filtering skips blocks.
-            for (chain, removed) in canon_state
-                .reverted()
-                .into_iter()
-                .map(|chain| (chain, true))
-                .chain(std::iter::once((canon_state.committed(), false)))
-            {
-                for (block, receipts) in chain.blocks_and_receipts() {
-                    if !filter.matches_bloom(block.header().logs_bloom()) {
-                        continue;
-                    }
-                    all_logs.extend(logs_utils::matching_block_logs_with_tx_hashes(
-                        &filter,
-                        BlockNumHash::new(block.number(), block.hash()),
-                        block.timestamp(),
-                        block
-                            .body()
-                            .transactions()
-                            .iter()
-                            .zip(receipts)
-                            .map(|(tx, receipt)| (tx.trie_hash(), receipt)),
-                        removed,
-                    ));
-                }
-            }
-            futures::stream::iter(all_logs)
-        })
     }
 }

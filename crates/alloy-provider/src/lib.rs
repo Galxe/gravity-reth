@@ -33,10 +33,9 @@ use reth_db_api::{
     models::StoredBlockBodyIndices,
 };
 use reth_errors::{ProviderError, ProviderResult};
+use reth_execution_types::RecoveredBlockAndExecutionOutput;
 use reth_node_types::{BlockTy, HeaderTy, NodeTypes, PrimitivesTy, ReceiptTy, TxTy};
-use reth_primitives::{
-    Account, Bytecode, RecoveredBlock, SealedBlock, SealedHeader, TransactionMeta,
-};
+use reth_primitives::{Account, Bytecode, RecoveredBlock, SealedHeader, TransactionMeta};
 use reth_provider::{
     AccountReader, BlockHashReader, BlockIdReader, BlockNumReader, BlockReader, BytecodeReader,
     CanonChainTracker, CanonStateNotification, CanonStateNotifications, CanonStateSubscriptions,
@@ -360,13 +359,13 @@ where
         Err(ProviderError::UnsupportedProvider)
     }
 
-    fn pending_block(&self) -> ProviderResult<Option<RecoveredBlock<Self::Block>>> {
+    fn pending_block(&self) -> ProviderResult<Option<Arc<RecoveredBlock<Self::Block>>>> {
         Err(ProviderError::UnsupportedProvider)
     }
 
     fn pending_block_and_receipts(
         &self,
-    ) -> ProviderResult<Option<(SealedBlock<Self::Block>, Vec<Self::Receipt>)>> {
+    ) -> ProviderResult<Option<RecoveredBlockAndExecutionOutput<Self::Block, Self::Receipt>>> {
         Err(ProviderError::UnsupportedProvider)
     }
 
@@ -613,6 +612,12 @@ where
     fn pending(&self) -> Result<StateProviderBox, ProviderError> {
         trace!(target: "alloy-provider", "Getting pending state provider");
         self.latest()
+    }
+
+    fn maybe_pending(&self) -> Result<Option<StateProviderBox>, ProviderError> {
+        // This RPC-backed factory has no local pending execution outcome.
+        // Keep pending()'s existing fallback separate from an actual pending view.
+        Ok(None)
     }
 
     fn pending_state_by_hash(
@@ -1229,13 +1234,14 @@ where
         Err(ProviderError::UnsupportedProvider)
     }
 
-    fn pending_block(&self) -> Result<Option<RecoveredBlock<Self::Block>>, ProviderError> {
+    fn pending_block(&self) -> Result<Option<Arc<RecoveredBlock<Self::Block>>>, ProviderError> {
         Err(ProviderError::UnsupportedProvider)
     }
 
     fn pending_block_and_receipts(
         &self,
-    ) -> Result<Option<(SealedBlock<Self::Block>, Vec<Self::Receipt>)>, ProviderError> {
+    ) -> Result<Option<RecoveredBlockAndExecutionOutput<Self::Block, Self::Receipt>>, ProviderError>
+    {
         Err(ProviderError::UnsupportedProvider)
     }
 
@@ -1554,6 +1560,12 @@ where
         Ok(Box::new(self.clone()))
     }
 
+    fn maybe_pending(&self) -> Result<Option<StateProviderBox>, ProviderError> {
+        // This RPC-backed factory has no local pending execution outcome.
+        // Keep pending()'s existing fallback separate from an actual pending view.
+        Ok(None)
+    }
+
     fn pending_state_by_hash(
         &self,
         _block_hash: B256,
@@ -1704,12 +1716,13 @@ where
                 Ok(None)
             } else {
                 let code_hash = if account_info.code.is_empty() {
-                    revm_primitives::KECCAK_EMPTY
+                    revm::primitives::KECCAK_EMPTY
                 } else {
-                    revm_primitives::keccak256(&account_info.code)
+                    revm::primitives::keccak256(&account_info.code)
                 };
 
                 Ok(Some(revm::state::AccountInfo {
+                    account_id: None,
                     balance: account_info.balance,
                     nonce: account_info.nonce,
                     code_hash,

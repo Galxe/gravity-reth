@@ -47,7 +47,7 @@ use reth_db_api::{
     transaction::{DbTx, DbTxMut},
     BlockNumberList, DatabaseError, PlainAccountState, PlainStorageState,
 };
-use reth_execution_types::{Chain, ExecutionOutcome};
+use reth_execution_types::{Chain, ExecutionOutcome, RecoveredBlockAndExecutionOutput};
 use reth_node_types::{BlockTy, BodyTy, HeaderTy, NodeTypes, ReceiptTy, TxTy};
 use reth_primitives_traits::{
     Account, Block as _, BlockBody as _, Bytecode, GotExpected, NodePrimitives, RecoveredBlock,
@@ -68,7 +68,7 @@ use reth_trie::{
     HashedPostStateSorted, StoredNibbles, StoredNibblesSubKey,
 };
 use reth_trie_db::{nested_hash::NestedStateRoot, DatabaseStorageTrieCursor};
-use revm_database::states::{
+use revm::database::states::{
     PlainStateReverts, PlainStorageChangeset, PlainStorageRevert, StateChangeset,
 };
 use std::{
@@ -799,6 +799,14 @@ impl<TX: DbTx + 'static, N: NodeTypesForProvider> DatabaseProvider<TX, N> {
             return Ok(Vec::new())
         }
 
+        let earliest_available = self.static_file_provider.earliest_history_height();
+        if *range.start() < earliest_available {
+            return Err(ProviderError::BlockExpired {
+                requested: *range.start(),
+                earliest_available,
+            })
+        }
+
         let len = range.end().saturating_sub(*range.start()) as usize;
         let mut blocks = Vec::with_capacity(len);
 
@@ -1428,13 +1436,13 @@ impl<TX: DbTx + 'static, N: NodeTypesForProvider> BlockReader for DatabaseProvid
 
         Ok(None)
     }
-    fn pending_block(&self) -> ProviderResult<Option<RecoveredBlock<Self::Block>>> {
+    fn pending_block(&self) -> ProviderResult<Option<Arc<RecoveredBlock<Self::Block>>>> {
         Ok(None)
     }
 
     fn pending_block_and_receipts(
         &self,
-    ) -> ProviderResult<Option<(RecoveredBlock<Self::Block>, Vec<Self::Receipt>)>> {
+    ) -> ProviderResult<Option<RecoveredBlockAndExecutionOutput<Self::Block, Self::Receipt>>> {
         Ok(None)
     }
 
@@ -2500,12 +2508,11 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
             return Ok(());
         }
 
-        // We are not removing block meta as it is used to get block changesets.
-        let block_bodies = self.block_body_indices_range(range.clone())?;
-
-        // get transaction receipts
-        let from_transaction_num =
-            block_bodies.first().expect("already checked if there are blocks").first_tx_num();
+        // Read the retained block's body indices instead of scanning every removed block.
+        let from_transaction_num = self
+            .block_body_indices(block)?
+            .map(|body| body.next_tx_num())
+            .ok_or(ProviderError::BlockBodyIndicesNotFound(block))?;
 
         let storage_range = BlockNumberAddress::range(range.clone());
 
@@ -3589,6 +3596,76 @@ impl<TX: DbTx + 'static, N: NodeTypes> PruneCheckpointReader for DatabaseProvide
             .walk(None)?
             .collect::<Result<_, _>>()?)
     }
+    fn get_prune_checkpoints_for_availability(
+        &self,
+    ) -> ProviderResult<Vec<(PruneSegment, PruneCheckpoint)>> {
+        let mut checkpoints = self.get_prune_checkpoints()?;
+        if !checkpoints.iter().any(|(segment, checkpoint)| {
+            matches!(segment, PruneSegment::Receipts | PruneSegment::ContractLogs) &&
+                checkpoint.tx_number.is_some()
+        }) {
+            return Ok(checkpoints)
+        }
+
+        let Some(lowest_block) =
+            self.static_file_provider.get_lowest_range_start(StaticFileSegment::Receipts)
+        else {
+            return Ok(checkpoints)
+        };
+        let Some(first_tx_range) = self
+            .static_file_provider
+            .get_segment_provider_from_block(StaticFileSegment::Receipts, lowest_block, None)?
+            .user_header()
+            .tx_range()
+        else {
+            return Ok(checkpoints)
+        };
+
+        // Migration can pad the first file with blocks whose receipts were already pruned.
+        // TransactionBlocks::seek can also land after expired history, so verify the body range.
+        let pruned_tx = first_tx_range.start().checked_sub(1);
+        let pruned_block = if let Some(tx) = pruned_tx {
+            if let Some((_, block)) =
+                self.tx.cursor_read::<tables::TransactionBlocks>()?.seek(tx)? &&
+                let Some(indices) = self.tx.get::<tables::BlockBodyIndices>(block)? &&
+                indices.tx_num_range().contains(&tx)
+            {
+                Some(block).max(lowest_block.checked_sub(1))
+            } else {
+                return Ok(checkpoints)
+            }
+        } else {
+            lowest_block.checked_sub(1)
+        };
+
+        // The removed StaticFileReceipts pruner checkpointed moves into static files.
+        // Writers enforce continuity within each file, but migration can leave gaps between files.
+        // Reuse the verified coverage for both receipts and logs.
+        let mut last_tx = first_tx_range.end();
+        for (segment, checkpoint) in &mut checkpoints {
+            if matches!(segment, PruneSegment::Receipts | PruneSegment::ContractLogs) &&
+                let Some(tx) = checkpoint.tx_number &&
+                tx >= first_tx_range.start()
+            {
+                while let Some(next_tx) = last_tx.checked_add(1) &&
+                    next_tx <= tx &&
+                    let Some(next_file) = self
+                        .static_file_provider
+                        .get_maybe_segment_provider(StaticFileSegment::Receipts, next_tx)? &&
+                    let Some(next_range) = next_file.user_header().tx_range() &&
+                    next_range.start() == next_tx
+                {
+                    last_tx = next_range.end();
+                }
+                if tx <= last_tx {
+                    checkpoint.block_number = pruned_block;
+                    checkpoint.tx_number = pruned_tx;
+                }
+            }
+        }
+
+        Ok(checkpoints)
+    }
 }
 
 impl<TX: DbTxMut, N: NodeTypes> PruneCheckpointWriter for DatabaseProvider<TX, N> {
@@ -3705,7 +3782,7 @@ mod tests {
     fn batched_receipts_keep_recent_blocks_with_log_filter() {
         use reth_ethereum_primitives::Receipt;
         use reth_prune_types::ReceiptsLogPruneConfig;
-        use revm_database::{states::reverts::Reverts, BundleState};
+        use revm::database::{states::reverts::Reverts, BundleState};
 
         let factory = create_test_provider_factory().with_prune_modes(PruneModes {
             receipts_log_filter: ReceiptsLogPruneConfig(BTreeMap::from([(
@@ -3747,8 +3824,10 @@ mod tests {
 
     #[test]
     fn merged_history_groups_repeated_keys_and_includes_wiped_slots() -> eyre::Result<()> {
-        use revm_database::{states::AccountStatus, BundleState};
-        use revm_state::AccountInfo;
+        use revm::{
+            database::{states::AccountStatus, BundleState},
+            state::AccountInfo,
+        };
 
         for changesets_in_static_files in [false, true] {
             let factory = create_test_provider_factory();

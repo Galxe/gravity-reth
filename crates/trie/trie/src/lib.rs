@@ -4,7 +4,6 @@
 //!
 //! ## Feature Flags
 //!
-//! - `rayon`: uses rayon for parallel [`HashedPostState`] creation.
 //! - `test-utils`: Export utilities for testing
 
 #![doc(
@@ -13,6 +12,9 @@
     issue_tracker_base_url = "https://github.com/paradigmxyz/reth/issues/"
 )]
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
+
+// Keep the original component feature edges without enabling broader revm facade features.
+use revm_database as _;
 
 /// The implementation of forward-only in-memory cursor.
 pub mod forward_cursor;
@@ -31,6 +33,9 @@ pub mod node_iter;
 
 /// Merkle proof generation.
 pub mod proof;
+
+/// Proof calculation using decoded V2 nodes and read-only cursor factories.
+pub mod proof_v2;
 
 /// Trie witness generation.
 pub mod witness;
@@ -61,8 +66,15 @@ pub mod metrics;
 pub mod test_utils;
 
 /// Collection of mock types for testing.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 pub mod mock;
 
 /// Verification of existing stored trie nodes against state data.
 pub mod verify;
+
+/// Opt-in parallel verification over a shared immutable legacy trie view.
+#[cfg(not(target_family = "wasm"))]
+pub mod parallel_verify;
+
+/// Opt-in computation of old legacy trie node values for changed paths.
+pub mod changesets;

@@ -10,7 +10,13 @@ use alloy_primitives::{
 use reth_chainspec::EthChainSpec;
 use reth_codecs::Compact;
 use reth_config::config::EtlConfig;
-use reth_db_api::{models::GravityStorageSettings, tables, transaction::DbTxMut, DatabaseError};
+use reth_db_api::{
+    cursor::DbDupCursorRO,
+    models::GravityStorageSettings,
+    tables,
+    transaction::{DbTx, DbTxMut},
+    DatabaseError,
+};
 use reth_etl::Collector;
 use reth_execution_errors::StateRootError;
 use reth_primitives_traits::{Account, Bytecode, GotExpected, NodePrimitives, StorageEntry};
@@ -270,14 +276,39 @@ where
         + StateWriter
         + AsRef<Provider>,
 {
+    insert_state_inner(provider, alloc, block, false)
+}
+
+/// Writes initialization state, optionally preserving the state overlaid by a manual dump.
+fn insert_state_inner<'a, 'b, Provider>(
+    provider: &Provider,
+    alloc: impl Iterator<Item = (&'a Address, &'b GenesisAccount)>,
+    block: u64,
+    capture_existing: bool,
+) -> ProviderResult<()>
+where
+    Provider: StaticFileProviderFactory
+        + DBProvider<Tx: DbTxMut>
+        + HeaderProvider
+        + StateWriter
+        + AsRef<Provider>,
+{
     let capacity = alloc.size_hint().1.unwrap_or(0);
     let mut state_init: BundleStateInit =
         HashMap::with_capacity_and_hasher(capacity, Default::default());
     let mut reverts_init = HashMap::with_capacity_and_hasher(capacity, Default::default());
     let mut contracts: HashMap<B256, Bytecode> =
         HashMap::with_capacity_and_hasher(capacity, Default::default());
+    let mut existing_storage = capture_existing
+        .then(|| provider.tx_ref().cursor_dup_read::<tables::PlainStorageState>())
+        .transpose()?;
 
     for (address, account) in alloc {
+        let previous_account = if capture_existing {
+            provider.tx_ref().get::<tables::PlainAccountState>(*address)?
+        } else {
+            None
+        };
         let bytecode_hash = if let Some(code) = &account.code {
             match Bytecode::new_raw_checked(code.clone()) {
                 Ok(bytecode) => {
@@ -294,29 +325,33 @@ where
             None
         };
 
-        // get state
-        let storage = account
-            .storage
-            .as_ref()
-            .map(|m| {
-                m.iter()
-                    .map(|(key, value)| {
-                        let value = U256::from_be_bytes(value.0);
-                        (*key, (U256::ZERO, value))
-                    })
-                    .collect::<B256Map<_>>()
-            })
-            .unwrap_or_default();
+        let mut storage = B256Map::default();
+        for (key, value) in account.storage.iter().flatten() {
+            let previous_value = if let Some(cursor) = existing_storage.as_mut() {
+                // A seek may return the next slot. Only the exact subkey is this slot's preimage.
+                cursor
+                    .seek_by_key_subkey(*address, *key)?
+                    .filter(|entry| entry.key == *key)
+                    .map(|entry| entry.value)
+                    .unwrap_or_default()
+            } else {
+                U256::ZERO
+            };
+            storage.insert(*key, (previous_value, U256::from_be_bytes(value.0)));
+        }
 
         reverts_init.insert(
             *address,
-            (Some(None), storage.keys().map(|k| StorageEntry::new(*k, U256::ZERO)).collect()),
+            (
+                Some(previous_account),
+                storage.iter().map(|(key, (before, _))| StorageEntry::new(*key, *before)).collect(),
+            ),
         );
 
         state_init.insert(
             *address,
             (
-                None,
+                previous_account,
                 Some(Account {
                     nonce: account.nonce.unwrap_or_default(),
                     balance: account.balance,
@@ -679,10 +714,11 @@ where
             )?;
 
             // block is already written to static files
-            insert_state(
+            insert_state_inner(
                 provider_rw,
                 accounts.iter().map(|(address, account)| (address, account)),
                 block,
+                true,
             )?;
 
             accounts.clear();
@@ -799,6 +835,230 @@ mod tests {
         T: Table,
     {
         Ok(tx.cursor_read::<T>()?.walk_range(..)?.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    #[test]
+    fn dump_state_overlays_committed_genesis_with_real_preimages() {
+        use reth_provider::{AccountReader, HistoricalStateProviderRef, StateProvider};
+
+        let overlapping = Address::with_last_byte(2);
+        let no_dump_storage = Address::with_last_byte(3);
+        let genesis_only = Address::with_last_byte(4);
+        let dump_only = Address::with_last_byte(1);
+        let slot = B256::with_last_byte;
+        let genesis_alloc = BTreeMap::from([
+            (
+                overlapping,
+                GenesisAccount {
+                    balance: U256::from(1),
+                    storage: Some(BTreeMap::from([
+                        (slot(1), slot(0x11)),
+                        (slot(2), slot(0x12)),
+                        (slot(4), slot(0x14)),
+                        (slot(6), slot(0x16)),
+                    ])),
+                    ..Default::default()
+                },
+            ),
+            (
+                no_dump_storage,
+                GenesisAccount {
+                    storage: Some(BTreeMap::from([(slot(7), slot(0x17))])),
+                    ..Default::default()
+                },
+            ),
+            (
+                genesis_only,
+                GenesisAccount {
+                    balance: U256::from(9),
+                    storage: Some(BTreeMap::from([(slot(8), slot(0x18))])),
+                    ..Default::default()
+                },
+            ),
+        ]);
+        let dump_alloc = BTreeMap::from([
+            (
+                dump_only,
+                GenesisAccount {
+                    balance: U256::from(5),
+                    storage: Some(BTreeMap::from([(slot(5), slot(0x25))])),
+                    ..Default::default()
+                },
+            ),
+            (
+                overlapping,
+                GenesisAccount {
+                    balance: U256::from(2),
+                    storage: Some(BTreeMap::from([
+                        (slot(1), slot(0x21)),
+                        (slot(3), slot(0x23)),
+                        (slot(4), slot(0x14)),
+                        (slot(6), B256::ZERO),
+                    ])),
+                    ..Default::default()
+                },
+            ),
+            (no_dump_storage, GenesisAccount { balance: U256::from(3), ..Default::default() }),
+        ]);
+        let chain_spec = Arc::new(ChainSpec {
+            genesis: Genesis { alloc: genesis_alloc.clone(), ..Default::default() },
+            ..Default::default()
+        });
+        let factory = create_test_provider_factory_with_chain_spec(chain_spec);
+        init_genesis(&factory).unwrap();
+
+        let input = dump_alloc
+            .iter()
+            .map(|(address, account)| {
+                serde_json::to_string(&GenesisAccountWithAddress {
+                    genesis_account: account.clone(),
+                    address: *address,
+                })
+                .unwrap()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let collector = parse_accounts(input.as_bytes(), EtlConfig::new(None, 128)).unwrap();
+        {
+            let provider = factory.database_provider_rw().unwrap();
+            dump_state(collector, &provider, 10, &mut TriePrefixSetsMut::default()).unwrap();
+            provider.commit().unwrap();
+        }
+
+        // Reopen after both genesis and import commits; stale write-batch reads cannot mask errors.
+        let provider = factory.database_provider_ro().unwrap();
+        let before = HistoricalStateProviderRef::new(&provider, 1);
+        for (address, account) in &genesis_alloc {
+            assert_eq!(before.basic_account(address).unwrap(), Some(Account::from(account)));
+            for (key, value) in account.storage.iter().flatten() {
+                assert_eq!(
+                    before.storage(*address, *key).unwrap().unwrap_or_default(),
+                    U256::from_be_bytes(value.0)
+                );
+            }
+        }
+        assert_eq!(before.basic_account(&dump_only).unwrap(), None);
+        assert_eq!(before.storage(overlapping, slot(3)).unwrap().unwrap_or_default(), U256::ZERO);
+
+        let after = HistoricalStateProviderRef::new(&provider, 11);
+        for (address, account) in &dump_alloc {
+            assert_eq!(after.basic_account(address).unwrap(), Some(Account::from(account)));
+        }
+        assert_eq!(
+            after.basic_account(&genesis_only).unwrap(),
+            Some(Account::from(&genesis_alloc[&genesis_only]))
+        );
+        for (address, key, value) in [
+            (overlapping, 1, 0x21u64),
+            (overlapping, 2, 0x12),
+            (overlapping, 3, 0x23),
+            (overlapping, 4, 0x14),
+            (overlapping, 6, 0),
+            (no_dump_storage, 7, 0x17),
+            (genesis_only, 8, 0x18),
+            (dump_only, 5, 0x25),
+        ] {
+            assert_eq!(
+                after.storage(address, slot(key)).unwrap().unwrap_or_default(),
+                U256::from(value)
+            );
+            let mut hashed = provider.tx_ref().cursor_dup_read::<tables::HashedStorages>().unwrap();
+            let stored = hashed
+                .seek_by_key_subkey(keccak256(address), keccak256(slot(key)))
+                .unwrap()
+                .filter(|entry| entry.key == keccak256(slot(key)));
+            if value == 0 {
+                assert_eq!(stored, None);
+            } else {
+                assert_eq!(stored.unwrap().value, U256::from(value));
+            }
+        }
+
+        let accounts =
+            collect_table_entries::<Arc<DatabaseEnv>, tables::AccountChangeSets>(provider.tx_ref())
+                .unwrap();
+        for (address, expected) in [
+            (dump_only, None),
+            (overlapping, Some(Account::from(&genesis_alloc[&overlapping]))),
+            (no_dump_storage, Some(Account::from(&genesis_alloc[&no_dump_storage]))),
+        ] {
+            assert_eq!(
+                accounts
+                    .iter()
+                    .find(|(block, row)| *block == 10 && row.address == address)
+                    .unwrap()
+                    .1
+                    .info,
+                expected
+            );
+        }
+        let storages =
+            collect_table_entries::<Arc<DatabaseEnv>, tables::StorageChangeSets>(provider.tx_ref())
+                .unwrap();
+        for (address, key, value) in [
+            (dump_only, 5, 0u64),
+            (overlapping, 1, 0x11),
+            (overlapping, 3, 0),
+            (overlapping, 4, 0x14),
+            (overlapping, 6, 0x16),
+        ] {
+            let (_, entry) = storages
+                .iter()
+                .find(|(bna, entry)| {
+                    bna.block_number() == 10 && bna.address() == address && entry.key == slot(key)
+                })
+                .unwrap();
+            assert_eq!(entry.value, U256::from(value));
+        }
+        let histories =
+            collect_table_entries::<Arc<DatabaseEnv>, tables::AccountsHistory>(provider.tx_ref())
+                .unwrap();
+        assert_eq!(
+            histories,
+            vec![
+                (ShardedKey::new(dump_only, u64::MAX), IntegerList::new([10]).unwrap()),
+                (ShardedKey::new(overlapping, u64::MAX), IntegerList::new([0, 10]).unwrap()),
+                (ShardedKey::new(no_dump_storage, u64::MAX), IntegerList::new([0, 10]).unwrap()),
+                (ShardedKey::new(genesis_only, u64::MAX), IntegerList::new([0]).unwrap()),
+            ]
+        );
+        assert_eq!(
+            collect_table_entries::<Arc<DatabaseEnv>, tables::PlainStorageState>(provider.tx_ref())
+                .unwrap()
+                .len(),
+            7
+        );
+        assert_eq!(
+            collect_table_entries::<Arc<DatabaseEnv>, tables::HashedStorages>(provider.tx_ref())
+                .unwrap()
+                .len(),
+            7
+        );
+        let histories =
+            collect_table_entries::<Arc<DatabaseEnv>, tables::StoragesHistory>(provider.tx_ref())
+                .unwrap();
+        for (address, key, blocks) in [
+            (dump_only, 5, vec![10]),
+            (overlapping, 1, vec![0, 10]),
+            (overlapping, 2, vec![0]),
+            (overlapping, 3, vec![10]),
+            (overlapping, 4, vec![0, 10]),
+            (overlapping, 6, vec![0, 10]),
+            (no_dump_storage, 7, vec![0]),
+            (genesis_only, 8, vec![0]),
+        ] {
+            assert_eq!(
+                histories
+                    .iter()
+                    .find(
+                        |(entry, _)| *entry == StorageShardedKey::new(address, slot(key), u64::MAX)
+                    )
+                    .unwrap()
+                    .1,
+                IntegerList::new(blocks).unwrap()
+            );
+        }
+        assert_eq!(histories.len(), 8);
     }
 
     #[test]

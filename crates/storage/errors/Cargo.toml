@@ -11,6 +11,7 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+revm.workspace = true
 # reth
 reth-codecs.workspace = true
 reth-primitives-traits.workspace = true
@@ -43,4 +44,5 @@ std = [
     "reth-static-file-types/std",
     "revm-state/std",
     "reth-codecs/std",
+    "revm/std",
 ]

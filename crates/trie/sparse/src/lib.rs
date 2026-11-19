@@ -14,6 +14,23 @@ pub use trie::*;
 mod traits;
 pub use traits::*;
 
+/// In-memory arena sparse trie implementation.
+#[cfg(feature = "std")]
+pub mod arena;
+#[cfg(feature = "std")]
+pub use arena::{ArenaParallelSparseTrie, ArenaParallelismThresholds};
+
+/// Operations specific to the retained arena implementation.
+#[cfg(feature = "std")]
+pub mod arena_traits;
+#[cfg(feature = "std")]
+pub use arena_traits::{LeafUpdate, SparseTrie as ArenaTrieInterface, TrieNodeEpoch};
+
+#[cfg(feature = "trie-debug")]
+pub mod debug_recorder;
+#[cfg(feature = "trie-debug")]
+use serde_json as _;
+
 pub mod provider;
 
 #[cfg(feature = "metrics")]

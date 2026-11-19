@@ -16,7 +16,7 @@ use crate::tree::{
 use alloy_consensus::transaction::Either;
 use alloy_eips::{eip1898::BlockWithParent, NumHash};
 use alloy_evm::Evm;
-use alloy_primitives::B256;
+use alloy_primitives::{map::AddressMap, B256};
 use reth_chain_state::{
     CanonicalInMemoryState, ExecutedBlock, ExecutedBlockWithTrieUpdates, ExecutedTrieUpdates,
 };
@@ -24,7 +24,7 @@ use reth_consensus::{ConsensusError, FullConsensus};
 use reth_engine_primitives::{
     ConfigureEngineEvm, ExecutableTxIterator, ExecutionPayload, InvalidBlockHook, PayloadValidator,
 };
-use reth_errors::{BlockExecutionError, ProviderResult};
+use reth_errors::{BlockValidationError, ProviderResult};
 use reth_evm::{
     block::BlockExecutor, execute::ExecutableTxFor, ConfigureEvm, EvmEnvFor, ExecutionCtxFor,
     SpecFor,
@@ -45,9 +45,9 @@ use reth_provider::{
 use reth_revm::db::State;
 use reth_trie::{updates::TrieUpdates, HashedPostState, KeccakKeyHasher, TrieInput};
 use reth_trie_db::DatabaseHashedPostState;
-use reth_trie_parallel::root::{ParallelStateRoot, ParallelStateRootError};
+use reth_trie_parallel::{error::StateRootTaskError, root::ParallelStateRoot};
 use revm::context::Block as _;
-use std::{collections::HashMap, sync::Arc, time::Instant};
+use std::{sync::Arc, time::Instant};
 use tracing::{debug, debug_span, error, info, trace, warn};
 
 /// Context providing access to tree state during validation.
@@ -157,7 +157,7 @@ where
     /// Precompile cache map.
     precompile_cache_map: PrecompileCacheMap<SpecFor<Evm>>,
     /// Precompile cache metrics.
-    precompile_cache_metrics: HashMap<alloy_primitives::Address, CachedPrecompileMetrics>,
+    precompile_cache_metrics: AddressMap<CachedPrecompileMetrics>,
     /// Hook to call when invalid blocks are encountered.
     #[debug(skip)]
     invalid_block_hook: Box<dyn InvalidBlockHook<Evm::Primitives>>,
@@ -202,7 +202,7 @@ where
             evm_config,
             payload_processor,
             precompile_cache_map,
-            precompile_cache_metrics: HashMap::new(),
+            precompile_cache_metrics: AddressMap::default(),
             config,
             invalid_block_hook,
             metrics: EngineApiMetrics::default(),
@@ -718,7 +718,7 @@ where
         }
 
         if let Err(e) = self.consensus.validate_block_pre_execution(block.sealed_block()) {
-            error!(target: "engine::tree", ?block, "Failed to validate block {}: {e}", block.hash());
+            error!(target: "engine::tree", block = ?block.block_with_parent(), %e, "Failed to validate block");
             return Err(e)
         }
 
@@ -779,7 +779,9 @@ where
         let state_hook = Box::new(handle.state_hook());
         let output = self.metrics.execute_metered(
             executor,
-            handle.iter_transactions().map(|res| res.map_err(BlockExecutionError::other)),
+            handle
+                .iter_transactions()
+                .map(|res| res.map_err(|err| BlockValidationError::other(err).into())),
             state_hook,
         )?;
         let execution_finish = Instant::now();
@@ -802,7 +804,7 @@ where
         parent_hash: B256,
         hashed_state: &HashedPostState,
         state: &EngineApiTreeState<N>,
-    ) -> Result<(B256, TrieUpdates), ParallelStateRootError> {
+    ) -> Result<(B256, TrieUpdates), StateRootTaskError> {
         let consistent_view = ConsistentDbView::new_with_latest_tip(self.provider.clone())?;
 
         let mut input = self.compute_trie_input(

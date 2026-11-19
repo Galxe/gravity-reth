@@ -6,7 +6,7 @@ use reth_ethereum_primitives::EthPrimitives;
 use reth_evm::ConfigureEvm;
 use reth_exex_types::ExExHead;
 use reth_node_api::NodePrimitives;
-use reth_provider::{BlockReader, Chain, HeaderProvider, StateProviderFactory};
+use reth_provider::{BlockNumReader, BlockReader, Chain, HeaderProvider, StateProviderFactory};
 use reth_stages_api::ExecutionStageThresholds;
 use reth_tracing::tracing::debug;
 use std::{
@@ -89,6 +89,20 @@ where
     Invalid,
 }
 
+impl<P, E> ExExNotificationsInner<P, E>
+where
+    E: ConfigureEvm,
+{
+    /// Returns the provider of the underlying stream.
+    fn provider(&self) -> &P {
+        match self {
+            Self::WithoutHead(n) => &n.provider,
+            Self::WithHead(n) => &n.provider,
+            Self::Invalid => unreachable!(),
+        }
+    }
+}
+
 impl<P, E> ExExNotifications<P, E>
 where
     E: ConfigureEvm,
@@ -110,6 +124,56 @@ where
                 wal_handle,
             )),
         }
+    }
+
+    /// As [`set_with_head`](ExExNotificationsStream::set_with_head), but backfills up to the
+    /// node's current canonical head rather than the head captured at construction.
+    pub fn catch_up_with_head(&mut self, exex_head: ExExHead) -> eyre::Result<()>
+    where
+        P: BlockNumReader,
+    {
+        // Resolve the current canonical head before tearing down the stream state, so a failed
+        // lookup leaves the stream untouched.
+        let local_head: BlockNumHash = self.inner.provider().chain_info()?.into();
+
+        let current = std::mem::replace(&mut self.inner, ExExNotificationsInner::Invalid);
+        let (provider, evm_config, notifications, wal_handle, backfill_thresholds, mut pending) =
+            match current {
+                ExExNotificationsInner::WithoutHead(n) => {
+                    (n.provider, n.evm_config, n.notifications, n.wal_handle, None, VecDeque::new())
+                }
+                ExExNotificationsInner::WithHead(n) => (
+                    n.provider,
+                    n.evm_config,
+                    n.notifications,
+                    n.wal_handle,
+                    n.backfill_thresholds,
+                    n.pending_notifications,
+                ),
+                ExExNotificationsInner::Invalid => unreachable!(),
+            };
+        let mut with_head = ExExNotificationsWithHead::new(
+            local_head,
+            provider,
+            evm_config,
+            notifications,
+            wal_handle,
+            exex_head,
+        );
+        // Preserve any custom backfill thresholds so the catch-up backfill respects the limits
+        // the ExEx already configured.
+        with_head.backfill_thresholds = backfill_thresholds;
+        // Backfill covers committed blocks up to the new head, but cannot replay reversions or
+        // notifications beyond that head which have already been drained from the channel.
+        pending.retain(|notification| {
+            notification.reverted_chain().is_some() ||
+                notification
+                    .committed_chain()
+                    .is_none_or(|chain| chain.tip().number() > local_head.number)
+        });
+        with_head.pending_notifications = pending;
+        self.inner = ExExNotificationsInner::WithHead(Box::new(with_head));
+        Ok(())
     }
 }
 
@@ -530,7 +594,7 @@ mod tests {
     use reth_primitives_traits::Block as _;
     use reth_provider::{
         providers::BlockchainProvider, test_utils::create_test_provider_factory, BlockWriter,
-        Chain, DBProvider, DatabaseProviderFactory, StorageLocation,
+        Chain, DatabaseProviderFactory, StorageLocation,
     };
     use reth_testing_utils::generators::{self, random_block, BlockParams};
     use tokio::sync::mpsc;
@@ -607,6 +671,103 @@ mod tests {
 
         // Second notification is the actual notification that we sent before
         assert_eq!(notifications.next().await.transpose()?, Some(notification));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn catch_up_with_head_after_pause_backfills_missed_blocks() -> eyre::Result<()> {
+        let mut rng = generators::rng();
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let wal = Wal::new(temp_dir.path()).unwrap();
+
+        let provider_factory = create_test_provider_factory();
+        let genesis_hash = init_genesis(&provider_factory)?;
+        let genesis_block = provider_factory
+            .block(genesis_hash.into())?
+            .ok_or_else(|| eyre::eyre!("genesis block not found"))?;
+        let provider = BlockchainProvider::new(provider_factory.clone())?;
+
+        let exex_head =
+            ExExHead { block: BlockNumHash { number: genesis_block.number, hash: genesis_hash } };
+        let (notifications_tx, notifications_rx) = mpsc::channel(1);
+
+        let evm_config = EthEvmConfig::mainnet();
+        let mut notifications = ExExNotifications::new(
+            BlockNumHash { number: genesis_block.number, hash: genesis_hash },
+            provider.clone(),
+            evm_config.clone(),
+            notifications_rx,
+            wal.handle(),
+        );
+        // The ExEx configures its head at launch, as usual.
+        notifications.set_with_head(exex_head);
+
+        // Block 1 is delivered live and consumed, but the ExEx fails to durably process it.
+        let node_head_block = random_block(
+            &mut rng,
+            genesis_block.number + 1,
+            BlockParams { parent: Some(genesis_hash), tx_count: Some(0), ..Default::default() },
+        )
+        .try_recover()?;
+        let node_head = node_head_block.num_hash();
+        let block_1_notification = ExExNotification::ChainCommitted {
+            new: Arc::new(Chain::new(vec![node_head_block.clone()], Default::default(), None)),
+        };
+        notifications_tx.send(block_1_notification.clone()).await?;
+        assert_eq!(notifications.next().await.transpose()?, Some(block_1_notification));
+
+        // Meanwhile the node commits block 1 and advances its canonical head past the
+        // launch-time head.
+        let provider_rw = provider_factory.provider_rw()?;
+        provider_rw.insert_block(node_head_block.clone(), StorageLocation::Database)?;
+        provider_rw.commit()?;
+        provider
+            .canonical_in_memory_state()
+            .set_canonical_head(node_head_block.clone_sealed_header());
+
+        // The ExEx recovers still at genesis and catches up, it needs block 1 again, but that
+        // notification is long gone from the channel.
+
+        let block_2_notification = ExExNotification::ChainCommitted {
+            new: Arc::new(Chain::new(
+                vec![random_block(
+                    &mut rng,
+                    node_head.number + 1,
+                    BlockParams { parent: Some(node_head.hash), ..Default::default() },
+                )
+                .try_recover()?],
+                Default::default(),
+                None,
+            )),
+        };
+        // A notification already drained during the previous backfill must survive resetting
+        // the stream, as it lies beyond the newly resolved canonical head.
+        if let ExExNotificationsInner::WithHead(stream) = &mut notifications.inner {
+            stream.pending_notifications.push_back(block_2_notification.clone());
+            stream.backfill_thresholds = Some(ExecutionStageThresholds::default());
+        }
+        notifications.catch_up_with_head(exex_head)?;
+        assert!(matches!(
+            &notifications.inner,
+            ExExNotificationsInner::WithHead(stream) if stream.backfill_thresholds.is_some()
+        ));
+
+        // Backfill re-delivers block 1 up to the node's current head
+        assert_eq!(
+            notifications.next().await.transpose()?,
+            Some(ExExNotification::ChainCommitted {
+                new: Arc::new(
+                    BackfillJobFactory::new(evm_config, provider)
+                        .backfill(1..=1)
+                        .next()
+                        .ok_or_eyre("failed to backfill")??
+                )
+            })
+        );
+        // followed by the live notification for block 2.
+        assert_eq!(notifications.next().await.transpose()?, Some(block_2_notification));
 
         Ok(())
     }

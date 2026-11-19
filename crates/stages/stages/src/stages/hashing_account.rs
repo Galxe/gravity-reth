@@ -203,7 +203,7 @@ where
                 if index > 0 && index.is_multiple_of(interval) {
                     info!(
                         target: "sync::stages::hashing_account",
-                        progress = %format!("{:.2}%", (index as f64 / total_hashes as f64) * 100.0),
+                        progress = %format_args!("{:.2}%", (index as f64 / total_hashes as f64) * 100.0),
                         "Inserting hashes"
                     );
                 }
@@ -219,7 +219,7 @@ where
                     ..Default::default()
                 });
 
-            Ok(ExecOutput { checkpoint, done: true })
+            Ok(ExecOutput::done(checkpoint))
         } else {
             // Stream changesets entry-by-entry, bounded by both block count
             // (commit_threshold) and entry count (commit_entries), whichever comes first.

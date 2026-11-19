@@ -64,6 +64,8 @@ reqwest.workspace = true
 eyre.workspace = true
 
 [dev-dependencies]
+reth-chain-state.workspace = true
+criterion = { workspace = true, features = ["async_tokio"] }
 # reth
 reth-chainspec.workspace = true
 reth-db = { workspace = true, features = ["test-utils"] }
@@ -117,4 +119,5 @@ test-utils = [
     "reth-evm-ethereum/test-utils",
     "reth-trie-db/test-utils",
     "reth-tasks/test-utils",
+    "reth-chain-state/test-utils",
 ]

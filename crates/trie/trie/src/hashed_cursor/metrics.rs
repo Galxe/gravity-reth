@@ -1,4 +1,5 @@
 use super::{HashedCursor, HashedStorageCursor};
+use crate::proof_v2::cursor::{RebindableHashedStorageCursor, ResettableHashedCursor};
 use alloy_primitives::B256;
 use reth_primitives_traits::FastInstant as Instant;
 use reth_storage_errors::db::DatabaseError;
@@ -16,8 +17,8 @@ use reth_metrics::metrics::{self, Histogram};
 #[cfg(feature = "metrics")]
 #[derive(Clone, Debug)]
 pub struct HashedCursorMetrics {
-    /// Histogram tracking overall time spent in database operations
-    overall_duration: Histogram,
+    /// Histogram tracking overall time spent in database operations, in seconds.
+    overall_duration_seconds: Histogram,
     /// Histogram for `next()` operations
     next_histogram: Histogram,
     /// Histogram for `seek()` operations
@@ -33,8 +34,8 @@ impl HashedCursorMetrics {
         let trie_type_str = trie_type.as_str();
 
         Self {
-            overall_duration: metrics::histogram!(
-                "trie.hashed_cursor.overall_duration",
+            overall_duration_seconds: metrics::histogram!(
+                "trie.hashed_cursor.overall_duration_seconds",
                 "type" => trie_type_str
             ),
             next_histogram: metrics::histogram!(
@@ -63,7 +64,7 @@ impl HashedCursorMetrics {
         self.next_histogram.record(cache.next_count as f64);
         self.seek_histogram.record(cache.seek_count as f64);
         self.is_storage_empty_histogram.record(cache.is_storage_empty_count as f64);
-        self.overall_duration.record(cache.total_duration.as_secs_f64());
+        self.overall_duration_seconds.record(cache.total_duration.as_secs_f64());
         cache.reset();
     }
 }
@@ -114,7 +115,7 @@ impl HashedCursorMetricsCache {
     /// Record the span for metrics.
     pub fn record_span(&self, name: &'static str) {
         let _span = trace_span!(
-            target: "trie::trie_cursor",
+            target: "trie::hashed_cursor",
             "Hashed cursor metrics",
             name,
             next_count = self.next_count,
@@ -127,6 +128,9 @@ impl HashedCursorMetricsCache {
 }
 
 /// A wrapper around a [`HashedCursor`] that tracks metrics for cursor operations.
+///
+/// This observer preserves the underlying cursor's read view and reset errors; it does not
+/// create a snapshot or install itself in a factory.
 ///
 /// This implementation counts the number of times each cursor operation is called:
 /// - `next()` - Move to the next entry
@@ -167,10 +171,6 @@ where
         self.metrics.total_duration += start.elapsed();
         result
     }
-
-    fn reset(&mut self) {
-        self.cursor.reset()
-    }
 }
 
 impl<'metrics, C> HashedStorageCursor for InstrumentedHashedCursor<'metrics, C>
@@ -184,8 +184,152 @@ where
         self.metrics.total_duration += start.elapsed();
         result
     }
+}
 
-    fn set_hashed_address(&mut self, hashed_address: B256) {
+impl<C: ResettableHashedCursor> ResettableHashedCursor for InstrumentedHashedCursor<'_, C> {
+    fn reset(&mut self) -> Result<(), DatabaseError> {
+        self.cursor.reset()
+    }
+}
+
+impl<C: RebindableHashedStorageCursor> RebindableHashedStorageCursor
+    for InstrumentedHashedCursor<'_, C>
+{
+    fn set_hashed_address(&mut self, hashed_address: B256) -> Result<(), DatabaseError> {
         self.cursor.set_hashed_address(hashed_address)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hashed_cursor::{mock::MockHashedCursorFactory, HashedCursorFactory};
+    use alloy_primitives::{map::B256Map, U256};
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn observer_preserves_storage_reads_and_counts_attempts() {
+        let address = B256::repeat_byte(1);
+        let slots = [(B256::repeat_byte(2), U256::from(3)), (B256::repeat_byte(4), U256::from(5))];
+        let factory = MockHashedCursorFactory::new(
+            BTreeMap::new(),
+            B256Map::from_iter([(address, BTreeMap::from(slots))]),
+        );
+        let mut expected = factory.hashed_storage_cursor(address).unwrap();
+        let mut cache = HashedCursorMetricsCache::default();
+        {
+            let mut cursor = InstrumentedHashedCursor::new(
+                factory.hashed_storage_cursor(address).unwrap(),
+                &mut cache,
+            );
+            assert_eq!(cursor.is_storage_empty().unwrap(), expected.is_storage_empty().unwrap());
+            assert_eq!(cursor.seek(B256::ZERO).unwrap(), expected.seek(B256::ZERO).unwrap());
+            assert_eq!(cursor.next().unwrap(), expected.next().unwrap());
+            assert_eq!(cursor.next().unwrap(), expected.next().unwrap());
+        }
+        assert_eq!((cache.seek_count, cache.next_count, cache.is_storage_empty_count), (1, 2, 1));
+        let copy = cache;
+        cache.extend(&copy);
+        assert_eq!((cache.seek_count, cache.next_count, cache.is_storage_empty_count), (2, 4, 2));
+        cache.reset();
+        assert_eq!((cache.seek_count, cache.next_count, cache.is_storage_empty_count), (0, 0, 0));
+        assert_eq!(cache.total_duration, Duration::ZERO);
+    }
+
+    #[cfg(feature = "metrics")]
+    #[test]
+    fn duration_metric_records_seconds_and_clears_caches() {
+        use crate::trie_cursor::metrics::{TrieCursorMetrics, TrieCursorMetricsCache};
+        use reth_metrics::metrics::{
+            Counter, Gauge, HistogramFn, Key, KeyName, Metadata, Recorder, SharedString, Unit,
+        };
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone, Default)]
+        struct Capture(Arc<Mutex<Vec<(String, f64)>>>);
+        struct Sample {
+            name: String,
+            capture: Capture,
+        }
+        impl HistogramFn for Sample {
+            fn record(&self, value: f64) {
+                self.capture.0.lock().unwrap().push((self.name.clone(), value));
+            }
+        }
+        impl Recorder for Capture {
+            fn describe_counter(&self, _: KeyName, _: Option<Unit>, _: SharedString) {}
+            fn describe_gauge(&self, _: KeyName, _: Option<Unit>, _: SharedString) {}
+            fn describe_histogram(&self, _: KeyName, _: Option<Unit>, _: SharedString) {}
+            fn register_counter(&self, _: &Key, _: &Metadata<'_>) -> Counter {
+                Counter::noop()
+            }
+            fn register_gauge(&self, _: &Key, _: &Metadata<'_>) -> Gauge {
+                Gauge::noop()
+            }
+            fn register_histogram(&self, key: &Key, _: &Metadata<'_>) -> Histogram {
+                Histogram::from_arc(Arc::new(Sample {
+                    name: key.name().to_owned(),
+                    capture: self.clone(),
+                }))
+            }
+        }
+        let capture = Capture::default();
+        reth_metrics::metrics::with_local_recorder(&capture, || {
+            let mut hashed = HashedCursorMetrics::new(TrieType::Storage);
+            let mut cache = HashedCursorMetricsCache {
+                seek_count: 2,
+                total_duration: Duration::from_millis(1250),
+                ..Default::default()
+            };
+            hashed.record(&mut cache);
+            assert_eq!(cache.seek_count, 0);
+            assert_eq!(cache.total_duration, Duration::ZERO);
+            let mut trie = TrieCursorMetrics::new(TrieType::State);
+            let mut cache = TrieCursorMetricsCache {
+                seek_exact_count: 3,
+                total_duration: Duration::from_millis(2500),
+                ..Default::default()
+            };
+            trie.record(&mut cache);
+            assert_eq!(cache.seek_exact_count, 0);
+            assert_eq!(cache.total_duration, Duration::ZERO);
+        });
+        let samples = capture.0.lock().unwrap();
+        assert!(samples.contains(&("trie.hashed_cursor.overall_duration_seconds".to_owned(), 1.25)));
+        assert!(samples.contains(&("trie.cursor.overall_duration_seconds".to_owned(), 2.5)));
+        assert!(!samples.iter().any(|(name, _)| name.ends_with(".overall_duration")));
+    }
+
+    #[test]
+    fn cursor_trace_targets_remain_distinct() {
+        use crate::trie_cursor::metrics::TrieCursorMetricsCache;
+        use std::sync::{Arc, Mutex};
+        use tracing::{
+            span::{Attributes, Id, Record},
+            Event, Metadata, Subscriber,
+        };
+
+        #[derive(Clone, Default)]
+        struct Capture(Arc<Mutex<Vec<&'static str>>>);
+        impl Subscriber for Capture {
+            fn enabled(&self, _: &Metadata<'_>) -> bool {
+                true
+            }
+            fn new_span(&self, attrs: &Attributes<'_>) -> Id {
+                self.0.lock().unwrap().push(attrs.metadata().target());
+                Id::from_u64(1)
+            }
+            fn record(&self, _: &Id, _: &Record<'_>) {}
+            fn record_follows_from(&self, _: &Id, _: &Id) {}
+            fn event(&self, _: &Event<'_>) {}
+            fn enter(&self, _: &Id) {}
+            fn exit(&self, _: &Id) {}
+        }
+        let capture = Capture::default();
+        tracing::subscriber::with_default(capture.clone(), || {
+            HashedCursorMetricsCache::default().record_span("hashed");
+            TrieCursorMetricsCache::default().record_span("trie");
+        });
+        assert_eq!(*capture.0.lock().unwrap(), ["trie::hashed_cursor", "trie::trie_cursor"]);
     }
 }

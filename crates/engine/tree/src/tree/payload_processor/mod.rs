@@ -19,6 +19,7 @@ use executor::WorkloadExecutor;
 use multiproof::{SparseTrieUpdate, *};
 use parking_lot::RwLock;
 use prewarm::PrewarmMetrics;
+use rayon::prelude::*;
 use reth_engine_primitives::ExecutableTxIterator;
 use reth_evm::{
     execute::{ExecutableTxFor, WithTxEnv},
@@ -32,8 +33,8 @@ use reth_provider::{
 use reth_revm::{db::BundleState, state::EvmState};
 use reth_trie::TrieInput;
 use reth_trie_parallel::{
+    error::StateRootTaskError,
     proof_task::{ProofTaskCtx, ProofTaskManager},
-    root::ParallelStateRootError,
 };
 use reth_trie_sparse::{
     provider::{TrieNodeProvider, TrieNodeProviderFactory},
@@ -45,12 +46,15 @@ use std::sync::{
     mpsc::{self, channel, Sender},
     Arc,
 };
-use tracing::{debug, instrument};
+use tracing::{debug, debug_span, instrument, trace_span, Span};
 
+pub mod bal;
+pub mod bal_prewarm_pool;
 mod configured_sparse_trie;
 pub mod executor;
 pub mod multiproof;
 pub mod prewarm;
+pub mod receipt_root_task;
 pub mod sparse_trie;
 
 use configured_sparse_trie::ConfiguredSparseTrie;
@@ -214,7 +218,8 @@ where
         // wire the multiproof task to the prewarm task
         let to_multi_proof = Some(multi_proof_task.state_root_message_sender());
 
-        let (prewarm_rx, execution_rx) = self.spawn_tx_iterator(transactions);
+        let (prewarm_rx, execution_rx) =
+            self.spawn_tx_iterator(transactions, !self.disable_transaction_prewarming);
 
         let prewarm_handle =
             self.spawn_caching_with(env, prewarm_rx, provider_builder, to_multi_proof.clone());
@@ -262,7 +267,8 @@ where
     where
         P: BlockReader + StateProviderFactory + StateReader + Clone + 'static,
     {
-        let (prewarm_rx, execution_rx) = self.spawn_tx_iterator(transactions);
+        let (prewarm_rx, execution_rx) =
+            self.spawn_tx_iterator(transactions, !self.disable_transaction_prewarming);
         let prewarm_handle = self.spawn_caching_with(env, prewarm_rx, provider_builder, None);
         PayloadHandle {
             to_multi_proof: None,
@@ -273,26 +279,30 @@ where
     }
 
     /// Spawns a task advancing transaction env iterator and streaming updates through a channel.
+    #[instrument(level = "debug", target = "engine::tree::payload_processor", skip_all)]
     #[expect(clippy::type_complexity)]
     fn spawn_tx_iterator<I: ExecutableTxIterator<Evm>>(
         &self,
         transactions: I,
+        prewarm_transactions: bool,
     ) -> (
-        mpsc::Receiver<WithTxEnv<TxEnvFor<Evm>, I::Recovered>>,
+        Option<mpsc::Receiver<WithTxEnv<TxEnvFor<Evm>, I::Recovered>>>,
         mpsc::Receiver<Result<WithTxEnv<TxEnvFor<Evm>, I::Recovered>, I::Error>>,
     ) {
-        let (prewarm_tx, prewarm_rx) = mpsc::channel();
+        let (prewarm_tx, prewarm_rx) = prewarm_transactions.then(mpsc::channel).unzip();
         let (execute_tx, execute_rx) = mpsc::channel();
+        let executor = self.executor.clone();
         self.executor.spawn_blocking(move || {
+            // WorkloadExecutor restores request context even when this debug span is filtered out.
+            let _span =
+                debug_span!(target: "engine::tree::payload_processor", "tx_iterator").entered();
             let (transactions, convert) = transactions.into_parts();
-            for raw in transactions {
-                let tx = convert.convert(raw).map(WithTxEnv::new);
-                // only send Ok(_) variants to prewarming task
-                if let Ok(tx) = &tx {
-                    let _ = prewarm_tx.send(tx.clone());
-                }
-                let _ = execute_tx.send(tx);
-            }
+            convert_ordered_windows(
+                transactions.into_iter(),
+                |raw| convert.convert(raw).map(WithTxEnv::new),
+                executor.rayon_pool(),
+                |tx| forward_converted_transaction(tx, prewarm_tx.as_ref(), &execute_tx),
+            );
         });
 
         (prewarm_rx, execute_rx)
@@ -302,18 +312,16 @@ where
     fn spawn_caching_with<P>(
         &self,
         env: ExecutionEnv<Evm>,
-        mut transactions: mpsc::Receiver<impl ExecutableTxFor<Evm> + Send + 'static>,
+        transactions: Option<mpsc::Receiver<impl ExecutableTxFor<Evm> + Send + 'static>>,
         provider_builder: StateProviderBuilder<N, P>,
         to_multi_proof: Option<Sender<MultiProofMessage>>,
     ) -> CacheTaskHandle
     where
         P: BlockReader + StateProviderFactory + StateReader + Clone + 'static,
     {
-        if self.disable_transaction_prewarming {
-            // if no transactions should be executed we clear them but still spawn the task for
-            // caching updates
-            transactions = mpsc::channel().1;
-        }
+        // The iterator creates no prewarm channel when transaction prewarming is disabled.
+        // The cache lifecycle task still runs and receives its finalization updates.
+        let transactions = transactions.unwrap_or_else(|| mpsc::channel().1);
 
         let saved_cache = self.cache_for(env.parent_hash);
         let cache = saved_cache.cache().clone();
@@ -374,7 +382,7 @@ where
         &self,
         sparse_trie_rx: mpsc::Receiver<SparseTrieUpdate>,
         proof_task_handle: BPF,
-        state_root_tx: mpsc::Sender<Result<StateRootComputeOutcome, ParallelStateRootError>>,
+        state_root_tx: mpsc::Sender<Result<StateRootComputeOutcome, StateRootTaskError>>,
     ) where
         BPF: TrieNodeProviderFactory + Clone + Send + Sync + 'static,
         BPF::AccountNodeProvider: TrieNodeProvider + Send + Sync,
@@ -428,7 +436,7 @@ pub struct PayloadHandle<Tx, Err> {
     // must include the receiver of the state root wired to the sparse trie
     prewarm_handle: CacheTaskHandle,
     /// Receiver for the state root
-    state_root: Option<mpsc::Receiver<Result<StateRootComputeOutcome, ParallelStateRootError>>>,
+    state_root: Option<mpsc::Receiver<Result<StateRootComputeOutcome, StateRootTaskError>>>,
     /// Stream of block transactions
     transactions: mpsc::Receiver<Result<Tx, Err>>,
 }
@@ -439,12 +447,10 @@ impl<Tx, Err> PayloadHandle<Tx, Err> {
     /// # Panics
     ///
     /// If payload processing was started without background tasks.
-    pub fn state_root(&mut self) -> Result<StateRootComputeOutcome, ParallelStateRootError> {
-        self.state_root
-            .take()
-            .expect("state_root is None")
-            .recv()
-            .map_err(|_| ParallelStateRootError::Other("sparse trie task dropped".to_string()))?
+    pub fn state_root(&mut self) -> Result<StateRootComputeOutcome, StateRootTaskError> {
+        self.state_root.take().expect("state_root is None").recv().map_err(|error| {
+            StateRootTaskError::Provider(reth_provider::ProviderError::other(error))
+        })?
     }
 
     /// Returns a state hook to be used to send state updates to this task.
@@ -587,8 +593,9 @@ impl ExecutionCache {
         self.inner.write().take();
     }
 
-    /// Updates the cache with a closure that has exclusive access to the guard.
-    /// This ensures that all cache operations happen atomically.
+    /// Runs a closure with exclusive access to the stored cache.
+    ///
+    /// Returns its result after releasing the lock, so removed caches can be dropped outside it.
     ///
     /// ## CRITICAL SAFETY REQUIREMENT
     ///
@@ -600,12 +607,12 @@ impl ExecutionCache {
     ///
     /// Violating this requirement can result in cache corruption, incorrect state data,
     /// and potential consensus failures.
-    pub(crate) fn update_with_guard<F>(&self, update_fn: F)
+    pub(crate) fn update_with_guard<F, R>(&self, update_fn: F) -> R
     where
-        F: FnOnce(&mut Option<SavedCache>),
+        F: FnOnce(&mut Option<SavedCache>) -> R,
     {
         let mut guard = self.inner.write();
-        update_fn(&mut guard);
+        update_fn(&mut guard)
     }
 }
 
@@ -658,8 +665,10 @@ mod tests {
     };
     use reth_testing_utils::generators;
     use reth_trie::{test_utils::state_root, HashedPostState, TrieInput};
-    use revm_primitives::{Address, HashMap, B256, KECCAK_EMPTY, U256};
-    use revm_state::{AccountInfo, AccountStatus, EvmState, EvmStorageSlot, TransactionId};
+    use revm::{
+        primitives::{Address, HashMap, B256, KECCAK_EMPTY, U256},
+        state::{AccountInfo, AccountStatus, EvmState, EvmStorageSlot, TransactionId},
+    };
     use std::sync::Arc;
 
     fn make_saved_cache(hash: B256) -> SavedCache {
@@ -760,7 +769,7 @@ mod tests {
                     }
                 }
 
-                let mut account = revm_state::Account::default();
+                let mut account = revm::state::Account::default();
                 account.info = AccountInfo {
                     balance: U256::from(rng.random::<u64>()),
                     nonce: rng.random::<u64>(),
@@ -870,5 +879,230 @@ mod tests {
             root_from_task, root_from_regular,
             "State root mismatch: task={root_from_task}, base={root_from_regular}"
         );
+    }
+}
+
+/// Prioritizes the first few conversions, then converts ordered, growing parallel windows.
+/// Returning false from `emit` stops recovery when the execution consumer has gone away.
+fn convert_ordered_windows<Raw: Send, Tx: Send, Err: Send>(
+    mut transactions: impl Iterator<Item = Raw> + Send,
+    convert: impl Fn(Raw) -> Result<Tx, Err> + Send + Sync,
+    pool: &rayon::ThreadPool,
+    mut emit: impl FnMut(Result<Tx, Err>) -> bool,
+) {
+    let parent = Span::current();
+    let dispatch = tracing::dispatcher::get_default(Clone::clone);
+    for (idx, tx) in transactions.by_ref().take(4).enumerate() {
+        let result = convert_with_context(tx, idx, &convert, &parent, &dispatch);
+        if !emit(result) {
+            return
+        }
+    }
+    let mut window = 64usize;
+    let mut offset = 4usize;
+    loop {
+        let chunk = transactions.by_ref().take(window).collect::<Vec<_>>();
+        if chunk.is_empty() {
+            break
+        }
+        window = window.saturating_mul(2);
+        let chunk_len = chunk.len();
+        let span = debug_span!(target: "engine::tree::payload_processor", parent: &parent, "convert_transactions").or_current();
+        let convert_one =
+            |(idx, tx)| convert_with_context(tx, offset + idx, &convert, &span, &dispatch);
+        let converted = if chunk_len < 32 {
+            chunk.into_iter().enumerate().map(convert_one).collect::<Vec<_>>()
+        } else {
+            pool.install(|| chunk.into_par_iter().enumerate().map(convert_one).collect::<Vec<_>>())
+        };
+        offset += chunk_len;
+        for tx in converted {
+            if !emit(tx) {
+                return
+            }
+        }
+    }
+}
+
+fn convert_with_context<Raw, Tx, Err>(
+    tx: Raw,
+    idx: usize,
+    convert: &impl Fn(Raw) -> Result<Tx, Err>,
+    parent: &Span,
+    dispatch: &tracing::Dispatch,
+) -> Result<Tx, Err> {
+    tracing::dispatcher::with_default(dispatch, || {
+        let _parent = parent.enter();
+        let _span =
+            trace_span!(target: "engine::tree::payload_processor", "convert_transaction", idx)
+                .entered();
+        convert(tx)
+    })
+}
+
+fn forward_converted_transaction<T: Clone, E>(
+    tx: Result<T, E>,
+    prewarm: Option<&Sender<T>>,
+    execute: &Sender<Result<T, E>>,
+) -> bool {
+    if let (Some(prewarm), Ok(tx)) = (prewarm, &tx) {
+        let _ = prewarm.send(tx.clone());
+    }
+    execute.send(tx).is_ok()
+}
+
+#[cfg(test)]
+mod conversion_window_tests {
+    use super::convert_ordered_windows;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn disabled_prewarm_does_not_clone_converted_transactions() {
+        use std::sync::{mpsc, Arc};
+        #[derive(Debug)]
+        struct Counted(Arc<AtomicUsize>);
+        impl Clone for Counted {
+            fn clone(&self) -> Self {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                Self(self.0.clone())
+            }
+        }
+        for prewarm_enabled in [false, true] {
+            let clones = Arc::new(AtomicUsize::new(0));
+            let (execute, received) = mpsc::channel();
+            let (prewarm, warmed) = mpsc::channel();
+            assert!(super::forward_converted_transaction(
+                Ok::<_, ()>(Counted(clones.clone())),
+                prewarm_enabled.then_some(&prewarm),
+                &execute
+            ));
+            assert!(received.recv().unwrap().is_ok());
+            assert_eq!(clones.load(Ordering::Relaxed), usize::from(prewarm_enabled));
+            assert_eq!(warmed.try_recv().is_ok(), prewarm_enabled);
+            assert!(super::forward_converted_transaction::<Counted, _>(
+                Err(()),
+                prewarm_enabled.then_some(&prewarm),
+                &execute
+            ));
+            assert!(received.recv().unwrap().is_err());
+            assert_eq!(clones.load(Ordering::Relaxed), usize::from(prewarm_enabled));
+        }
+    }
+
+    #[test]
+    fn transaction_conversion_preserves_context_across_workers_and_filters() {
+        use alloy_consensus::SignableTransaction;
+        use alloy_primitives::{Address, Signature};
+        use reth_ethereum_primitives::TransactionSigned;
+        use reth_primitives_traits::Recovered;
+        use std::{
+            collections::HashSet,
+            sync::{Arc, Mutex},
+        };
+        use tracing::Span;
+        use tracing_subscriber::{
+            filter::LevelFilter,
+            layer::SubscriberExt,
+            registry::{LookupSpan, Registry},
+        };
+
+        let processor = super::PayloadProcessor::new(
+            super::executor::WorkloadExecutor::with_num_cpu_threads(2),
+            reth_evm_ethereum::EthEvmConfig::mainnet(),
+            &super::TreeConfig::default(),
+            super::PrecompileCacheMap::default(),
+        );
+        let tx: TransactionSigned =
+            alloy_consensus::TxLegacy::default().into_signed(Signature::test_signature()).into();
+        let tx = Recovered::new_unchecked(tx, Address::ZERO);
+        for level in [LevelFilter::INFO, LevelFilter::DEBUG, LevelFilter::TRACE] {
+            let dispatch = tracing::Dispatch::new(tracing_subscriber::registry().with(level));
+            tracing::dispatcher::with_default(&dispatch, || {
+                for count in [0, 1, 4, 31, 32, 68, 69] {
+                    let request = tracing::info_span!(parent: None, "request");
+                    let _entered = request.enter();
+                    let observed = Arc::new(Mutex::new(Vec::new()));
+                    let converted = observed.clone();
+                    let tx = tx.clone();
+                    let (prewarm, execute) = processor.spawn_tx_iterator(
+                        ((0..count).collect::<Vec<_>>(), move |idx| {
+                            converted.lock().unwrap().push((idx, Span::current()));
+                            Ok::<_, core::convert::Infallible>(tx.clone())
+                        }),
+                        false,
+                    );
+                    assert!(prewarm.is_none());
+                    assert_eq!(execute.into_iter().filter(|tx| tx.is_ok()).count(), count);
+                    let observed = observed.lock().unwrap();
+                    assert_eq!(observed.len(), count);
+                    let mut ids = HashSet::new();
+                    for (idx, span) in observed.iter() {
+                        let scope = span
+                            .with_subscriber(|(id, dispatch)| {
+                                dispatch
+                                    .downcast_ref::<Registry>()
+                                    .unwrap()
+                                    .span(id)
+                                    .unwrap()
+                                    .scope()
+                                    .from_root()
+                                    .map(|span| (span.id(), span.name()))
+                                    .collect::<Vec<_>>()
+                            })
+                            .expect("worker conversion lost request context");
+                        assert_eq!(scope[0].0.clone(), request.id().unwrap());
+                        let mut expected = vec!["request"];
+                        if level >= LevelFilter::DEBUG {
+                            expected.extend(["spawn_tx_iterator", "tx_iterator"]);
+                            if *idx >= 4 {
+                                expected.push("convert_transactions");
+                            }
+                        }
+                        if level == LevelFilter::TRACE {
+                            expected.push("convert_transaction");
+                            assert!(ids.insert(span.id().unwrap()));
+                        }
+                        assert_eq!(
+                            scope.iter().map(|(_, name)| *name).collect::<Vec<_>>(),
+                            expected
+                        );
+                    }
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn parallel_windows_preserve_transaction_order_and_errors() {
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(2).build().unwrap();
+        let mut output = Vec::new();
+        convert_ordered_windows(
+            0..1025,
+            |tx| if tx == 71 { Err(tx) } else { Ok(tx) },
+            &pool,
+            |tx| {
+                output.push(tx);
+                true
+            },
+        );
+        let expected =
+            (0..1025).map(|tx| if tx == 71 { Err(tx) } else { Ok(tx) }).collect::<Vec<_>>();
+        assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn disconnected_consumer_stops_transaction_conversion() {
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(2).build().unwrap();
+        let count = AtomicUsize::new(0);
+        convert_ordered_windows(
+            0..1025,
+            |tx| {
+                count.fetch_add(1, Ordering::Relaxed);
+                Ok::<_, ()>(tx)
+            },
+            &pool,
+            |_| false,
+        );
+        assert_eq!(count.load(Ordering::Relaxed), 1);
     }
 }

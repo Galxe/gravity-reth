@@ -12,6 +12,10 @@
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 
+// Keep the original component feature edges without enabling broader revm facade features.
+#[cfg(feature = "revm-state")]
+use revm_state as _;
+
 /// Various provider traits.
 mod traits;
 pub use traits::*;
@@ -35,10 +39,14 @@ pub use static_file::StaticFileSegment;
 
 pub use reth_execution_types::*;
 
+/// Opt-in in-memory block access list storage.
+pub mod bal;
+pub use bal::{BalConfig, InMemoryBalStore};
+
 pub mod bundle_state;
 
 /// Re-export `OriginalValuesKnown`
-pub use revm_database::states::OriginalValuesKnown;
+pub use revm::database::states::OriginalValuesKnown;
 
 /// Writer standalone type.
 pub mod writer;

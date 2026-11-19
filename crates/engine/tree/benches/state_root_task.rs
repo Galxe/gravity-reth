@@ -24,9 +24,11 @@ use reth_provider::{
     AccountReader, ChainSpecProvider, HashingWriter, ProviderFactory,
 };
 use reth_trie::TrieInput;
-use revm_primitives::{HashMap, U256};
-use revm_state::{
-    Account as RevmAccount, AccountInfo, AccountStatus, EvmState, EvmStorageSlot, TransactionId,
+use revm::{
+    primitives::{HashMap, U256},
+    state::{
+        Account as RevmAccount, AccountInfo, AccountStatus, EvmState, EvmStorageSlot, TransactionId,
+    },
 };
 use std::{hint::black_box, sync::Arc};
 

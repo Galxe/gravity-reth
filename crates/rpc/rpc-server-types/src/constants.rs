@@ -55,8 +55,24 @@ pub const DEFAULT_ENGINE_API_IPC_ENDPOINT: &str = "/tmp/reth_engine_api.ipc";
 /// The default limit for blocks count in `eth_simulateV1`.
 pub const DEFAULT_MAX_SIMULATE_BLOCKS: u64 = 256;
 
+/// The default maximum number of calls in a single `eth_callMany`, `trace_callMany` or
+/// `debug_traceCallMany` request.
+pub const DEFAULT_MAX_CALL_MANY_CALLS: usize = 1024;
+
+/// The default timeout of an `eth_callMany`, `trace_callMany` or `debug_traceCallMany` request,
+/// matching geth's `eth_call` timeout. It starts with the request's first call, and no call
+/// starts after it expires.
+pub const DEFAULT_CALL_MANY_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// The default maximum number of total storage slots for `eth_getStorageValues`.
 pub const DEFAULT_MAX_STORAGE_VALUES_SLOTS: usize = 1024;
+
+/// The default maximum number of storage slots (and, for multi-proofs, targets) accepted by a
+/// single `eth_getProof` or multi-proof request.
+///
+/// Bounds the work a request holds a proof permit for, since proof node selection scales with
+/// the number of requested slots.
+pub const DEFAULT_MAX_PROOF_SLOTS: usize = 1024;
 
 /// The default eth historical proof window.
 pub const DEFAULT_ETH_PROOF_WINDOW: u64 = 0;
@@ -95,7 +111,7 @@ pub mod gas_oracle {
     pub const DEFAULT_MAX_GAS_PRICE: U256 = U256::from_limbs([500_000_000_000u64, 0, 0, 0]);
 
     /// The default minimum gas price, under which the sample will be ignored
-    pub const DEFAULT_IGNORE_GAS_PRICE: U256 = U256::ZERO;
+    pub const DEFAULT_IGNORE_GAS_PRICE: U256 = U256::from_limbs([2, 0, 0, 0]);
 
     /// The default gas limit for `eth_call` and adjacent calls.
     ///
@@ -114,13 +130,21 @@ pub mod gas_oracle {
 
 /// Cache specific constants
 pub mod cache {
-    /// Default cache size for the block cache: 5000 blocks.
-    pub const DEFAULT_BLOCK_CACHE_MAX_LEN: u32 = 5000;
+    /// Default estimated block payload budget: 2 GiB, excluding map and queue overhead.
+    pub const DEFAULT_BLOCK_CACHE_MAX_BYTES: usize = 2 * 1024 * 1024 * 1024;
+    /// Default estimated receipt payload budget: 1 GiB.
+    pub const DEFAULT_RECEIPT_CACHE_MAX_BYTES: usize = 1024 * 1024 * 1024;
+    /// Default idle expiration for RPC payloads. Shared payloads may outlive cache eviction.
+    pub const DEFAULT_CACHE_IDLE_TIMEOUT: std::time::Duration =
+        std::time::Duration::from_secs(3600);
 
-    /// Default cache size for the receipts cache: 2000 receipts.
-    pub const DEFAULT_RECEIPT_CACHE_MAX_LEN: u32 = 2000;
+    /// Default cache size for the block cache: 1000 blocks.
+    pub const DEFAULT_BLOCK_CACHE_MAX_LEN: u32 = 1000;
 
-    /// Default cache size for the header cache: 1000 headers.
+    /// Default cache size for the receipts cache: 500 blocks' receipts.
+    pub const DEFAULT_RECEIPT_CACHE_MAX_LEN: u32 = 500;
+
+    /// Legacy no-op RPC header cache option: 1000 headers.
     pub const DEFAULT_HEADER_CACHE_MAX_LEN: u32 = 1000;
 
     /// Default cache size for the revm BAL cache: 1000 block access lists.
@@ -130,5 +154,5 @@ pub mod cache {
     pub const DEFAULT_CONCURRENT_DB_REQUESTS: usize = 512;
 
     /// Default maximum number of transaction hashes to cache for lookups.
-    pub const DEFAULT_MAX_CACHED_TX_HASHES: u32 = 30_000;
+    pub const DEFAULT_MAX_CACHED_TX_HASHES: u32 = 100_000;
 }

@@ -9,6 +9,10 @@
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 #![cfg_attr(not(feature = "std"), no_std)]
 
+// Keep the original component feature edges without enabling broader revm facade features.
+use revm_database as _;
+use revm_state as _;
+
 extern crate alloc;
 
 /// In-memory hashed state.
@@ -17,7 +21,9 @@ pub use hashed_state::*;
 
 /// Input for trie computation.
 mod input;
-pub use input::TrieInput;
+pub use input::{TrieInput, TrieInputSorted};
+
+mod utils;
 
 /// The implementation of hash builder.
 pub mod hash_builder;
@@ -33,7 +39,7 @@ mod key;
 pub use key::{KeccakKeyHasher, KeyHasher};
 
 mod nibbles;
-pub use nibbles::{Nibbles, StoredNibbles, StoredNibblesSubKey};
+pub use nibbles::{depth_first_cmp, Nibbles, StoredNibbles, StoredNibblesSubKey};
 
 mod storage;
 pub use storage::StorageTrieEntry;
@@ -45,12 +51,24 @@ pub use subnode::StoredSubNode;
 /// The container indicates when the trie has been modified.
 pub mod prefix_set;
 
+mod trie;
+pub use trie::{BranchNodeMasks, BranchNodeMasksMap, ProofTrieNode};
+
+mod trie_node_v2;
+pub use trie_node_v2::*;
+
+/// Merkle Patricia trie range-proof verification.
+pub mod range_proof;
+
 mod proofs;
 #[cfg(any(test, feature = "test-utils"))]
 pub use proofs::triehash;
 pub use proofs::*;
 
 pub mod root;
+
+/// Incremental ordered transaction and receipt trie roots.
+pub mod ordered_root;
 
 /// Buffer for trie updates.
 pub mod updates;
@@ -74,7 +92,9 @@ pub use updates::{StorageTrieUpdatesV2, TrieUpdatesV2};
 
 /// EIP-7864 v2 multiproof target types.
 pub mod target_v2;
-pub use target_v2::{ChunkedMultiProofTargetsV2, MultiProofTargetsV2, ProofV2Target};
+pub use target_v2::{
+    ChunkedMultiProofTargetsV2, MultiProofTargetsV2, ProofV2Target, ProofV2TargetParent,
+};
 
 /// Nested trie for merklization
 pub mod nested_trie;

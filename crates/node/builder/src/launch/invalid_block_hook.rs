@@ -15,6 +15,7 @@ use reth_node_core::{
 use reth_primitives_traits::NodePrimitives;
 use reth_provider::ChainSpecProvider;
 use reth_rpc_api::EthApiClient;
+use reth_tasks::Runtime;
 
 /// Extension trait for [`AddOnsContext`] to create invalid block hooks.
 pub trait InvalidBlockHookExt {
@@ -39,12 +40,13 @@ where
         &self,
         data_dir: &ChainPath<DataDirPath>,
     ) -> eyre::Result<Box<dyn InvalidBlockHook<Self::Primitives>>> {
-        create_invalid_block_hook(
+        create_invalid_block_hook_inner(
             self.config,
             data_dir,
             self.node.provider().clone(),
             self.node.evm_config().clone(),
             self.node.provider().chain_spec().chain().id(),
+            Some(self.node.task_executor().clone()),
         )
         .await
     }
@@ -80,6 +82,27 @@ where
         + 'static,
     E: reth_evm::ConfigureEvm<Primitives = N> + Clone + 'static,
 {
+    create_invalid_block_hook_inner(config, data_dir, provider, evm_config, chain_id, None).await
+}
+
+async fn create_invalid_block_hook_inner<N, P, E>(
+    config: &NodeConfig<P::ChainSpec>,
+    data_dir: &ChainPath<DataDirPath>,
+    provider: P,
+    evm_config: E,
+    chain_id: u64,
+    runtime: Option<Runtime>,
+) -> eyre::Result<Box<dyn InvalidBlockHook<N>>>
+where
+    N: NodePrimitives,
+    P: reth_provider::StateProviderFactory
+        + reth_provider::ChainSpecProvider
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+    E: reth_evm::ConfigureEvm<Primitives = N> + Clone + 'static,
+{
     use reth_engine_primitives::{InvalidBlockHooks, NoopInvalidBlockHook};
     use reth_invalid_block_hooks::InvalidBlockWitnessHook;
 
@@ -95,17 +118,26 @@ where
         .copied()
         .map(|hook| {
             let output_directory = output_directory.join(hook.to_string());
-            std::fs::create_dir_all(&output_directory)?;
+            reth_fs_util::create_dir_all(&output_directory)?;
 
             Ok(match hook {
-                InvalidBlockHookType::Witness => Box::new(InvalidBlockWitnessHook::new(
-                    provider.clone(),
-                    evm_config.clone(),
-                    output_directory,
-                    healthy_node_rpc_client.clone(),
-                )),
+                InvalidBlockHookType::Witness => Box::new(match &runtime {
+                    Some(runtime) => InvalidBlockWitnessHook::new_with_runtime(
+                        provider.clone(),
+                        evm_config.clone(),
+                        output_directory,
+                        healthy_node_rpc_client.clone(),
+                        runtime.clone(),
+                    ),
+                    None => InvalidBlockWitnessHook::new(
+                        provider.clone(),
+                        evm_config.clone(),
+                        output_directory,
+                        healthy_node_rpc_client.clone(),
+                    ),
+                }),
                 InvalidBlockHookType::PreState | InvalidBlockHookType::Opcode => {
-                    eyre::bail!("invalid block hook {hook:?} is not implemented yet")
+                    eyre::bail!("invalid block hook {hook:?} is not implemented yet");
                 }
             } as Box<dyn InvalidBlockHook<_>>)
         })

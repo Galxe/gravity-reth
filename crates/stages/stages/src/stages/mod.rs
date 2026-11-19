@@ -66,10 +66,10 @@ mod tests {
         providers::{StaticFileProvider, StaticFileWriter},
         test_utils::MockNodeTypesWithDB,
         AccountExtReader, BlockBodyIndicesProvider, DatabaseProviderFactory, ProviderFactory,
-        ProviderResult, ReceiptProvider, StageCheckpointWriter, StaticFileProviderFactory,
-        StorageReader,
+        ProviderResult, PruneCheckpointWriter, ReceiptProvider, StageCheckpointWriter,
+        StaticFileProviderFactory, StorageReader,
     };
-    use reth_prune_types::{PruneMode, PruneModes};
+    use reth_prune_types::{PruneCheckpoint, PruneMode, PruneModes, PruneSegment};
     use reth_stages_api::{
         ExecInput, ExecutionStageThresholds, PipelineTarget, Stage, StageCheckpoint, StageId,
     };
@@ -325,7 +325,7 @@ mod tests {
         static_file_provider = StaticFileProvider::read_write(static_file_provider.path()).unwrap();
         assert!(matches!(
             static_file_provider
-                .check_consistency(&db.factory.database_provider_ro().unwrap(), is_full_node,),
+                .check_consistency_staged_sync(&db.factory.database_provider_ro().unwrap(), is_full_node,),
             Ok(e) if e == expected
         ));
     }
@@ -347,7 +347,7 @@ mod tests {
         assert!(matches!(
             db.factory
                 .static_file_provider()
-                .check_consistency(&db.factory.database_provider_ro().unwrap(), false,),
+                .check_consistency_staged_sync(&db.factory.database_provider_ro().unwrap(), false,),
             Ok(e) if e == expected
         ));
     }
@@ -380,7 +380,7 @@ mod tests {
         assert!(matches!(
             db.factory
                 .static_file_provider()
-                .check_consistency(&db.factory.database_provider_ro().unwrap(), false),
+                .check_consistency_staged_sync(&db.factory.database_provider_ro().unwrap(), false),
             Ok(e) if e == expected
         ));
     }
@@ -391,7 +391,7 @@ mod tests {
         let db_provider = db.factory.database_provider_ro().unwrap();
 
         assert!(matches!(
-            db.factory.static_file_provider().check_consistency(&db_provider, false),
+            db.factory.static_file_provider().check_consistency_staged_sync(&db_provider, false),
             Ok(None)
         ));
     }
@@ -529,5 +529,38 @@ mod tests {
 
         // Fill the gap, and ensure no unwind is necessary.
         update_db_and_check::<tables::Receipts>(&db, current + 1, None);
+    }
+
+    #[test]
+    fn test_consistency_receipts_distance_prune_checkpoint() {
+        let db = seed_data(90).unwrap();
+        let static_files = db.factory.static_file_provider();
+        while let Some(block) =
+            static_files.get_highest_static_file_block(StaticFileSegment::Receipts)
+        {
+            static_files.delete_jar(StaticFileSegment::Receipts, block).unwrap();
+        }
+        let check = || {
+            static_files
+                .check_consistency_staged_sync(&db.factory.database_provider_ro().unwrap(), false)
+                .unwrap()
+        };
+        assert_eq!(check(), Some(PipelineTarget::Unwind(0)));
+        // A partial checkpoint bounds recovery without concealing genuinely missing receipts.
+        for (pruned, expected) in [(50, Some(PipelineTarget::Unwind(50))), (89, None)] {
+            let provider = db.factory.provider_rw().unwrap();
+            provider
+                .save_prune_checkpoint(
+                    PruneSegment::Receipts,
+                    PruneCheckpoint {
+                        block_number: Some(pruned),
+                        tx_number: None,
+                        prune_mode: PruneMode::Distance(2_000_000),
+                    },
+                )
+                .unwrap();
+            provider.commit().unwrap();
+            assert_eq!(check(), expected);
+        }
     }
 }

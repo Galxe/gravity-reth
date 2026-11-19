@@ -28,6 +28,9 @@ pub use sealed::{SealedBlock, SealedBlockWith};
 pub(crate) mod recovered;
 pub use recovered::RecoveredBlock;
 
+pub(crate) mod sealed_or_recovered;
+pub use sealed_or_recovered::SealedOrRecoveredBlock;
+
 /// Bincode-compatible block type serde implementations.
 #[cfg(feature = "serde-bincode-compat")]
 pub mod serde_bincode_compat {

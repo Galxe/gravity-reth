@@ -17,7 +17,7 @@ const MIN_COMPRESSION_SIZE: u16 = 1024;
 
 /// This layer is a wrapper around [`tower_http::compression::CompressionLayer`] that integrates
 /// with jsonrpsee's HTTP types. It automatically compresses responses based on the client's
-/// Accept-Encoding header.
+/// `Accept-Encoding` header.
 #[expect(missing_debug_implementations)]
 #[derive(Clone)]
 pub struct CompressionLayer {
@@ -30,6 +30,18 @@ impl CompressionLayer {
     /// Responses are compressed at the fastest level, and only if they are at least 1 KiB.
     pub fn new() -> Self {
         Self::from_layer(TowerCompressionLayer::new().gzip(true).br(true).deflate(true).zstd(true))
+    }
+
+    /// Enables only the requested algorithms while preserving response size and speed limits.
+    pub fn with_algorithms(algorithms: &[impl AsRef<str>]) -> Self {
+        let allowed = |name| algorithms.iter().any(|algorithm| algorithm.as_ref() == name);
+        Self::from_layer(
+            TowerCompressionLayer::new()
+                .gzip(allowed("gzip"))
+                .br(allowed("br"))
+                .deflate(allowed("deflate"))
+                .zstd(allowed("zstd")),
+        )
     }
 
     /// Applies the compression level and the minimum response size to `layer`.

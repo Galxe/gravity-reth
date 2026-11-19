@@ -17,6 +17,8 @@ pub struct ChangesetOffsetWriter {
     file: File,
     /// Number of records written.
     records_written: u64,
+    /// Records to keep once the deferred truncation is applied, or `None` if none is pending.
+    pending_truncation: Option<u64>,
 }
 
 impl ChangesetOffsetWriter {
@@ -106,11 +108,12 @@ impl ChangesetOffsetWriter {
         let records_written = committed_len;
         let file = OpenOptions::new().create(true).append(true).open(path)?;
 
-        Ok(Self { file, records_written })
+        Ok(Self { file, records_written, pending_truncation: None })
     }
 
     /// Appends a single changeset offset record.
     pub fn append(&mut self, offset: &ChangesetOffset) -> io::Result<()> {
+        self.apply_pending_truncation()?;
         let mut buf = [0u8; Self::RECORD_SIZE];
         buf[..8].copy_from_slice(&offset.offset().to_le_bytes());
         buf[8..].copy_from_slice(&offset.num_changes().to_le_bytes());
@@ -140,8 +143,25 @@ impl ChangesetOffsetWriter {
     pub fn truncate(&mut self, len: u64) -> io::Result<()> {
         self.file.set_len(len * Self::RECORD_SIZE as u64)?;
         self.file.sync_all()?;
+        self.pending_truncation = None;
         self.records_written = len;
         Ok(())
+    }
+
+    /// Drops records like [`Self::truncate`], but leaves them on disk until
+    /// [`Self::apply_pending_truncation`].
+    pub const fn truncate_deferred(&mut self, len: u64) {
+        self.records_written = len;
+        self.pending_truncation = Some(len);
+    }
+
+    /// Truncates the file to the records kept by [`Self::truncate_deferred`].
+    ///
+    /// Returns `false` if no truncation was pending.
+    pub fn apply_pending_truncation(&mut self) -> io::Result<bool> {
+        let Some(len) = self.pending_truncation else { return Ok(false) };
+        self.truncate(len)?;
+        Ok(true)
     }
 
     /// Returns the number of records in the file.
@@ -286,6 +306,25 @@ mod tests {
         let reader = ChangesetOffsetReader::new(&path, 2).unwrap();
         assert_eq!(reader.len(), 2);
         assert!(reader.get(2).unwrap().is_none());
+
+        writer.append(&ChangesetOffset::new(3, 3)).unwrap();
+        writer.sync().unwrap();
+        writer.truncate_deferred(1);
+        assert_eq!(writer.len(), 1);
+        // Published readers retain the old records until the owner applies the cut.
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            3 * ChangesetOffsetWriter::RECORD_SIZE as u64
+        );
+        let old = ChangesetOffsetReader::new(&path, 3).unwrap();
+        assert_eq!(old.get(2).unwrap().unwrap(), ChangesetOffset::new(3, 3));
+        drop(old);
+        writer.append(&ChangesetOffset::new(7, 8)).unwrap();
+        writer.sync().unwrap();
+        assert_eq!(writer.len(), 2);
+        assert!(!writer.apply_pending_truncation().unwrap());
+        let reader = ChangesetOffsetReader::new(&path, 2).unwrap();
+        assert_eq!(reader.get(1).unwrap().unwrap(), ChangesetOffset::new(7, 8));
     }
 
     #[test]

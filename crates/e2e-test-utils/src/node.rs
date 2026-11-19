@@ -2,7 +2,7 @@ use crate::{network::NetworkTestContext, payload::PayloadTestContext, rpc::RpcTe
 use alloy_consensus::{transaction::TxHashRef, BlockHeader};
 use alloy_eips::BlockId;
 use alloy_primitives::{BlockHash, BlockNumber, Bytes, Sealable, B256};
-use alloy_rpc_types_engine::{ExecutionPayloadEnvelopeV5, ForkchoiceState};
+use alloy_rpc_types_engine::ForkchoiceState;
 use alloy_rpc_types_eth::BlockNumberOrTag;
 use eyre::Ok;
 use futures_util::Future;
@@ -17,7 +17,9 @@ use reth_provider::{
     BlockReader, BlockReaderIdExt, CanonStateNotificationStream, CanonStateSubscriptions,
     HeaderProvider, StageCheckpointReader,
 };
-use reth_rpc_api::TestingBuildBlockRequestV1;
+use reth_rpc_api::{
+    testing_build_block_params, TestingBuildBlockRequestV1, TestingBuildBlockResponseV1,
+};
 use reth_rpc_builder::auth::AuthServerHandle;
 use reth_rpc_eth_api::helpers::{EthApiSpec, EthTransactions, TraceExt};
 use reth_stages_types::StageId;
@@ -227,11 +229,29 @@ where
         block_hash: B256,
         block_number: BlockNumber,
     ) -> eyre::Result<()> {
-        // get head block from notifications stream and verify the tx has been pushed to the
-        // pool is actually present in the canonical block
-        let head = self.canonical_stream.next().await.unwrap();
-        let tx = head.tip().body().transactions().first();
-        assert_eq!(tx.unwrap().tx_hash().as_slice(), tip_tx_hash.as_slice());
+        // Earlier canonical events can still be buffered, so wait for this exact block.
+        let wait = async {
+            loop {
+                let notification = self
+                    .canonical_stream
+                    .next()
+                    .await
+                    .ok_or_else(|| eyre::eyre!("canonical state stream closed"))?;
+                let committed = notification.committed();
+                if let Some(block) = committed.blocks().get(&block_number) &&
+                    block.hash() == block_hash
+                {
+                    return eyre::Ok(std::sync::Arc::clone(block))
+                }
+            }
+        };
+        let block = tokio::time::timeout(std::time::Duration::from_secs(30), wait)
+            .await
+            .map_err(|_| eyre::eyre!("timed out waiting for block {block_number}"))??;
+        eyre::ensure!(
+            block.body().transactions().iter().any(|tx| *tx.tx_hash() == tip_tx_hash),
+            "transaction {tip_tx_hash} is not included in block {block_number}"
+        );
 
         loop {
             // wait for the block to commit
@@ -355,12 +375,12 @@ where
     pub async fn testing_build_block_v1(
         &self,
         request: TestingBuildBlockRequestV1,
-    ) -> eyre::Result<ExecutionPayloadEnvelopeV5> {
+    ) -> eyre::Result<TestingBuildBlockResponseV1> {
         let client =
             self.rpc_client().ok_or_else(|| eyre::eyre!("HTTP RPC client not available"))?;
 
-        let res: ExecutionPayloadEnvelopeV5 =
-            client.request("testing_buildBlockV1", [request]).await?;
+        let res: TestingBuildBlockResponseV1 =
+            client.request("testing_buildBlockV1", testing_build_block_params(request)).await?;
         eyre::Ok(res)
     }
 }

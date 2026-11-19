@@ -4,6 +4,7 @@ pub use reth_primitives_traits::header::HeaderMut;
 
 use alloy_primitives::B256;
 use clap::Parser;
+use eyre::WrapErr;
 use gravity_primitives::get_gravity_config;
 use reth_chainspec::EthChainSpec;
 use reth_cli::chainspec::ChainSpecParser;
@@ -88,11 +89,8 @@ impl<C: ChainSpecParser> EnvironmentArgs<C> {
 
         let config_path = self.config.clone().unwrap_or_else(|| data_dir.config());
 
-        let mut config = Config::from_path(config_path)
-            .inspect_err(
-                |err| warn!(target: "reth::cli", %err, "Failed to load config file, using default"),
-            )
-            .unwrap_or_default();
+        let mut config = Config::from_path(&config_path)
+            .wrap_err_with(|| format!("Could not load config file {config_path:?}"))?;
 
         // Make sure ETL doesn't default to /tmp/, but to whatever datadir is set to
         if config.stages.etl.dir.is_none() {
@@ -104,7 +102,7 @@ impl<C: ChainSpecParser> EnvironmentArgs<C> {
 
         info!(target: "reth::cli", ?db_path, ?sf_path, "Opening storage");
         let (db, sfp) = match access {
-            AccessRights::RW => (
+            AccessRights::RW | AccessRights::RwInconsistent => (
                 Arc::new(init_db(db_path, self.db.database_args())?),
                 StaticFileProvider::read_write(sf_path)?,
             ),
@@ -164,7 +162,7 @@ impl<C: ChainSpecParser> EnvironmentArgs<C> {
         .with_prune_modes(prune_modes.clone());
 
         // Check for consistency between database and static files.
-        if !access.is_read_only_inconsistent() &&
+        if !access.skips_consistency_check() &&
             let Some(unwind_target) = factory
                 .static_file_provider()
                 .check_consistency(&factory.provider()?, has_receipt_pruning)?
@@ -234,6 +232,8 @@ pub struct Environment<N: NodeTypes> {
 pub enum AccessRights {
     /// Read-write access
     RW,
+    /// Read-write access for explicit repair of a missing static-file tail.
+    RwInconsistent,
     /// Read-only access
     RO,
     /// Read-only access with possibly inconsistent data
@@ -243,13 +243,19 @@ pub enum AccessRights {
 impl AccessRights {
     /// Returns `true` if it requires read-write access to the environment.
     pub const fn is_read_write(&self) -> bool {
-        matches!(self, Self::RW)
+        matches!(self, Self::RW | Self::RwInconsistent)
     }
 
     /// Returns `true` if it requires read-only access to the environment with possibly inconsistent
     /// data.
     pub const fn is_read_only_inconsistent(&self) -> bool {
         matches!(self, Self::RoInconsistent)
+    }
+
+    /// Whether ordinary static-file consistency checking would interfere with the requested repair.
+    /// Gravity's interrupted-write recovery is still performed for pipe execution.
+    pub const fn skips_consistency_check(&self) -> bool {
+        matches!(self, Self::RwInconsistent | Self::RoInconsistent)
     }
 }
 
@@ -326,4 +332,19 @@ where
     Comp: CliNodeComponents<N>,
 {
     type Components = Comp;
+}
+
+#[cfg(test)]
+mod access_rights_tests {
+    use super::AccessRights;
+
+    #[test]
+    fn explicit_repairs_skip_only_the_ordinary_consistency_check() {
+        assert!(AccessRights::RwInconsistent.is_read_write());
+        assert!(AccessRights::RwInconsistent.skips_consistency_check());
+        assert!(AccessRights::RoInconsistent.skips_consistency_check());
+        assert!(AccessRights::RoInconsistent.is_read_only_inconsistent());
+        assert!(!AccessRights::RW.skips_consistency_check());
+        assert!(!AccessRights::RO.skips_consistency_check());
+    }
 }

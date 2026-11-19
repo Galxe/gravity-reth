@@ -69,7 +69,8 @@ alloy-chains.workspace = true
 
 itertools.workspace = true
 futures.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["net"] }
+socket2 = { workspace = true, features = ["all"] }
 
 # misc
 humantime.workspace = true
@@ -87,7 +88,7 @@ secp256k1 = { workspace = true, features = ["global-context", "std", "recovery"]
 tokio-stream.workspace = true
 reqwest = { workspace = true, features = ["blocking"] }
 url.workspace = true
-blake3.workspace = true
+blake3 = { workspace = true, features = ["rayon"] }
 rayon.workspace = true
 
 # io
@@ -104,11 +105,15 @@ proptest = { workspace = true, optional = true }
 arbitrary = { workspace = true, optional = true }
 proptest-arbitrary-interop = { workspace = true, optional = true }
 
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
 [dev-dependencies]
 alloy-genesis.workspace = true
 reth-ethereum-cli.workspace = true
 reth-provider = { workspace = true, features = ["test-utils"] }
 tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [features]
 default = []

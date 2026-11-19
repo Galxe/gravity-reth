@@ -1,7 +1,6 @@
 //! Utility functions for node startup and shutdown, for example path parsing and retrieving single
 //! blocks from the network.
 
-use alloy_consensus::BlockHeader;
 use alloy_eips::BlockHashOrNumber;
 use alloy_rpc_types_engine::{JwtError, JwtSecret};
 use eyre::Result;
@@ -41,17 +40,12 @@ where
 
     let Some(header) = response else {
         client.report_bad_message(peer_id);
-        eyre::bail!("Invalid number of headers received. Expected: 1. Received: 0")
+        eyre::bail!("Invalid number of headers received. Expected: 1. Received: 0");
     };
 
     let header = SealedHeader::seal_slow(header);
 
-    let valid = match id {
-        BlockHashOrNumber::Hash(hash) => header.hash() == hash,
-        BlockHashOrNumber::Number(number) => header.number() == number,
-    };
-
-    if !valid {
+    if !header.num_hash().matches_block_or_num(&id) {
         client.report_bad_message(peer_id);
         eyre::bail!(
             "Received invalid header. Received: {:?}. Expected: {:?}",
@@ -77,7 +71,7 @@ where
 
     let Some(body) = response else {
         client.report_bad_message(peer_id);
-        eyre::bail!("Invalid number of bodies received. Expected: 1. Received: 0")
+        eyre::bail!("Invalid number of bodies received. Expected: 1. Received: 0");
     };
 
     let block = SealedBlock::from_sealed_parts(header, body);

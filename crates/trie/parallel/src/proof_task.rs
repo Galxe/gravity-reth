@@ -8,13 +8,13 @@
 //! Individual [`ProofTaskTx`] instances manage a dedicated [`InMemoryTrieCursorFactory`] and
 //! [`HashedPostStateCursorFactory`], which are each backed by a database transaction.
 
-use crate::root::ParallelStateRootError;
+use crate::error::StateRootTaskError;
 use alloy_primitives::{map::B256Set, B256};
 use reth_db_api::transaction::DbTx;
 use reth_execution_errors::SparseTrieError;
 use reth_provider::{
     providers::ConsistentDbView, BlockReader, DBProvider, DatabaseProviderFactory, FactoryTx,
-    ProviderResult,
+    ProviderError, ProviderResult,
 };
 use reth_trie::{
     hashed_cursor::HashedPostStateCursorFactory,
@@ -45,7 +45,7 @@ use tracing::debug;
 #[cfg(feature = "metrics")]
 use crate::proof_task_metrics::ProofTaskMetrics;
 
-type StorageProofResult = Result<DecodedStorageMultiProof, ParallelStateRootError>;
+type StorageProofResult = Result<DecodedStorageMultiProof, StateRootTaskError>;
 type TrieNodeProviderResult = Result<Option<RevealedNode>, SparseTrieError>;
 
 /// A task that manages sending multiproof requests to a number of tasks that have longer-running
@@ -150,10 +150,18 @@ where
     pub fn try_spawn_next(&mut self) -> ProviderResult<()> {
         let Some(task) = self.pending_tasks.pop_front() else { return Ok(()) };
 
-        let Some(proof_task_tx) = self.get_or_create_tx()? else {
-            // if there are no txs available, requeue the proof task
-            self.pending_tasks.push_front(task);
-            return Ok(())
+        let proof_task_tx = match self.get_or_create_tx() {
+            Ok(Some(tx)) => tx,
+            Ok(None) => {
+                // If there are no transactions available, requeue the proof task.
+                self.pending_tasks.push_front(task);
+                return Ok(())
+            }
+            Err(error) => {
+                // Preserve the provider failure for the waiting caller before the manager exits.
+                task.send_provider_error(error.clone());
+                return Err(error)
+            }
         };
 
         let tx_sender = self.tx_sender.clone();
@@ -300,18 +308,12 @@ where
         .with_branch_node_masks(input.with_branch_node_masks)
         .with_added_removed_keys(added_removed_keys)
         .storage_multiproof(input.target_slots)
-        .map_err(|e| ParallelStateRootError::Other(e.to_string()));
+        .map_err(StateRootTaskError::from);
 
         drop(span_guard);
 
-        let decoded_result = raw_proof_result.and_then(|raw_proof| {
-            raw_proof.try_into().map_err(|e: alloy_rlp::Error| {
-                ParallelStateRootError::Other(format!(
-                    "Failed to decode storage proof for {}: {}",
-                    input.hashed_address, e
-                ))
-            })
-        });
+        let decoded_result = raw_proof_result
+            .and_then(|raw_proof| raw_proof.try_into().map_err(StateRootTaskError::from));
 
         debug!(
             target: "trie::proof_task",
@@ -513,6 +515,24 @@ pub enum ProofTaskKind {
     BlindedStorageNode(B256, Nibbles, Sender<TrieNodeProviderResult>),
 }
 
+impl ProofTaskKind {
+    /// Completes a request that could not open its backing database transaction.
+    fn send_provider_error(self, error: ProviderError) {
+        let delivered = match self {
+            Self::StorageProof(_, sender) => {
+                sender.send(Err(StateRootTaskError::Provider(error))).is_ok()
+            }
+            Self::BlindedAccountNode(_, sender) | Self::BlindedStorageNode(_, _, sender) => {
+                let error: Box<dyn std::error::Error + Send + Sync> = Box::new(error);
+                sender.send(Err(error.into())).is_ok()
+            }
+        };
+        if !delivered {
+            tracing::trace!(target: "trie::proof_task", "Proof caller cancelled before receiving provider failure");
+        }
+    }
+}
+
 /// A handle that wraps a single proof task sender that sends a terminate message on `Drop` if the
 /// number of active handles went to zero.
 #[derive(Debug)]
@@ -590,19 +610,146 @@ pub enum ProofTaskTrieNodeProvider<Tx> {
 impl<Tx: DbTx> TrieNodeProvider for ProofTaskTrieNodeProvider<Tx> {
     fn trie_node(&self, path: &Nibbles) -> Result<Option<RevealedNode>, SparseTrieError> {
         let (tx, rx) = channel();
-        match self {
-            Self::AccountNode { sender } => {
-                let _ = sender.send(ProofTaskMessage::QueueTask(
-                    ProofTaskKind::BlindedAccountNode(*path, tx),
-                ));
-            }
-            Self::StorageNode { sender, account } => {
-                let _ = sender.send(ProofTaskMessage::QueueTask(
-                    ProofTaskKind::BlindedStorageNode(*account, *path, tx),
-                ));
+        let sent = match self {
+            Self::AccountNode { sender } => sender
+                .send(ProofTaskMessage::QueueTask(ProofTaskKind::BlindedAccountNode(*path, tx))),
+            Self::StorageNode { sender, account } => sender.send(ProofTaskMessage::QueueTask(
+                ProofTaskKind::BlindedStorageNode(*account, *path, tx),
+            )),
+        };
+        sent.map_err(|_| {
+            let error: Box<dyn std::error::Error + Send + Sync> = Box::new(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "proof task manager stopped before accepting the node request",
+            ));
+            SparseTrieError::from(error)
+        })?;
+
+        rx.recv().map_err(|error| {
+            let error: Box<dyn std::error::Error + Send + Sync> = Box::new(error);
+            SparseTrieError::from(error)
+        })?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reth_execution_errors::SparseTrieErrorKind;
+    use reth_provider::test_utils::create_test_provider_factory;
+    use reth_storage_errors::provider::ConsistentViewError;
+    use std::time::Duration;
+
+    fn assert_reorged_provider(error: &ProviderError, expected: B256) {
+        let ProviderError::ConsistentView(error) = error else {
+            panic!("expected original consistent-view provider error, got {error:?}")
+        };
+        assert_eq!(error.as_ref(), &ConsistentViewError::Reorged { block: expected });
+    }
+
+    #[tokio::test]
+    async fn provider_open_failure_reaches_all_request_types() {
+        for kind in 0..3 {
+            let factory = create_test_provider_factory();
+            let expected = B256::repeat_byte(0x42);
+            // The requested snapshot anchor is absent from the real database.
+            let view = ConsistentDbView::new(factory, Some((expected, 1)));
+            let manager = ProofTaskManager::new(
+                Handle::current(),
+                view,
+                ProofTaskCtx::new(Default::default(), Default::default(), Default::default()),
+                1,
+            );
+            let handle = manager.handle();
+            let (storage_tx, storage_rx) = channel();
+            let (node_tx, node_rx) = channel();
+            let task = match kind {
+                0 => ProofTaskKind::StorageProof(
+                    StorageProofInput::new(
+                        B256::ZERO,
+                        Default::default(),
+                        Default::default(),
+                        false,
+                        None,
+                    ),
+                    storage_tx,
+                ),
+                1 => ProofTaskKind::BlindedAccountNode(Nibbles::default(), node_tx),
+                _ => ProofTaskKind::BlindedStorageNode(B256::ZERO, Nibbles::default(), node_tx),
+            };
+            handle.queue_task(task).unwrap();
+            // The manager must still stop on the provider failure, rather than continuing work.
+            assert_reorged_provider(&manager.run().unwrap_err(), expected);
+            if kind == 0 {
+                let Err(StateRootTaskError::Provider(error)) =
+                    storage_rx.recv_timeout(Duration::from_secs(5)).unwrap()
+                else {
+                    panic!("storage caller lost the original provider error")
+                };
+                assert_reorged_provider(&error, expected);
+            } else {
+                let error = node_rx.recv_timeout(Duration::from_secs(5)).unwrap().unwrap_err();
+                let SparseTrieErrorKind::Other(error) = error.kind() else {
+                    panic!("node caller lost the original provider error: {error:?}")
+                };
+                assert_reorged_provider(error.downcast_ref::<ProviderError>().unwrap(), expected);
             }
         }
+    }
 
-        rx.recv().unwrap()
+    #[tokio::test]
+    async fn stopped_manager_rejects_node_requests_without_panicking() {
+        let factory = create_test_provider_factory();
+        let manager = ProofTaskManager::new(
+            Handle::current(),
+            ConsistentDbView::new(factory, None),
+            ProofTaskCtx::new(Default::default(), Default::default(), Default::default()),
+            1,
+        );
+        let handle = manager.handle();
+        let account = handle.account_node_provider();
+        let storage = handle.storage_node_provider(B256::ZERO);
+        drop(manager);
+        for provider in [account, storage] {
+            let error = provider.trie_node(&Nibbles::default()).unwrap_err();
+            let SparseTrieErrorKind::Other(error) = error.kind() else {
+                panic!("unexpected cancellation error: {error:?}")
+            };
+            assert_eq!(
+                error.downcast_ref::<std::io::Error>().unwrap().kind(),
+                std::io::ErrorKind::BrokenPipe
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn dropped_node_reply_is_returned_without_panicking() {
+        for storage_request in [false, true] {
+            let factory = create_test_provider_factory();
+            let manager = ProofTaskManager::new(
+                Handle::current(),
+                ConsistentDbView::new(factory, None),
+                ProofTaskCtx::new(Default::default(), Default::default(), Default::default()),
+                1,
+            );
+            let handle = manager.handle();
+            let provider = if storage_request {
+                handle.storage_node_provider(B256::ZERO)
+            } else {
+                handle.account_node_provider()
+            };
+            let responder = std::thread::spawn(move || {
+                let request = manager.proof_task_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                assert!(matches!(&request, ProofTaskMessage::QueueTask(_)));
+                // Cancel an accepted request by dropping its reply sender.
+                drop(request);
+            });
+            let error = provider.trie_node(&Nibbles::default()).unwrap_err();
+            responder.join().unwrap();
+            let SparseTrieErrorKind::Other(error) = error.kind() else {
+                panic!("unexpected cancellation error: {error:?}")
+            };
+            assert!(error.downcast_ref::<std::sync::mpsc::RecvError>().is_some());
+        }
     }
 }

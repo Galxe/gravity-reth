@@ -97,6 +97,21 @@ pub const fn find_fixed_range(
     SegmentRangeInclusive::new(start, start + blocks_per_static_file - 1)
 }
 
+/// Derives a file size for distance-pruned segments using a quarter of the requested distance,
+/// clamped to 1,000 through [`DEFAULT_BLOCKS_PER_STATIC_FILE`] to limit file churn.
+///
+/// Explicit configuration and existing on-disk ranges take precedence over this default.
+pub const fn blocks_per_file_for_prune_distance(distance: u64) -> u64 {
+    let blocks = distance / 4;
+    if blocks < 1_000 {
+        1_000
+    } else if blocks > DEFAULT_BLOCKS_PER_STATIC_FILE {
+        DEFAULT_BLOCKS_PER_STATIC_FILE
+    } else {
+        blocks
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

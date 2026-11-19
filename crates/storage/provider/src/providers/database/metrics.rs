@@ -1,11 +1,14 @@
 use metrics::Histogram;
 use reth_metrics::Metrics;
-use std::time::{Duration, Instant};
+use std::{
+    sync::OnceLock,
+    time::{Duration, Instant},
+};
 
 #[derive(Debug)]
 pub(crate) struct DurationsRecorder {
     start: Instant,
-    current_metrics: DatabaseProviderMetrics,
+    current_metrics: &'static DatabaseProviderMetrics,
     pub(crate) actions: Vec<(Action, Duration)>,
     latest: Option<Duration>,
 }
@@ -16,7 +19,10 @@ impl Default for DurationsRecorder {
             start: Instant::now(),
             actions: Vec::new(),
             latest: None,
-            current_metrics: DatabaseProviderMetrics::default(),
+            current_metrics: {
+                static METRICS: OnceLock<DatabaseProviderMetrics> = OnceLock::new();
+                METRICS.get_or_init(DatabaseProviderMetrics::default)
+            },
         }
     }
 }

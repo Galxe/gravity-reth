@@ -3,14 +3,10 @@
 #![allow(dead_code)]
 
 use alloy_consensus::BlockHeader;
-use alloy_primitives::{map::B256Map, U256};
+use alloy_primitives::map::B256Map;
 use reth_ethereum_primitives::BlockBody;
 use reth_network_p2p::bodies::response::BlockResponse;
 use reth_primitives_traits::{Block, SealedBlock, SealedHeader};
-use reth_provider::{
-    test_utils::MockNodeTypesWithDB, ProviderFactory, StaticFileProviderFactory, StaticFileSegment,
-    StaticFileWriter,
-};
 
 pub(crate) fn zip_blocks<'a, B: Block>(
     headers: impl Iterator<Item = &'a SealedHeader<B::Header>>,
@@ -40,26 +36,4 @@ pub(crate) fn create_raw_bodies(
             body.into_block(header.unseal())
         })
         .collect()
-}
-
-#[inline]
-pub(crate) fn insert_headers(
-    factory: &ProviderFactory<MockNodeTypesWithDB>,
-    headers: &[SealedHeader],
-) {
-    // Gravity's `DatabaseProvider::commit` only commits the RocksDB transaction; it does not
-    // flush static-file writers. Headers must therefore be committed on the static-file writer
-    // itself, otherwise the appended headers never register in the block index and reads see an
-    // empty segment.
-    let static_file_provider = factory.static_file_provider();
-    let mut writer = static_file_provider
-        .latest_writer(StaticFileSegment::Headers)
-        .expect("failed to create writer");
-
-    for header in headers {
-        writer
-            .append_header(header.header(), U256::ZERO, &header.hash())
-            .expect("failed to append header");
-    }
-    writer.commit().expect("failed to commit");
 }

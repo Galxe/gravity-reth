@@ -2,10 +2,7 @@
 
 use reth_chainspec::{ChainSpecProvider, EthereumHardforks};
 
-use crate::{
-    BlockReaderIdExt, HeaderProvider, ProviderReadView, StageCheckpointReader,
-    StateProviderFactory, TransactionsProvider,
-};
+use crate::{BlockReaderIdExt, ProviderReadView, StageCheckpointReader, StateProviderFactory};
 
 /// Helper trait to unify all provider traits required to support `eth` RPC server behaviour, for
 /// simplicity.
@@ -14,8 +11,6 @@ pub trait FullRpcProvider:
     + ProviderReadView
     + ChainSpecProvider<ChainSpec: EthereumHardforks>
     + BlockReaderIdExt
-    + HeaderProvider
-    + TransactionsProvider
     + StageCheckpointReader
     + Clone
     + Unpin
@@ -28,8 +23,6 @@ impl<T> FullRpcProvider for T where
         + ProviderReadView
         + ChainSpecProvider<ChainSpec: EthereumHardforks>
         + BlockReaderIdExt
-        + HeaderProvider
-        + TransactionsProvider
         + StageCheckpointReader
         + Clone
         + Unpin

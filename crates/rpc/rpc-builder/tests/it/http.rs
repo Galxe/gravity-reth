@@ -65,6 +65,14 @@ where
     };
 }
 
+async fn assert_empty_raw_transaction_sync_error(client: &HttpClient, params: ArrayParams) {
+    let err = client
+        .request::<Value, _>("eth_sendRawTransactionSync", params)
+        .await
+        .expect_err("empty raw transaction should fail after RPC parameter decoding");
+    assert!(err.to_string().contains("empty transaction data"), "{err:?}");
+}
+
 /// Represents a builder for creating JSON-RPC requests.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct RawRpcParamsBuilder {
@@ -117,21 +125,24 @@ async fn test_filter_calls<C>(client: &C)
 where
     C: ClientT + SubscriptionClientT + Sync,
 {
-    EthFilterApiClient::<Transaction>::new_filter(client, Filter::default()).await.unwrap();
-    EthFilterApiClient::<Transaction>::new_pending_transaction_filter(client, None).await.unwrap();
-    EthFilterApiClient::<Transaction>::new_pending_transaction_filter(
+    EthFilterApiClient::<Transaction, Log>::new_filter(client, Filter::default()).await.unwrap();
+    EthFilterApiClient::<Transaction, Log>::new_pending_transaction_filter(client, None)
+        .await
+        .unwrap();
+    EthFilterApiClient::<Transaction, Log>::new_pending_transaction_filter(
         client,
         Some(PendingTransactionFilterKind::Full),
     )
     .await
     .unwrap();
-    let id = EthFilterApiClient::<Transaction>::new_block_filter(client).await.unwrap();
-    EthFilterApiClient::<Transaction>::filter_changes(client, id.clone()).await.unwrap();
-    EthFilterApiClient::<Transaction>::logs(client, Filter::default()).await.unwrap();
-    let id =
-        EthFilterApiClient::<Transaction>::new_filter(client, Filter::default()).await.unwrap();
-    EthFilterApiClient::<Transaction>::filter_logs(client, id.clone()).await.unwrap();
-    EthFilterApiClient::<Transaction>::uninstall_filter(client, id).await.unwrap();
+    let id = EthFilterApiClient::<Transaction, Log>::new_block_filter(client).await.unwrap();
+    EthFilterApiClient::<Transaction, Log>::filter_changes(client, id.clone()).await.unwrap();
+    EthFilterApiClient::<Transaction, Log>::logs(client, Filter::default()).await.unwrap();
+    let id = EthFilterApiClient::<Transaction, Log>::new_filter(client, Filter::default())
+        .await
+        .unwrap();
+    EthFilterApiClient::<Transaction, Log>::filter_logs(client, id.clone()).await.unwrap();
+    EthFilterApiClient::<Transaction, Log>::uninstall_filter(client, id).await.unwrap();
 }
 
 async fn test_basic_admin_calls<C>(client: &C)
@@ -145,6 +156,8 @@ where
     AdminApiClient::remove_peer(client, node.into()).await.unwrap();
     AdminApiClient::add_trusted_peer(client, node.into()).await.unwrap();
     AdminApiClient::remove_trusted_peer(client, node.into()).await.unwrap();
+    AdminApiClient::ban_peer(client, node.into()).await.unwrap();
+    AdminApiClient::unban_peer(client, node.into()).await.unwrap();
     AdminApiClient::node_info(client).await.unwrap();
 }
 
@@ -440,13 +453,14 @@ async fn test_basic_debug_calls<C>(client: &C)
 where
     C: ClientT + SubscriptionClientT + Sync,
 {
-    let block_id = BlockId::Number(BlockNumberOrTag::default());
+    let block_id = BlockId::latest();
 
     DebugApiClient::<TransactionRequest>::raw_header(client, block_id).await.unwrap_err();
     DebugApiClient::<TransactionRequest>::raw_block(client, block_id).await.unwrap_err();
     DebugApiClient::<TransactionRequest>::raw_transaction(client, B256::default()).await.unwrap();
     DebugApiClient::<TransactionRequest>::raw_receipts(client, block_id).await.unwrap_err();
     DebugApiClient::<TransactionRequest>::bad_blocks(client).await.unwrap();
+    DebugApiClient::<TransactionRequest>::debug_clear_txpool(client).await.unwrap();
     DebugApiClient::<TransactionRequest>::debug_account_at(
         client,
         block_id,
@@ -478,16 +492,8 @@ async fn test_basic_trace_calls<C>(client: &C)
 where
     C: ClientT + SubscriptionClientT + Sync,
 {
-    let block_id = BlockId::Number(BlockNumberOrTag::default());
-    let trace_filter = TraceFilter {
-        from_block: Default::default(),
-        to_block: Default::default(),
-        from_address: Default::default(),
-        to_address: Default::default(),
-        mode: Default::default(),
-        after: None,
-        count: None,
-    };
+    let block_id = BlockId::latest();
+    let trace_filter = TraceFilter::default();
 
     TraceApiClient::<TransactionRequest>::trace_raw_transaction(
         client,
@@ -497,30 +503,25 @@ where
     )
     .await
     .unwrap_err();
-    TraceApiClient::<TransactionRequest>::trace_call_many(
-        client,
-        vec![],
-        Some(BlockNumberOrTag::Latest.into()),
-    )
-    .await
-    .unwrap_err();
-    TraceApiClient::<TransactionRequest>::replay_transaction(
+    TraceApiClient::<TransactionRequest>::trace_call_many(client, vec![], Some(BlockId::latest()))
+        .await
+        .unwrap_err();
+    assert!(TraceApiClient::<TransactionRequest>::replay_transaction(
         client,
         B256::default(),
         HashSet::default(),
     )
     .await
-    .err()
-    .unwrap();
+    .unwrap()
+    .is_none());
     TraceApiClient::<TransactionRequest>::trace_block(client, block_id).await.unwrap_err();
-    assert!(TraceApiClient::<TransactionRequest>::replay_block_transactions(
+    TraceApiClient::<TransactionRequest>::replay_block_transactions(
         client,
         block_id,
         HashSet::default(),
     )
     .await
-    .unwrap()
-    .is_none());
+    .unwrap_err();
 
     TraceApiClient::<TransactionRequest>::trace_filter(client, trace_filter).await.unwrap();
 }
@@ -667,6 +668,28 @@ async fn test_call_eth_functions_http() {
     let handle = launch_http(vec![RethRpcModule::Eth]).await;
     let client = handle.http_client().unwrap();
     test_basic_eth_calls(&client).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_eth_send_raw_transaction_sync_accepts_optional_timeout_arg() {
+    reth_tracing::init_test_tracing();
+
+    let handle = launch_http(vec![RethRpcModule::Eth]).await;
+    let client = handle.http_client().unwrap();
+
+    let mut one_arg = ArrayParams::new();
+    one_arg.insert(Bytes::default()).unwrap();
+    assert_empty_raw_transaction_sync_error(&client, one_arg).await;
+
+    let mut null_timeout = ArrayParams::new();
+    null_timeout.insert(Bytes::default()).unwrap();
+    null_timeout.insert(Value::Null).unwrap();
+    assert_empty_raw_transaction_sync_error(&client, null_timeout).await;
+
+    let mut two_args = ArrayParams::new();
+    two_args.insert(Bytes::default()).unwrap();
+    two_args.insert(1u64).unwrap();
+    assert_empty_raw_transaction_sync_error(&client, two_args).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

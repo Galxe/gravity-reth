@@ -1,9 +1,10 @@
 #![allow(unreachable_pub)]
 //! Tests for eth related requests
 
-use alloy_consensus::Header;
+use alloy_consensus::{Header, Sealed};
+use alloy_primitives::B256;
 use rand::Rng;
-use reth_eth_wire::{EthVersion, HeadersDirection};
+use reth_eth_wire::EthVersion;
 use reth_ethereum_primitives::Block;
 use reth_network::{
     test_utils::{NetworkEventStream, PeerConfig, Testnet, TestnetHandle},
@@ -12,12 +13,12 @@ use reth_network::{
 use reth_network_api::{NetworkInfo, Peers};
 use reth_network_p2p::{
     bodies::client::BodiesClient,
-    error::RequestError,
     headers::client::{HeadersClient, HeadersRequest},
 };
 use reth_provider::test_utils::MockEthProvider;
 use reth_transaction_pool::test_utils::{TestPool, TransactionGenerator};
 use std::sync::Arc;
+use test_case::test_case;
 use tokio::sync::oneshot;
 
 #[tokio::test(flavor = "multi_thread")]
@@ -65,38 +66,19 @@ async fn test_get_body() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_get_body_range() {
-    reth_tracing::init_test_tracing();
-    let mut rng = rand::rng();
-    let mock_provider = Arc::new(MockEthProvider::default());
+    let (provider, net) = spawn_testnet(MockEthProvider::default(), None).await;
+    let fetch0 = net.peers()[0].network().fetch_client().await.unwrap();
     let mut tx_gen = TransactionGenerator::new(rand::rng());
-
-    let mut net = Testnet::create_with(2, mock_provider.clone()).await;
-
-    // install request handlers
-    net.for_each_mut(|peer| peer.install_request_handler());
-
-    let handle0 = net.peers()[0].handle();
-    let mut events0 = NetworkEventStream::new(handle0.event_listener());
-
-    let handle1 = net.peers()[1].handle();
-
-    let _handle = net.spawn();
-
-    let fetch0 = handle0.fetch_client().await.unwrap();
-
-    handle0.add_peer(*handle1.peer_id(), handle1.local_addr());
-    let connected = events0.next_session_established().await.unwrap();
-    assert_eq!(connected, *handle1.peer_id());
 
     let mut all_blocks = Vec::new();
     let mut block_hashes = Vec::new();
     // add some blocks
     for _ in 0..100 {
-        let block_hash = rng.random();
-        let mut block: Block = Block::default();
+        let block_hash = B256::random();
+        let mut block = Block::default();
         block.body.transactions.push(tx_gen.gen_eip4844());
 
-        mock_provider.add_block(block_hash, block.clone());
+        provider.add_block(block_hash, block.clone());
         all_blocks.push(block);
         block_hashes.push(block_hash);
     }
@@ -117,29 +99,13 @@ async fn test_get_body_range() {
     }
 }
 
+#[test_case(None; "default")]
+#[test_case(Some(EthVersion::Eth69); "eth69")]
 #[tokio::test(flavor = "multi_thread")]
-async fn test_get_header() {
-    reth_tracing::init_test_tracing();
+async fn test_get_header(version: Option<EthVersion>) {
+    let (provider, net) = spawn_testnet(MockEthProvider::default(), version).await;
+    let fetch0 = net.peers()[0].network().fetch_client().await.unwrap();
     let mut rng = rand::rng();
-    let mock_provider = Arc::new(MockEthProvider::default());
-
-    let mut net = Testnet::create_with(2, mock_provider.clone()).await;
-
-    // install request handlers
-    net.for_each_mut(|peer| peer.install_request_handler());
-
-    let handle0 = net.peers()[0].handle();
-    let mut events0 = NetworkEventStream::new(handle0.event_listener());
-
-    let handle1 = net.peers()[1].handle();
-
-    let _handle = net.spawn();
-
-    let fetch0 = handle0.fetch_client().await.unwrap();
-
-    handle0.add_peer(*handle1.peer_id(), handle1.local_addr());
-    let connected = events0.next_session_established().await.unwrap();
-    assert_eq!(connected, *handle1.peer_id());
 
     let start: u64 = rng.random();
     let mut hash = rng.random();
@@ -149,10 +115,9 @@ async fn test_get_header() {
         let header = Header { number: start + idx, parent_hash: hash, ..Default::default() };
         hash = rng.random();
 
-        mock_provider.add_header(hash, header.clone());
+        provider.add_header(hash, header.clone());
 
-        let req =
-            HeadersRequest { start: hash.into(), limit: 1, direction: HeadersDirection::Falling };
+        let req = HeadersRequest::falling(hash.into(), 1);
 
         let res = fetch0.get_headers(req).await;
         assert!(res.is_ok(), "{res:?}");
@@ -165,49 +130,15 @@ async fn test_get_header() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_get_header_range() {
-    reth_tracing::init_test_tracing();
-    let mut rng = rand::rng();
-    let mock_provider = Arc::new(MockEthProvider::default());
-
-    let mut net = Testnet::create_with(2, mock_provider.clone()).await;
-
-    // install request handlers
-    net.for_each_mut(|peer| peer.install_request_handler());
-
-    let handle0 = net.peers()[0].handle();
-    let mut events0 = NetworkEventStream::new(handle0.event_listener());
-
-    let handle1 = net.peers()[1].handle();
-
-    let _handle = net.spawn();
-
-    let fetch0 = handle0.fetch_client().await.unwrap();
-
-    handle0.add_peer(*handle1.peer_id(), handle1.local_addr());
-    let connected = events0.next_session_established().await.unwrap();
-    assert_eq!(connected, *handle1.peer_id());
-
-    let start: u64 = rng.random();
-    let mut hash = rng.random();
-    let mut all_headers = Vec::new();
-    // add some headers
-    for idx in 0..100 {
-        // Set a new random header to the mock storage and request it via the network
-        let header = Header { number: start + idx, parent_hash: hash, ..Default::default() };
-        hash = rng.random();
-        mock_provider.add_header(hash, header.clone());
-        all_headers.push(header.seal(hash));
-    }
+    let (provider, net) = spawn_testnet(MockEthProvider::default(), None).await;
+    let fetch0 = net.peers()[0].network().fetch_client().await.unwrap();
+    let (start, all_headers) = add_header_chain(&provider);
 
     // ensure we can fetch the correct headers
     for idx in 0..100 {
         let count = 100 - idx;
         let header = &all_headers[idx];
-        let req = HeadersRequest {
-            start: header.hash().into(),
-            limit: count as u64,
-            direction: HeadersDirection::Rising,
-        };
+        let req = HeadersRequest::rising(header.hash().into(), count as u64);
 
         let res = fetch0.get_headers(req).await;
         assert!(res.is_ok(), "{res:?}");
@@ -262,11 +193,7 @@ async fn test_get_header_range_falling() {
     for idx in (0..100).rev() {
         let count = std::cmp::min(idx + 1, 100); // Can't fetch more than idx+1 headers when going backwards
         let header = &all_headers[idx];
-        let req = HeadersRequest {
-            start: header.hash().into(),
-            limit: count as u64,
-            direction: HeadersDirection::Falling,
-        };
+        let req = HeadersRequest::falling(header.hash().into(), count as u64);
 
         let res = fetch0.get_headers(req).await;
         assert!(res.is_ok(), "{res:?}");
@@ -290,10 +217,10 @@ async fn test_eth68_get_receipts() {
     let mut net: Testnet<Arc<MockEthProvider>, TestPool> = Testnet::default();
 
     // Create peers with ETH68 protocol explicitly
-    let p0 = PeerConfig::with_protocols(mock_provider.clone(), Some(EthVersion::Eth68.into()));
+    let p0 = PeerConfig::new(mock_provider.clone()).with_protocols([EthVersion::Eth68]);
     net.add_peer_with_config(p0).await.unwrap();
 
-    let p1 = PeerConfig::with_protocols(mock_provider.clone(), Some(EthVersion::Eth68.into()));
+    let p1 = PeerConfig::new(mock_provider.clone()).with_protocols([EthVersion::Eth68]);
     net.add_peer_with_config(p1).await.unwrap();
 
     // install request handlers
@@ -361,10 +288,10 @@ async fn test_eth69_get_headers() {
     let mut net: Testnet<Arc<MockEthProvider>, TestPool> = Testnet::default();
 
     // Create peers with ETH69 protocol
-    let p0 = PeerConfig::with_protocols(mock_provider.clone(), Some(EthVersion::Eth69.into()));
+    let p0 = PeerConfig::new(mock_provider.clone()).with_protocols([EthVersion::Eth69]);
     net.add_peer_with_config(p0).await.unwrap();
 
-    let p1 = PeerConfig::with_protocols(mock_provider.clone(), Some(EthVersion::Eth69.into()));
+    let p1 = PeerConfig::new(mock_provider.clone()).with_protocols([EthVersion::Eth69]);
     net.add_peer_with_config(p1).await.unwrap();
 
     // install request handlers
@@ -392,8 +319,7 @@ async fn test_eth69_get_headers() {
 
         mock_provider.add_header(hash, header.clone());
 
-        let req =
-            HeadersRequest { start: hash.into(), limit: 1, direction: HeadersDirection::Falling };
+        let req = HeadersRequest::falling(hash.into(), 1);
 
         let res = fetch0.get_headers(req).await;
         assert!(res.is_ok(), "{res:?}");
@@ -414,10 +340,10 @@ async fn test_eth69_get_bodies() {
     let mut net: Testnet<Arc<MockEthProvider>, TestPool> = Testnet::default();
 
     // Create peers with ETH69 protocol
-    let p0 = PeerConfig::with_protocols(mock_provider.clone(), Some(EthVersion::Eth69.into()));
+    let p0 = PeerConfig::new(mock_provider.clone()).with_protocols([EthVersion::Eth69]);
     net.add_peer_with_config(p0).await.unwrap();
 
-    let p1 = PeerConfig::with_protocols(mock_provider.clone(), Some(EthVersion::Eth69.into()));
+    let p1 = PeerConfig::new(mock_provider.clone()).with_protocols([EthVersion::Eth69]);
     net.add_peer_with_config(p1).await.unwrap();
 
     // install request handlers
@@ -462,10 +388,10 @@ async fn test_eth69_get_receipts() {
     let mut net: Testnet<Arc<MockEthProvider>, TestPool> = Testnet::default();
 
     // Create peers with ETH69 protocol
-    let p0 = PeerConfig::with_protocols(mock_provider.clone(), Some(EthVersion::Eth69.into()));
+    let p0 = PeerConfig::new(mock_provider.clone()).with_protocols([EthVersion::Eth69]);
     net.add_peer_with_config(p0).await.unwrap();
 
-    let p1 = PeerConfig::with_protocols(mock_provider.clone(), Some(EthVersion::Eth69.into()));
+    let p1 = PeerConfig::new(mock_provider.clone()).with_protocols([EthVersion::Eth69]);
     net.add_peer_with_config(p1).await.unwrap();
 
     // install request handlers
@@ -526,4 +452,41 @@ async fn test_eth69_get_receipts() {
         assert_eq!(receipts_response.0[0][0].cumulative_gas_used, 21000);
         assert_eq!(receipts_response.0[0][1].cumulative_gas_used, 42000);
     }
+}
+
+type RequestsTestnet = TestnetHandle<Arc<MockEthProvider>, TestPool>;
+
+async fn spawn_testnet(
+    provider: MockEthProvider,
+    version: Option<EthVersion>,
+) -> (Arc<MockEthProvider>, RequestsTestnet) {
+    reth_tracing::init_test_tracing();
+
+    let provider = Arc::new(provider);
+    let peer = || {
+        let peer = PeerConfig::new(provider.clone());
+        match version {
+            Some(version) => peer.with_protocols([version]),
+            None => peer,
+        }
+    };
+    let net = Testnet::from_configs([peer(), peer()]).await.with_request_handlers().spawn();
+    net.connect_peers().await;
+
+    (provider, net)
+}
+
+fn add_header_chain(provider: &MockEthProvider) -> (u64, Vec<Sealed<Header>>) {
+    let mut rng = rand::rng();
+    let start: u64 = rng.random();
+    let mut hash = rng.random();
+    let headers = (0..100)
+        .map(|idx| {
+            let header = Header { number: start + idx, parent_hash: hash, ..Default::default() };
+            hash = rng.random();
+            provider.add_header(hash, header.clone());
+            header.seal(hash)
+        })
+        .collect();
+    (start, headers)
 }

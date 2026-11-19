@@ -4,8 +4,10 @@ use alloy_genesis::GenesisAccount;
 use alloy_primitives::{keccak256, Bytes, B256, U256};
 use alloy_trie::TrieAccount;
 use derive_more::Deref;
-use revm_bytecode::{Bytecode as RevmBytecode, BytecodeDecodeError};
-use revm_state::AccountInfo;
+use revm::{
+    bytecode::{Bytecode as RevmBytecode, BytecodeDecodeError},
+    state::AccountInfo,
+};
 
 #[cfg(feature = "reth-codec")]
 /// Identifiers used in [`Compact`](reth_codecs::Compact) encoding of [`Bytecode`].
@@ -69,12 +71,12 @@ impl Account {
         }
     }
 
-    /// Extracts the account information from a [`revm_state::Account`]
-    pub fn from_revm_account(revm_account: &revm_state::Account) -> Self {
+    /// Extracts the account information from a [`revm::state::Account`]
+    pub fn from_revm_account(revm_account: &revm::state::Account) -> Self {
         Self {
             balance: revm_account.info.balance,
             nonce: revm_account.info.nonce,
-            bytecode_hash: if revm_account.info.code_hash == revm_primitives::KECCAK_EMPTY {
+            bytecode_hash: if revm_account.info.code_hash == revm::primitives::KECCAK_EMPTY {
                 None
             } else {
                 Some(revm_account.info.code_hash)
@@ -83,8 +85,8 @@ impl Account {
     }
 }
 
-impl From<revm_state::Account> for Account {
-    fn from(value: revm_state::Account) -> Self {
+impl From<revm::state::Account> for Account {
+    fn from(value: revm::state::Account) -> Self {
         Self::from_revm_account(&value)
     }
 }
@@ -127,7 +129,7 @@ impl Bytecode {
         Self(RevmBytecode::new_raw(bytes))
     }
 
-    /// Creates a new raw [`revm_bytecode::Bytecode`].
+    /// Creates a new raw [`revm::bytecode::Bytecode`].
     ///
     /// Returns an error on incorrect Bytecode format.
     #[inline]
@@ -202,7 +204,7 @@ impl reth_codecs::Compact for Bytecode {
                     RevmBytecode::new_analyzed(
                         bytes,
                         original_len,
-                        revm_bytecode::JumpTable::from_slice(buf, jump_table_len),
+                        revm::bytecode::JumpTable::from_slice(buf, jump_table_len),
                     )
                 })
             }
@@ -266,7 +268,7 @@ mod tests {
     use super::*;
     use alloy_primitives::{hex_literal::hex, B256, U256};
     use reth_codecs::Compact;
-    use revm_bytecode::JumpTable;
+    use revm::bytecode::JumpTable;
 
     #[test]
     fn test_account() {

@@ -18,9 +18,13 @@ use alloy_primitives::{
 use reth_chain_state::{BlockState, CanonicalInMemoryState, MemoryOverlayStateProviderRef};
 use reth_chainspec::ChainInfo;
 use reth_db_api::models::{AccountBeforeTx, BlockNumberAddress, StoredBlockBodyIndices};
-use reth_execution_types::{BundleStateInit, ExecutionOutcome, RevertsInit};
+use reth_execution_types::{
+    BundleStateInit, ExecutionOutcome, RecoveredBlockAndExecutionOutput, RevertsInit,
+};
 use reth_node_types::{BlockTy, HeaderTy, ReceiptTy, TxTy};
-use reth_primitives_traits::{Account, BlockBody, RecoveredBlock, SealedHeader, StorageEntry};
+use reth_primitives_traits::{
+    Account, BlockBody, RecoveredBlock, SealedHeader, SealedOrRecoveredBlock, StorageEntry,
+};
 use reth_prune_types::{PruneCheckpoint, PruneSegment};
 use reth_stages_types::{StageCheckpoint, StageId};
 use reth_static_file_types::StaticFileSegment;
@@ -29,9 +33,9 @@ use reth_storage_api::{
     StorageChangeSetReader, TryIntoHistoricalStateProvider,
 };
 use reth_storage_errors::provider::ProviderResult;
-use revm_database::states::PlainStorageRevert;
+use revm::database::states::PlainStorageRevert;
 use std::{
-    ops::{Add, Bound, RangeBounds, RangeInclusive, Sub},
+    ops::{Bound, RangeBounds, RangeInclusive},
     sync::Arc,
 };
 use tracing::trace;
@@ -147,28 +151,23 @@ impl<N: ProviderNodeTypes> ConsistentProvider<N> {
         Ok(tag)
     }
 
-    // Helper function to convert range bounds
-    fn convert_range_bounds<T>(
+    // Empty or unrepresentable exclusive bounds have no inclusive equivalent.
+    fn convert_range_bounds(
         &self,
-        range: impl RangeBounds<T>,
-        end_unbounded: impl FnOnce() -> T,
-    ) -> (T, T)
-    where
-        T: Copy + Add<Output = T> + Sub<Output = T> + From<u8>,
-    {
+        range: impl RangeBounds<u64>,
+        end_unbounded: impl FnOnce() -> u64,
+    ) -> Option<(u64, u64)> {
         let start = match range.start_bound() {
             Bound::Included(&n) => n,
-            Bound::Excluded(&n) => n + T::from(1u8),
-            Bound::Unbounded => T::from(0u8),
+            Bound::Excluded(&n) => n.checked_add(1)?,
+            Bound::Unbounded => 0,
         };
-
         let end = match range.end_bound() {
             Bound::Included(&n) => n,
-            Bound::Excluded(&n) => n - T::from(1u8),
+            Bound::Excluded(&n) => n.checked_sub(1)?,
             Bound::Unbounded => end_unbounded(),
         };
-
-        (start, end)
+        (start <= end).then_some((start, end))
     }
 
     /// Storage provider for latest block
@@ -241,7 +240,7 @@ impl<N: ProviderNodeTypes> ConsistentProvider<N> {
         else {
             return Ok(None)
         };
-        let Some(to_transaction_num) = block_bodies.last().map(|body| body.1.last_tx_num()) else {
+        let Some(to_transaction_num) = block_bodies.last().map(|body| body.1.next_tx_num()) else {
             return Ok(None)
         };
 
@@ -262,7 +261,7 @@ impl<N: ProviderNodeTypes> ConsistentProvider<N> {
             self.populate_bundle_state(account_changeset, storage_changeset, end_block_number)?;
 
         let mut receipt_iter =
-            self.receipts_by_tx_range(from_transaction_num..=to_transaction_num)?.into_iter();
+            self.receipts_by_tx_range(from_transaction_num..to_transaction_num)?.into_iter();
 
         let mut receipts = Vec::with_capacity(block_bodies.len());
         // loop break if we are at the end of the blocks.
@@ -392,17 +391,15 @@ impl<N: ProviderNodeTypes> ConsistentProvider<N> {
             self.head_block.as_ref().map(|b| b.chain().collect::<Vec<_>>()).unwrap_or_default();
         let db_provider = &self.storage_provider;
 
-        let (start, end) = self.convert_range_bounds(range, || {
+        let Some((start, end)) = self.convert_range_bounds(range, || {
             // the first block is the highest one.
             in_memory_chain
                 .first()
                 .map(|b| b.number())
                 .unwrap_or_else(|| db_provider.last_block_number().unwrap_or_default())
-        });
-
-        if start > end {
+        }) else {
             return Ok(vec![])
-        }
+        };
 
         // Split range into storage_range and in-memory range. If the in-memory range is not
         // necessary drop it early.
@@ -513,17 +510,15 @@ impl<N: ProviderNodeTypes> ConsistentProvider<N> {
             .ok_or(ProviderError::BlockBodyIndicesNotFound(last_database_block_number))?;
         let mut in_memory_tx_num = last_block_body_index.next_tx_num();
 
-        let (start, end) = self.convert_range_bounds(range, || {
+        let Some((start, end)) = self.convert_range_bounds(range, || {
             in_mem_chain
                 .iter()
                 .map(|b| b.block_ref().recovered_block().body().transactions().len() as u64)
                 .sum::<u64>() +
                 last_block_body_index.last_tx_num()
-        });
-
-        if start > end {
+        }) else {
             return Ok(vec![])
-        }
+        };
 
         let mut tx_range = start..=end;
 
@@ -964,6 +959,39 @@ impl<N: ProviderNodeTypes> BlockReader for ConsistentProvider<N> {
         Ok(None)
     }
 
+    fn find_sealed_or_recovered_block(
+        &self,
+        hash: B256,
+        source: BlockSource,
+    ) -> ProviderResult<Option<SealedOrRecoveredBlock<Self::Block>>> {
+        if matches!(source, BlockSource::Canonical | BlockSource::Any) &&
+            let Some(block) = self.get_in_memory_or_storage_by_block(
+                hash.into(),
+                |db_provider| {
+                    db_provider.find_sealed_or_recovered_block(hash, BlockSource::Canonical)
+                },
+                |block_state| {
+                    Ok(Some(SealedOrRecoveredBlock::recovered_arc(Arc::clone(
+                        &block_state.block_ref().recovered_block,
+                    ))))
+                },
+            )?
+        {
+            return Ok(Some(block))
+        }
+
+        if matches!(source, BlockSource::Pending | BlockSource::Any) &&
+            let Some(block_state) = self.canonical_in_memory_state.pending_state()
+        {
+            let recovered_block = Arc::clone(&block_state.block_ref().recovered_block);
+            if recovered_block.hash() == hash {
+                return Ok(Some(SealedOrRecoveredBlock::recovered_arc(recovered_block)))
+            }
+        }
+
+        Ok(None)
+    }
+
     fn block(&self, id: BlockHashOrNumber) -> ProviderResult<Option<Self::Block>> {
         self.get_in_memory_or_storage_by_block(
             id,
@@ -972,15 +1000,18 @@ impl<N: ProviderNodeTypes> BlockReader for ConsistentProvider<N> {
         )
     }
 
-    fn pending_block(&self) -> ProviderResult<Option<RecoveredBlock<Self::Block>>> {
-        Ok(self.pending_state().map(|state| state.block_ref().recovered_block().clone()))
+    fn pending_block(&self) -> ProviderResult<Option<Arc<RecoveredBlock<Self::Block>>>> {
+        Ok(self.pending_state().map(|state| Arc::clone(&state.block_ref().recovered_block)))
     }
 
     fn pending_block_and_receipts(
         &self,
-    ) -> ProviderResult<Option<(RecoveredBlock<Self::Block>, Vec<Self::Receipt>)>> {
+    ) -> ProviderResult<Option<RecoveredBlockAndExecutionOutput<Self::Block, Self::Receipt>>> {
         Ok(self.pending_state().map(|state| {
-            (state.block_ref().recovered_block().clone(), state.executed_block_receipts())
+            RecoveredBlockAndExecutionOutput::new(
+                Arc::clone(&state.block_ref().recovered_block),
+                Arc::clone(&state.block_ref().execution_output),
+            )
         }))
     }
 
@@ -1358,6 +1389,11 @@ impl<N: ProviderNodeTypes> PruneCheckpointReader for ConsistentProvider<N> {
     fn get_prune_checkpoints(&self) -> ProviderResult<Vec<(PruneSegment, PruneCheckpoint)>> {
         self.storage_provider.get_prune_checkpoints()
     }
+    fn get_prune_checkpoints_for_availability(
+        &self,
+    ) -> ProviderResult<Vec<(PruneSegment, PruneCheckpoint)>> {
+        self.storage_provider.get_prune_checkpoints_for_availability()
+    }
 }
 
 impl<N: ProviderNodeTypes> ChainSpecProvider for ConsistentProvider<N> {
@@ -1623,7 +1659,7 @@ mod tests {
     use reth_testing_utils::generators::{
         self, random_block_range, random_changeset_range, random_eoa_accounts, BlockRangeParams,
     };
-    use revm_database::BundleState;
+    use revm::database::BundleState;
     use std::{
         ops::{Bound, Range, RangeBounds},
         sync::Arc,
@@ -1701,6 +1737,9 @@ mod tests {
             consistent_provider.find_block_by_hash(first_in_mem_block.hash(), BlockSource::Any)?,
             None
         );
+        assert!(consistent_provider
+            .find_sealed_or_recovered_block(first_in_mem_block.hash(), BlockSource::Any)?
+            .is_none());
         assert_eq!(
             consistent_provider
                 .find_block_by_hash(first_in_mem_block.hash(), BlockSource::Canonical)?,
@@ -1736,28 +1775,53 @@ mod tests {
             consistent_provider.find_block_by_hash(first_in_mem_block.hash(), BlockSource::Any)?,
             Some(first_in_mem_block.clone().into_block())
         );
+        let block = consistent_provider
+            .find_sealed_or_recovered_block(first_in_mem_block.hash(), BlockSource::Any)?
+            .expect("in-memory block should be found");
+        assert_eq!(block.sealed_block(), first_in_mem_block);
+        assert!(block.recovered_block().is_some());
+
         assert_eq!(
             consistent_provider
                 .find_block_by_hash(first_in_mem_block.hash(), BlockSource::Canonical)?,
             Some(first_in_mem_block.clone().into_block())
         );
+        let block = consistent_provider
+            .find_sealed_or_recovered_block(first_in_mem_block.hash(), BlockSource::Canonical)?
+            .expect("canonical in-memory block should be found");
+        assert_eq!(block.sealed_block(), first_in_mem_block);
+        assert!(block.recovered_block().is_some());
 
         // Find the first block in database by hash
         assert_eq!(
             consistent_provider.find_block_by_hash(first_db_block.hash(), BlockSource::Any)?,
             Some(first_db_block.clone().into_block())
         );
+        let block = consistent_provider
+            .find_sealed_or_recovered_block(first_db_block.hash(), BlockSource::Any)?
+            .expect("database block should be found");
+        assert_eq!(block.sealed_block(), first_db_block);
+        assert!(block.recovered_block().is_none());
+
         assert_eq!(
             consistent_provider
                 .find_block_by_hash(first_db_block.hash(), BlockSource::Canonical)?,
             Some(first_db_block.clone().into_block())
         );
+        let block = consistent_provider
+            .find_sealed_or_recovered_block(first_db_block.hash(), BlockSource::Canonical)?
+            .expect("canonical database block should be found");
+        assert_eq!(block.sealed_block(), first_db_block);
+        assert!(block.recovered_block().is_none());
 
         // No pending block in database
         assert_eq!(
             consistent_provider.find_block_by_hash(first_db_block.hash(), BlockSource::Pending)?,
             None
         );
+        assert!(consistent_provider
+            .find_sealed_or_recovered_block(first_db_block.hash(), BlockSource::Pending)?
+            .is_none());
 
         // Insert the last block into the pending state
         provider.canonical_in_memory_state.set_pending_block(ExecutedBlockWithTrieUpdates {
@@ -1779,6 +1843,11 @@ mod tests {
                 .find_block_by_hash(last_in_mem_block.hash(), BlockSource::Pending)?,
             Some(last_in_mem_block.clone_block())
         );
+        let block = consistent_provider
+            .find_sealed_or_recovered_block(last_in_mem_block.hash(), BlockSource::Pending)?
+            .expect("pending block should be found");
+        assert_eq!(block.sealed_block(), last_in_mem_block);
+        assert!(block.recovered_block().is_some());
 
         Ok(())
     }
@@ -1981,6 +2050,82 @@ mod tests {
                 .collect::<Vec<_>>()
         );
 
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod empty_receipt_range_tests {
+    use super::*;
+    use crate::{
+        providers::BlockchainProvider, test_utils::create_test_provider_factory, BlockWriter,
+        StageCheckpointWriter, StateWriter, StorageLocation,
+    };
+    use reth_stages_types::StageId;
+    use reth_testing_utils::generators::{self, random_block, random_receipt, BlockParams};
+    use revm::database::OriginalValuesKnown;
+
+    #[test]
+    fn get_state_preserves_empty_block_receipts() -> eyre::Result<()> {
+        let mut rng = generators::rng();
+        let factory = create_test_provider_factory();
+        let writer = factory.provider_rw()?;
+        let mut parent = B256::ZERO;
+        let mut expected = Vec::new();
+        let mut blocks = Vec::new();
+        for (number, tx_count) in [0, 0, 1, 0, 1, 0].into_iter().enumerate() {
+            let block = random_block(
+                &mut rng,
+                number as u64,
+                BlockParams {
+                    parent: Some(parent),
+                    tx_count: Some(tx_count),
+                    ..Default::default()
+                },
+            )
+            .try_recover()?;
+            parent = block.hash();
+            expected.push(
+                block
+                    .body()
+                    .transactions
+                    .iter()
+                    .map(|tx| random_receipt(&mut rng, tx, Some(0), Some(0)))
+                    .collect::<Vec<_>>(),
+            );
+            blocks.push(block);
+        }
+        // Insert as one batch so transaction indices advance across pending blocks; separate
+        // insert_block calls on one WriteBatch would each read the same committed tx counter.
+        writer.insert_blocks(blocks, StorageLocation::Database)?;
+        // State writes read body indices from a committed RocksDB snapshot.
+        writer.commit()?;
+        let writer = factory.provider_rw()?;
+        writer.write_state(
+            &ExecutionOutcome { first_block: 0, receipts: expected.clone(), ..Default::default() },
+            OriginalValuesKnown::No,
+            StorageLocation::Database,
+        )?;
+        writer.save_stage_checkpoint(StageId::Finish, StageCheckpoint::new(5))?;
+        writer.commit()?;
+        let provider = BlockchainProvider::new(factory)?;
+        assert_eq!(provider.block_body_indices(5)?.unwrap().next_tx_num(), 2);
+        assert!(provider.receipt(0)?.is_some());
+        for (number, receipts) in expected.iter().enumerate() {
+            let state = StateReader::get_state(&provider, number as u64)?.expect("persisted state");
+            assert_eq!(&state.receipts, &vec![receipts.clone()], "block {number}");
+        }
+        let state = provider.get_state(0..=5)?.expect("persisted range");
+        assert_eq!(state.receipts, expected);
+
+        // Empty ranges must not be converted into an inclusive range containing transaction zero.
+        assert!(provider.receipts_by_tx_range(0..0)?.is_empty());
+        assert!(provider.receipts_by_tx_range(..0)?.is_empty());
+        assert!(provider.receipts_by_tx_range(2..2)?.is_empty());
+        assert!(provider
+            .receipts_by_tx_range((Bound::Excluded(u64::MAX), Bound::Unbounded))?
+            .is_empty());
+        assert!(provider.headers_range(0..0)?.is_empty());
         Ok(())
     }
 }

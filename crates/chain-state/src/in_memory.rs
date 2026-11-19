@@ -10,7 +10,7 @@ use alloy_primitives::{map::B256Map, BlockNumber, TxHash, B256};
 use parking_lot::RwLock;
 use reth_chainspec::ChainInfo;
 use reth_ethereum_primitives::EthPrimitives;
-use reth_execution_types::{Chain, ExecutionOutcome};
+use reth_execution_types::{Chain, ExecutionOutcome, RecoveredBlockAndExecutionOutput};
 use reth_metrics::{metrics::Gauge, Metrics};
 use reth_primitives_traits::{
     BlockBody as _, IndexedTx, NodePrimitives, RecoveredBlock, SealedBlock, SealedHeader,
@@ -170,9 +170,6 @@ impl<N: NodePrimitives> CanonicalInMemoryStateInner<N> {
         self.in_memory_state.update_metrics();
     }
 }
-
-type PendingBlockAndReceipts<N> =
-    (RecoveredBlock<<N as NodePrimitives>::Block>, Vec<reth_primitives_traits::ReceiptTy<N>>);
 
 /// This type is responsible for providing the blocks, receipts, and state for
 /// all canonical blocks not on disk yet and keeps track of the block range that
@@ -492,20 +489,18 @@ impl<N: NodePrimitives> CanonicalInMemoryState<N> {
     }
 
     /// Returns the `RecoveredBlock` corresponding to the pending state.
-    pub fn pending_recovered_block(&self) -> Option<RecoveredBlock<N::Block>>
-    where
-        N::SignedTx: SignedTransaction,
-    {
-        self.pending_state().map(|block_state| block_state.block_ref().recovered_block().clone())
+    pub fn pending_recovered_block(&self) -> Option<Arc<RecoveredBlock<N::Block>>> {
+        self.pending_state().map(|block_state| Arc::clone(&block_state.block_ref().recovered_block))
     }
 
-    /// Returns a tuple with the `SealedBlock` corresponding to the pending
-    /// state and a vector of its `Receipt`s.
-    pub fn pending_block_and_receipts(&self) -> Option<PendingBlockAndReceipts<N>> {
+    /// Returns the pending recovered block and its execution output, which contains the receipts.
+    pub fn pending_block_and_receipts(
+        &self,
+    ) -> Option<RecoveredBlockAndExecutionOutput<N::Block, N::Receipt>> {
         self.pending_state().map(|block_state| {
-            (
-                block_state.block_ref().recovered_block().clone(),
-                block_state.executed_block_receipts(),
+            RecoveredBlockAndExecutionOutput::new(
+                Arc::clone(&block_state.block_ref().recovered_block),
+                Arc::clone(&block_state.block_ref().execution_output),
             )
         })
     }
@@ -742,6 +737,21 @@ impl<N: NodePrimitives> BlockState<N> {
     /// Finds a transaction by hash and returns it with its index and block context.
     pub fn find_indexed(&self, tx_hash: TxHash) -> Option<IndexedTx<'_, N::Block>> {
         self.block_ref().recovered_block().find_indexed(tx_hash)
+    }
+}
+
+// The derived drop recurses once per ancestor released here, which can overflow the stack on deep
+// in-memory chains, so detach parents in a loop instead.
+impl<N: NodePrimitives> Drop for BlockState<N> {
+    fn drop(&mut self) {
+        let mut parent = self.parent.take();
+        while let Some(state) = parent {
+            // A shared parent is left to its last owner, which continues the drain. Unlike
+            // `try_unwrap`, `into_inner` hands it to exactly one of several concurrent releasers.
+            let Some(mut state) = Arc::into_inner(state) else { break };
+            // Detach the next parent so dropping `state` here doesn't recurse.
+            parent = state.parent.take();
+        }
     }
 }
 
@@ -984,11 +994,19 @@ impl<N: NodePrimitives<SignedTx: SignedTransaction>> NewCanonicalChain<N> {
     /// Returns the new tip for [`Self::Reorg`] and [`Self::Commit`] variants which commit at least
     /// 1 new block.
     pub fn tip(&self) -> &RecoveredBlock<N::Block> {
+        self.new_blocks().last().expect("non empty blocks").recovered_block()
+    }
+
+    /// Blocks proposed for addition to the canonical chain.
+    pub fn new_blocks(&self) -> &[ExecutedBlockWithTrieUpdates<N>] {
         match self {
-            Self::Commit { new } | Self::Reorg { new, .. } => {
-                new.last().expect("non empty blocks").recovered_block()
-            }
+            Self::Commit { new } | Self::Reorg { new, .. } => new,
         }
+    }
+
+    /// Whether the proposed new branch contains the hash, excluding its unchanged prefix.
+    pub fn contains(&self, hash: B256) -> bool {
+        self.new_blocks().iter().any(|block| block.recovered_block().hash() == hash)
     }
 }
 
@@ -1105,7 +1123,10 @@ mod tests {
     }
 
     impl HashedPostStateProvider for MockStateProvider {
-        fn hashed_post_state(&self, _bundle_state: &revm_database::BundleState) -> HashedPostState {
+        fn hashed_post_state(
+            &self,
+            _bundle_state: &revm::database::BundleState,
+        ) -> HashedPostState {
             HashedPostState::default()
         }
     }
@@ -1349,13 +1370,13 @@ mod tests {
         );
 
         // Check the pending block with senders
-        assert_eq!(state.pending_recovered_block().unwrap(), block2.recovered_block().clone());
+        let pending_block = state.pending_recovered_block().unwrap();
+        assert!(Arc::ptr_eq(&pending_block, &block2.recovered_block));
 
         // Check the pending block and receipts
-        assert_eq!(
-            state.pending_block_and_receipts().unwrap(),
-            (block2.recovered_block().clone(), vec![])
-        );
+        let pending = state.pending_block_and_receipts().unwrap();
+        assert!(Arc::ptr_eq(pending.block(), &block2.recovered_block));
+        assert!(Arc::ptr_eq(pending.execution_output(), &block2.execution_output));
     }
 
     #[test]
@@ -1586,5 +1607,42 @@ mod tests {
                 ))
             }
         );
+    }
+    fn block_state_chain(depth: usize, mut parent: Option<Arc<BlockState>>) -> Arc<BlockState> {
+        let block = ExecutedBlockWithTrieUpdates {
+            block: ExecutedBlock::default(),
+            trie: ExecutedTrieUpdates::empty(),
+            triev2: Default::default(),
+        };
+        for _ in 0..depth {
+            parent = Some(Arc::new(BlockState::with_parent(block.clone(), parent)));
+        }
+        parent.expect("nonempty chain")
+    }
+
+    #[test]
+    fn deep_chain_drop_preserves_shared_tail() {
+        const DEPTH: usize = 100_000;
+
+        // A recursive drop of either chain would overflow this stack.
+        std::thread::Builder::new()
+            .stack_size(64 * 1024)
+            .spawn(|| {
+                let tail = block_state_chain(DEPTH, None);
+                let tail_payload = Arc::downgrade(&tail.block_ref().execution_output);
+                let head = block_state_chain(DEPTH, Some(tail.clone()));
+                let head_payload = Arc::downgrade(&head.block_ref().execution_output);
+
+                drop(head);
+                assert_eq!(head_payload.strong_count(), 0);
+                assert_eq!(Arc::strong_count(&tail), 1);
+                assert_eq!(tail_payload.strong_count(), DEPTH);
+
+                drop(tail);
+                assert_eq!(tail_payload.strong_count(), 0);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 }

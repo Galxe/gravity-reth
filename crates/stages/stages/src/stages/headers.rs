@@ -131,7 +131,7 @@ where
             let (_, header_buf) = header?;
 
             if index > 0 && index.is_multiple_of(interval) && total_headers > 100 {
-                info!(target: "sync::stages::headers", progress = %format!("{:.2}%", (index as f64 / total_headers as f64) * 100.0), "Writing headers");
+                info!(target: "sync::stages::headers", progress = %format_args!("{:.2}%", (index as f64 / total_headers as f64) * 100.0), "Writing headers");
             }
 
             let sealed_header: SealedHeader<Downloader::Header> = SealedHeader::new_unhashed(
@@ -175,7 +175,7 @@ where
             let (hash, number) = hash_to_number?;
 
             if index > 0 && index.is_multiple_of(interval) && total_headers > 100 {
-                info!(target: "sync::stages::headers", progress = %format!("{:.2}%", (index as f64 / total_headers as f64) * 100.0), "Writing headers hash index");
+                info!(target: "sync::stages::headers", progress = %format_args!("{:.2}%", (index as f64 / total_headers as f64) * 100.0), "Writing headers hash index");
             }
 
             if first_sync {
@@ -310,8 +310,10 @@ where
         self.hash_collector.clear();
         self.header_collector.clear();
 
-        Ok(ExecOutput {
-            checkpoint: StageCheckpoint::new(last_header_number).with_headers_stage_checkpoint(
+        // We only reach here if all headers have been downloaded by ETL, and pushed to DB all
+        // in one stage run.
+        Ok(ExecOutput::done(
+            StageCheckpoint::new(last_header_number).with_headers_stage_checkpoint(
                 HeadersCheckpoint {
                     block_range: CheckpointBlockRange {
                         from: input.checkpoint().block_number,
@@ -323,10 +325,7 @@ where
                     },
                 },
             ),
-            // We only reach here if all headers have been downloaded by ETL, and pushed to DB all
-            // in one stage run.
-            done: true,
-        })
+        ))
     }
 
     /// Unwind the stage.

@@ -113,7 +113,11 @@ pub struct AddOnsContext<'a, N: FullNodeComponents> {
     pub beacon_engine_handle: ConsensusEngineHandle<<N::Types as NodeTypes>::Payload>,
     /// Notification channel for engine API events
     pub engine_events: EventSender<ConsensusEngineEvent<<N::Types as NodeTypes>::Primitives>>,
+    /// Recovered senders shared by ingress, RPC and execution when enabled.
+    pub sender_recovery_cache: Option<reth_evm::SenderRecoveryCache>,
     /// JWT secret for the node.
+    ///
+    /// Random when the auth server is disabled; no secret file is read or created.
     pub jwt_secret: JwtSecret,
 }
 

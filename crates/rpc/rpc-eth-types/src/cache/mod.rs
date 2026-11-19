@@ -2,26 +2,31 @@
 
 use super::{EthStateCacheConfig, MultiConsumerLruCache};
 use crate::block::CachedTransaction;
-use alloy_consensus::{transaction::TxHashRef, BlockHeader};
+use alloy_consensus::transaction::TxHashRef;
 use alloy_eips::BlockHashOrNumber;
-use alloy_primitives::{TxHash, B256};
-use futures::{stream::FuturesOrdered, Stream, StreamExt};
+use alloy_primitives::{map::FbBuildHasher, TxHash, B256};
+use futures::{Stream, StreamExt};
 use reth_chain_state::CanonStateNotification;
 use reth_errors::{ProviderError, ProviderResult};
 use reth_execution_types::Chain;
+use reth_lru::LruMap;
 use reth_primitives_traits::{Block, BlockBody, NodePrimitives, RecoveredBlock};
 use reth_storage_api::{BlockReader, TransactionVariant};
 use reth_tasks::Runtime;
-use schnellru::{ByLength, Limiter, LruMap};
 use std::{
+    collections::VecDeque,
     future::Future,
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
+    time::Duration,
 };
-use tokio::sync::{
-    mpsc::{unbounded_channel, UnboundedSender},
-    oneshot, Semaphore,
+use tokio::{
+    sync::{
+        mpsc::{unbounded_channel, UnboundedSender},
+        oneshot, OwnedSemaphorePermit, Semaphore,
+    },
+    time::{Instant, Interval, MissedTickBehavior},
 };
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
@@ -42,22 +47,18 @@ type CachedBlockResponseSender<B> = oneshot::Sender<Option<Arc<RecoveredBlock<B>
 type CachedBlockAndReceiptsResponseSender<B, R> =
     oneshot::Sender<(Option<Arc<RecoveredBlock<B>>>, Option<Arc<Vec<R>>>)>;
 
-/// The type that can send the response to a requested header
-type HeaderResponseSender<H> = oneshot::Sender<ProviderResult<H>>;
-
-/// The type that can send the response with a chain of cached blocks
-type CachedParentBlocksResponseSender<B> = oneshot::Sender<Vec<Arc<RecoveredBlock<B>>>>;
-
 /// The type that can send the response for a transaction hash lookup
 type TransactionHashResponseSender<B, R> = oneshot::Sender<Option<CachedTransaction<B, R>>>;
 
-type BlockLruCache<B, L> =
-    MultiConsumerLruCache<B256, Arc<RecoveredBlock<B>>, L, BlockWithSendersResponseSender<B>>;
+type BlockLruCache<B> = MultiConsumerLruCache<
+    B256,
+    Arc<RecoveredBlock<B>>,
+    BlockWithSendersResponseSender<B>,
+    FbBuildHasher<32>,
+>;
 
-type ReceiptsLruCache<R, L> =
-    MultiConsumerLruCache<B256, Arc<Vec<R>>, L, ReceiptsResponseSender<R>>;
-
-type HeaderLruCache<H, L> = MultiConsumerLruCache<B256, H, L, HeaderResponseSender<H>>;
+type ReceiptsLruCache<R> =
+    MultiConsumerLruCache<B256, Arc<Vec<R>>, ReceiptsResponseSender<R>, FbBuildHasher<32>>;
 
 /// Provides async access to cached eth data
 ///
@@ -86,24 +87,36 @@ impl<N: NodePrimitives> EthStateCache<N> {
     {
         let EthStateCacheConfig {
             max_blocks,
+            max_blocks_bytes,
+            max_receipts_bytes,
+            idle_timeout,
             max_receipts,
-            max_headers,
             max_bals: _,
             max_concurrent_db_requests,
             max_cached_tx_hashes,
         } = config;
+        let eviction_interval = {
+            let _guard = action_task_spawner.handle().enter();
+            let period = (idle_timeout / 4).clamp(Duration::from_secs(1), Duration::from_secs(60));
+            let mut interval = tokio::time::interval_at(Instant::now() + period, period);
+            interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+            interval
+        };
         let (to_service, rx) = unbounded_channel();
 
         let service = EthStateCacheService {
             provider,
-            full_block_cache: BlockLruCache::new(max_blocks, "blocks"),
-            receipts_cache: ReceiptsLruCache::new(max_receipts, "receipts"),
-            headers_cache: HeaderLruCache::new(max_headers, "headers"),
+            idle_timeout,
+            eviction_interval,
+            eviction_pending: false,
+            full_block_cache: BlockLruCache::new(max_blocks, max_blocks_bytes, "blocks"),
+            receipts_cache: ReceiptsLruCache::new(max_receipts, max_receipts_bytes, "receipts"),
             action_tx: to_service.clone(),
             action_rx: UnboundedReceiverStream::new(rx),
             action_task_spawner,
             rate_limiter: Arc::new(Semaphore::new(max_concurrent_db_requests)),
-            tx_hash_index: LruMap::new(ByLength::new(max_cached_tx_hashes)),
+            pending_fetches: VecDeque::new(),
+            tx_hash_index: LruMap::with_hasher(max_cached_tx_hashes, Default::default()),
         };
         let cache = Self { to_service };
         (cache, service)
@@ -136,6 +149,16 @@ impl<N: NodePrimitives> EthStateCache<N> {
         let (response_tx, rx) = oneshot::channel();
         let _ = self.to_service.send(CacheAction::GetBlockWithSenders { block_hash, response_tx });
         rx.await.map_err(|_| CacheServiceUnavailable)?
+    }
+
+    /// Requests the block for the given block hash if it is cached.
+    pub async fn get_maybe_block(
+        &self,
+        block_hash: B256,
+    ) -> ProviderResult<Option<Arc<RecoveredBlock<N::Block>>>> {
+        let (response_tx, rx) = oneshot::channel();
+        let _ = self.to_service.send(CacheAction::GetCachedBlock { block_hash, response_tx });
+        rx.await.map_err(|_| CacheServiceUnavailable.into())
     }
 
     /// Requests the receipts for the block hash
@@ -191,57 +214,6 @@ impl<N: NodePrimitives> EthStateCache<N> {
         rx.await.map_err(|_| CacheServiceUnavailable.into())
     }
 
-    /// Streams cached receipts and blocks for a list of block hashes, preserving input order.
-    #[expect(clippy::type_complexity)]
-    pub fn get_receipts_and_maybe_block_stream<'a>(
-        &'a self,
-        hashes: Vec<B256>,
-    ) -> impl Stream<
-        Item = ProviderResult<
-            Option<(Arc<Vec<N::Receipt>>, Option<Arc<RecoveredBlock<N::Block>>>)>,
-        >,
-    > + 'a {
-        let futures = hashes.into_iter().map(move |hash| self.get_receipts_and_maybe_block(hash));
-
-        futures.collect::<FuturesOrdered<_>>()
-    }
-
-    /// Requests the header for the given hash.
-    ///
-    /// Returns an error if the header is not found.
-    pub async fn get_header(&self, block_hash: B256) -> ProviderResult<N::BlockHeader> {
-        let (response_tx, rx) = oneshot::channel();
-        let _ = self.to_service.send(CacheAction::GetHeader { block_hash, response_tx });
-        rx.await.map_err(|_| CacheServiceUnavailable)?
-    }
-
-    /// Retrieves a chain of connected blocks from the cache, starting from the given block hash
-    /// and traversing down through parent hashes. Returns blocks in descending order (newest
-    /// first).
-    /// This is useful for efficiently retrieving a sequence of blocks that might already be in
-    /// cache without making separate database requests.
-    /// Returns `None` if no blocks are found in the cache, otherwise returns `Some(Vec<...>)`
-    /// with at least one block.
-    pub async fn get_cached_parent_blocks(
-        &self,
-        block_hash: B256,
-        max_blocks: usize,
-    ) -> Option<Vec<Arc<RecoveredBlock<N::Block>>>> {
-        let (response_tx, rx) = oneshot::channel();
-        let _ = self.to_service.send(CacheAction::GetCachedParentBlocks {
-            block_hash,
-            max_blocks,
-            response_tx,
-        });
-
-        let blocks = rx.await.unwrap_or_default();
-        if blocks.is_empty() {
-            None
-        } else {
-            Some(blocks)
-        }
-    }
-
     /// Looks up a transaction by its hash in the cache index.
     ///
     /// Returns the cached block, transaction index, and optionally receipts if the transaction
@@ -283,29 +255,22 @@ impl From<CacheServiceUnavailable> for ProviderError {
 /// `reth_rpc::EthApi` which is typically invoked by the RPC server, which already uses
 /// permits to limit concurrent requests.
 #[must_use = "Type does nothing unless spawned"]
-pub(crate) struct EthStateCacheService<
-    Provider,
-    Tasks,
-    LimitBlocks = ByLength,
-    LimitReceipts = ByLength,
-    LimitHeaders = ByLength,
-> where
+pub(crate) struct EthStateCacheService<Provider, Tasks>
+where
     Provider: BlockReader,
-    LimitBlocks: Limiter<B256, Arc<RecoveredBlock<Provider::Block>>>,
-    LimitReceipts: Limiter<B256, Arc<Vec<Provider::Receipt>>>,
-    LimitHeaders: Limiter<B256, Provider::Header>,
 {
+    /// Timeout for unused cached payloads.
+    idle_timeout: Duration,
+    /// Periodic bounded eviction trigger.
+    eviction_interval: Interval,
+    /// Whether another bounded eviction batch remains.
+    eviction_pending: bool,
     /// The type used to lookup data from disk
     provider: Provider,
     /// The LRU cache for full blocks grouped by their block hash.
-    full_block_cache: BlockLruCache<Provider::Block, LimitBlocks>,
+    full_block_cache: BlockLruCache<Provider::Block>,
     /// The LRU cache for block receipts grouped by the block hash.
-    receipts_cache: ReceiptsLruCache<Provider::Receipt, LimitReceipts>,
-    /// The LRU cache for headers.
-    ///
-    /// Headers are cached because they are required to populate the environment for execution
-    /// (evm).
-    headers_cache: HeaderLruCache<Provider::Header, LimitHeaders>,
+    receipts_cache: ReceiptsLruCache<Provider::Receipt>,
     /// Sender half of the action channel.
     action_tx: UnboundedSender<CacheAction<Provider::Block, Provider::Receipt>>,
     /// Receiver half of the action channel.
@@ -316,19 +281,75 @@ pub(crate) struct EthStateCacheService<
     ///
     /// This restricts the max concurrent fetch tasks at the same time.
     rate_limiter: Arc<Semaphore>,
+    /// Cache misses waiting for a database request slot.
+    ///
+    /// A request is only moved to the blocking pool after it acquires a permit. This prevents
+    /// cache misses that are waiting for a slot from occupying Tokio blocking threads.
+    pending_fetches: VecDeque<CacheFetch>,
     /// LRU index mapping transaction hashes to their block hash and index within the block.
-    tx_hash_index: LruMap<TxHash, (B256, usize), ByLength>,
+    tx_hash_index: LruMap<TxHash, (B256, usize), FbBuildHasher<32>>,
 }
 
 impl<Provider> EthStateCacheService<Provider, Runtime>
 where
     Provider: BlockReader + Clone + Unpin + 'static,
 {
+    fn queue_fetch(&mut self, fetch: CacheFetch) {
+        if self.pending_fetches.is_empty() &&
+            let Ok(permit) = self.rate_limiter.clone().try_acquire_owned()
+        {
+            self.spawn_fetch(fetch, permit);
+            return
+        }
+        self.pending_fetches.push_back(fetch);
+        self.spawn_pending_fetches();
+    }
+
+    fn spawn_pending_fetches(&mut self) {
+        while let Some(fetch) = self.pending_fetches.pop_front() {
+            let Ok(permit) = self.rate_limiter.clone().try_acquire_owned() else {
+                self.pending_fetches.push_front(fetch);
+                return
+            };
+            self.spawn_fetch(fetch, permit);
+        }
+    }
+
+    fn spawn_fetch(&self, fetch: CacheFetch, permit: OwnedSemaphorePermit) {
+        let provider = self.provider.clone();
+        let action_tx = self.action_tx.clone();
+        match fetch {
+            CacheFetch::Block(block_hash) => {
+                let mut sender = ActionSender::new(CacheKind::Block, block_hash, action_tx);
+                self.action_task_spawner.spawn_blocking_task(async move {
+                    let result = provider
+                        .sealed_block_with_senders(
+                            BlockHashOrNumber::Hash(block_hash),
+                            TransactionVariant::WithHash,
+                        )
+                        .map(|block| block.map(Arc::new));
+                    drop(permit);
+                    sender.send_block(result);
+                });
+            }
+            CacheFetch::Receipts(block_hash) => {
+                let mut sender = ActionSender::new(CacheKind::Receipt, block_hash, action_tx);
+                self.action_task_spawner.spawn_blocking_task(async move {
+                    let result = provider
+                        .receipts_by_block(block_hash.into())
+                        .map(|receipts| receipts.map(Arc::new));
+                    drop(permit);
+                    sender.send_receipts(result);
+                });
+            }
+        }
+    }
+
     /// Indexes all transactions in a block by transaction hash.
     fn index_block_transactions(&mut self, block: &RecoveredBlock<Provider::Block>) {
         let block_hash = block.hash();
         for (tx_idx, tx) in block.body().transactions().iter().enumerate() {
-            self.tx_hash_index.insert(*tx.tx_hash(), (block_hash, tx_idx));
+            let _ = self.tx_hash_index.insert(*tx.tx_hash(), (block_hash, tx_idx));
         }
     }
 
@@ -401,27 +422,16 @@ where
         }
     }
 
-    fn on_reorg_header(&mut self, block_hash: B256, res: ProviderResult<Provider::Header>) {
-        if let Some(queued) = self.headers_cache.remove(&block_hash) {
-            // send the response to queued senders
-            for tx in queued {
-                let _ = tx.send(res.clone());
-            }
-        }
-    }
-
     /// Shrinks the queues but leaves some space for the next requests
     fn shrink_queues(&mut self) {
         let min_capacity = 2;
         self.full_block_cache.shrink_to(min_capacity);
         self.receipts_cache.shrink_to(min_capacity);
-        self.headers_cache.shrink_to(min_capacity);
     }
 
     fn update_cached_metrics(&mut self) {
         self.full_block_cache.update_cached_metrics();
         self.receipts_cache.update_cached_metrics();
-        self.headers_cache.update_cached_metrics();
     }
 }
 
@@ -433,6 +443,18 @@ where
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
+        if !this.idle_timeout.is_zero() &&
+            (this.eviction_pending || this.eviction_interval.poll_tick(cx).is_ready())
+        {
+            let now = Instant::now();
+            let blocks = this.full_block_cache.evict_expired(now, this.idle_timeout);
+            let receipts = this.receipts_cache.evict_expired(now, this.idle_timeout);
+            this.eviction_pending = blocks || receipts;
+            this.update_cached_metrics();
+            if this.eviction_pending {
+                cx.waker().wake_by_ref();
+            }
+        }
 
         loop {
             let Poll::Ready(action) = this.action_rx.poll_next_unpin(cx) else {
@@ -467,24 +489,7 @@ where
 
                             // block is not in the cache, request it if this is the first consumer
                             if this.full_block_cache.queue(block_hash, response_tx) {
-                                let provider = this.provider.clone();
-                                let action_tx = this.action_tx.clone();
-                                let rate_limiter = this.rate_limiter.clone();
-                                let mut action_sender =
-                                    ActionSender::new(CacheKind::Block, block_hash, action_tx);
-                                this.action_task_spawner.spawn_blocking_task(async move {
-                                    // Acquire permit
-                                    let _permit = rate_limiter.acquire().await;
-                                    // Only look in the database to prevent situations where we
-                                    // looking up the tree is blocking
-                                    let block_sender = provider
-                                        .sealed_block_with_senders(
-                                            BlockHashOrNumber::Hash(block_hash),
-                                            TransactionVariant::WithHash,
-                                        )
-                                        .map(|maybe_block| maybe_block.map(Arc::new));
-                                    action_sender.send_block(block_sender);
-                                });
+                                this.queue_fetch(CacheFetch::Block(block_hash));
                             }
                         }
                         CacheAction::GetReceipts { block_hash, response_tx } => {
@@ -496,53 +501,7 @@ where
 
                             // block is not in the cache, request it if this is the first consumer
                             if this.receipts_cache.queue(block_hash, response_tx) {
-                                let provider = this.provider.clone();
-                                let action_tx = this.action_tx.clone();
-                                let rate_limiter = this.rate_limiter.clone();
-                                let mut action_sender =
-                                    ActionSender::new(CacheKind::Receipt, block_hash, action_tx);
-                                this.action_task_spawner.spawn_blocking_task(async move {
-                                    // Acquire permit
-                                    let _permit = rate_limiter.acquire().await;
-                                    let res = provider
-                                        .receipts_by_block(block_hash.into())
-                                        .map(|maybe_receipts| maybe_receipts.map(Arc::new));
-
-                                    action_sender.send_receipts(res);
-                                });
-                            }
-                        }
-                        CacheAction::GetHeader { block_hash, response_tx } => {
-                            // check if the header is cached
-                            if let Some(header) = this.headers_cache.get(&block_hash).cloned() {
-                                let _ = response_tx.send(Ok(header));
-                                continue
-                            }
-
-                            // it's possible we have the entire block cached
-                            if let Some(block) = this.full_block_cache.get(&block_hash) {
-                                let _ = response_tx.send(Ok(block.clone_header()));
-                                continue
-                            }
-
-                            // header is not in the cache, request it if this is the first
-                            // consumer
-                            if this.headers_cache.queue(block_hash, response_tx) {
-                                let provider = this.provider.clone();
-                                let action_tx = this.action_tx.clone();
-                                let rate_limiter = this.rate_limiter.clone();
-                                let mut action_sender =
-                                    ActionSender::new(CacheKind::Header, block_hash, action_tx);
-                                this.action_task_spawner.spawn_blocking_task(async move {
-                                    // Acquire permit
-                                    let _permit = rate_limiter.acquire().await;
-                                    let header = provider.header(&block_hash).and_then(|header| {
-                                        header.ok_or_else(|| {
-                                            ProviderError::HeaderNotFound(block_hash.into())
-                                        })
-                                    });
-                                    action_sender.send_header(header);
-                                });
+                                this.queue_fetch(CacheFetch::Receipts(block_hash));
                             }
                         }
                         CacheAction::ReceiptsResult { block_hash, res } => {
@@ -559,20 +518,6 @@ where
                                 this.on_new_block(block_hash, Err(e));
                             }
                         },
-                        CacheAction::HeaderResult { block_hash, res } => {
-                            let res = *res;
-                            if let Some(queued) = this.headers_cache.remove(&block_hash) {
-                                // send the response to queued senders
-                                for tx in queued {
-                                    let _ = tx.send(res.clone());
-                                }
-                            }
-
-                            // cache good header
-                            if let Ok(data) = res {
-                                this.headers_cache.insert(block_hash, data);
-                            }
-                        }
                         CacheAction::CacheNewCanonicalChain { chain_change } => {
                             for block in chain_change.blocks {
                                 // Index transactions before caching the block
@@ -590,11 +535,9 @@ where
                         CacheAction::RemoveReorgedChain { chain_change } => {
                             for block in chain_change.blocks {
                                 let block_hash = block.hash();
-                                let header = block.clone_header();
                                 // Remove transaction index entries for reorged blocks
                                 this.remove_block_transactions(&block);
                                 this.on_reorg_block(block_hash, Ok(Some(block)));
-                                this.on_reorg_header(block_hash, Ok(header));
                             }
 
                             for block_receipts in chain_change.receipts {
@@ -603,30 +546,6 @@ where
                                     Ok(Some(block_receipts.receipts)),
                                 );
                             }
-                        }
-                        CacheAction::GetCachedParentBlocks {
-                            block_hash,
-                            max_blocks,
-                            response_tx,
-                        } => {
-                            let mut blocks = Vec::new();
-                            let mut current_hash = block_hash;
-
-                            // Start with the requested block
-                            while blocks.len() < max_blocks {
-                                if let Some(block) =
-                                    this.full_block_cache.get(&current_hash).cloned()
-                                {
-                                    // Get the parent hash for the next iteration
-                                    current_hash = block.header().parent_hash();
-                                    blocks.push(block);
-                                } else {
-                                    // Break the loop if we can't find the current block
-                                    break;
-                                }
-                            }
-
-                            let _ = response_tx.send(blocks);
                         }
                         CacheAction::GetTransactionByHash { tx_hash, response_tx } => {
                             let result =
@@ -638,6 +557,7 @@ where
                             let _ = response_tx.send(result);
                         }
                     };
+                    this.spawn_pending_fetches();
                 }
             }
         }
@@ -649,10 +569,6 @@ enum CacheAction<B: Block, R> {
     GetBlockWithSenders {
         block_hash: B256,
         response_tx: BlockWithSendersResponseSender<B>,
-    },
-    GetHeader {
-        block_hash: B256,
-        response_tx: HeaderResponseSender<B::Header>,
     },
     GetReceipts {
         block_hash: B256,
@@ -674,20 +590,11 @@ enum CacheAction<B: Block, R> {
         block_hash: B256,
         res: ProviderResult<Option<Arc<Vec<R>>>>,
     },
-    HeaderResult {
-        block_hash: B256,
-        res: Box<ProviderResult<B::Header>>,
-    },
     CacheNewCanonicalChain {
         chain_change: ChainChange<B, R>,
     },
     RemoveReorgedChain {
         chain_change: ChainChange<B, R>,
-    },
-    GetCachedParentBlocks {
-        block_hash: B256,
-        max_blocks: usize,
-        response_tx: CachedParentBlocksResponseSender<B>,
     },
     /// Look up a transaction's cached data by its hash
     GetTransactionByHash {
@@ -731,7 +638,12 @@ impl<B: Block, R: Clone> ChainChange<B, R> {
 enum CacheKind {
     Block,
     Receipt,
-    Header,
+}
+
+#[derive(Copy, Clone, Debug)]
+enum CacheFetch {
+    Block(B256),
+    Receipts(B256),
 }
 
 /// Drop aware sender struct that ensures a response is always emitted even if the db task panics
@@ -765,15 +677,6 @@ impl<R: Send + Sync, B: Block> ActionSender<B, R> {
                 tx.send(CacheAction::ReceiptsResult { block_hash: self.blockhash, res: receipts });
         }
     }
-
-    fn send_header(&mut self, header: Result<<B as Block>::Header, ProviderError>) {
-        if let Some(tx) = self.tx.take() {
-            let _ = tx.send(CacheAction::HeaderResult {
-                block_hash: self.blockhash,
-                res: Box::new(header),
-            });
-        }
-    }
 }
 impl<R: Send + Sync, B: Block> Drop for ActionSender<B, R> {
     fn drop(&mut self) {
@@ -786,10 +689,6 @@ impl<R: Send + Sync, B: Block> Drop for ActionSender<B, R> {
                 CacheKind::Receipt => CacheAction::ReceiptsResult {
                     block_hash: self.blockhash,
                     res: Err(CacheServiceUnavailable.into()),
-                },
-                CacheKind::Header => CacheAction::HeaderResult {
-                    block_hash: self.blockhash,
-                    res: Box::new(Err(CacheServiceUnavailable.into())),
                 },
             };
             let _ = tx.send(msg);
@@ -840,10 +739,10 @@ mod tests {
             EthStateCacheConfig {
                 max_blocks: 4,
                 max_receipts: 4,
-                max_headers: 4,
                 max_bals: 4,
                 max_concurrent_db_requests: 1,
                 max_cached_tx_hashes: 16,
+                ..Default::default()
             },
         );
         service
@@ -865,36 +764,23 @@ mod tests {
         )
     }
 
-    #[test]
-    fn reorg_evicts_cached_headers() {
+    #[tokio::test(start_paused = true)]
+    async fn periodic_eviction_runs_without_requests() {
         let mut service = test_service();
-        let block_hash = B256::repeat_byte(0x11);
-
-        assert!(service
-            .headers_cache
-            .insert(block_hash, Header { number: 42, ..Default::default() }));
-        assert!(service.headers_cache.get(&block_hash).is_some());
-
-        service.on_reorg_header(block_hash, Ok(Header { number: 7, ..Default::default() }));
-
-        assert!(service.headers_cache.get(&block_hash).is_none());
-    }
-
-    #[test]
-    fn reorg_forwards_header_to_queued_requests() {
-        let mut service = test_service();
-        let block_hash = B256::repeat_byte(0x22);
-        let (response_tx, mut response_rx) = oneshot::channel();
-        let header = Header { number: 7, ..Default::default() };
-
-        assert!(service.headers_cache.queue(block_hash, response_tx));
-
-        service.on_reorg_header(block_hash, Ok(header));
-
-        let header =
-            response_rx.try_recv().expect("queued header response").expect("header result");
-
-        assert_eq!(header.number, 7);
+        service.idle_timeout = Duration::from_secs(2);
+        service.eviction_interval = tokio::time::interval_at(
+            Instant::now() + Duration::from_secs(1),
+            Duration::from_secs(1),
+        );
+        let hash = B256::repeat_byte(0x44);
+        service.on_new_block(hash, Ok(Some(Arc::new(test_block()))));
+        service.on_new_receipts(hash, Ok(Some(Arc::new(Vec::new()))));
+        tokio::time::advance(Duration::from_secs(3)).await;
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(Pin::new(&mut service).poll(&mut cx).is_pending());
+        assert!(service.full_block_cache.get(&hash).is_none());
+        assert!(service.receipts_cache.get(&hash).is_none());
     }
 
     #[test]
@@ -903,10 +789,40 @@ mod tests {
         let block = test_block();
         let tx_hash = *block.body().transactions().next().expect("test transaction").tx_hash();
 
-        service.tx_hash_index.insert(tx_hash, (B256::repeat_byte(0x33), 0));
+        let _ = service.tx_hash_index.insert(tx_hash, (B256::repeat_byte(0x33), 0));
 
         service.remove_block_transactions(&block);
 
         assert!(service.tx_hash_index.get(&tx_hash).is_none());
+    }
+    #[test]
+    fn queued_cache_misses_do_not_starve_blocking_work() {
+        let test = std::thread::spawn(|| {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .max_blocking_threads(1)
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let (_cache, mut service) = EthStateCache::<EthPrimitives>::create(
+                    NoopProvider::default(),
+                    Runtime::test(),
+                    EthStateCacheConfig { max_concurrent_db_requests: 1, ..Default::default() },
+                );
+                let permit = service.rate_limiter.clone().try_acquire_owned().unwrap();
+                service.queue_fetch(CacheFetch::Block(B256::repeat_byte(1)));
+                service.queue_fetch(CacheFetch::Receipts(B256::repeat_byte(2)));
+                assert_eq!(service.pending_fetches.len(), 2);
+                assert!(matches!(service.pending_fetches.front(), Some(CacheFetch::Block(_))));
+                assert!(matches!(service.pending_fetches.back(), Some(CacheFetch::Receipts(_))));
+                let (tx, rx) = std::sync::mpsc::sync_channel(1);
+                tokio::task::spawn_blocking(move || tx.send(()).unwrap());
+                rx.recv_timeout(Duration::from_secs(1))
+                    .expect("queued cache misses must not occupy the blocking worker");
+                drop(permit);
+            });
+        });
+        test.join().unwrap();
     }
 }

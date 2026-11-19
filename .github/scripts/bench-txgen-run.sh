@@ -196,11 +196,16 @@ cleanup() {
     sleep 1
   fi
   sudo systemctl reset-failed "$RETH_SCOPE" 2>/dev/null || true
+  if [ -n "$TEMP_JWT_SECRET" ]; then
+    rm -f -- "$TEMP_JWT_SECRET"
+  fi
   sudo chown -R "$(id -un):$(id -gn)" "$OUTPUT_DIR" 2>/dev/null || true
   sudo schelk recover -y --kill || true
 }
 TAIL_PID=
 TRACY_PID=
+JWT_SECRET=
+TEMP_JWT_SECRET=
 trap cleanup EXIT
 
 sudo systemctl stop "$RETH_SCOPE" 2>/dev/null || true
@@ -241,6 +246,10 @@ RETH_ARGS=(
   --no-persist-peers
 )
 
+if [ -n "${BENCH_REORG:-}" ]; then
+  RETH_ARGS+=(--testing.skip-invalid-transactions)
+fi
+
 SYNC_STATE_IDLE=false
 if "$BINARY" node --help 2>/dev/null | grep -qF -- '--debug.startup-sync-state-idle'; then
   RETH_ARGS+=(--debug.startup-sync-state-idle)
@@ -255,6 +264,33 @@ esac
 if [ -n "$EXTRA_NODE_ARGS" ]; then
   # shellcheck disable=SC2206
   RETH_ARGS+=($EXTRA_NODE_ARGS)
+fi
+
+# Share a readable secret with the root-owned node and this user's benchmark client.
+# Preserve an explicitly supplied node secret and remove only a temporary file we create.
+EXPLICIT_JWT_SECRET=false
+for ((ARG_INDEX = 0; ARG_INDEX < ${#RETH_ARGS[@]}; ARG_INDEX++)); do
+  case "${RETH_ARGS[$ARG_INDEX]}" in
+    --authrpc.jwtsecret)
+      EXPLICIT_JWT_SECRET=true
+      JWT_SECRET="${RETH_ARGS[$((ARG_INDEX + 1))]:-}"
+      ;;
+    --authrpc.jwtsecret=*)
+      EXPLICIT_JWT_SECRET=true
+      JWT_SECRET="${RETH_ARGS[$ARG_INDEX]#*=}"
+      ;;
+  esac
+done
+if [ "$EXPLICIT_JWT_SECRET" = true ]; then
+  if [ -z "$JWT_SECRET" ] || [ ! -r "$JWT_SECRET" ]; then
+    echo "::error::The explicitly configured Engine JWT secret must be readable by the benchmark client"
+    exit 1
+  fi
+else
+  TEMP_JWT_SECRET="$(mktemp)"
+  JWT_SECRET="$TEMP_JWT_SECRET"
+  od -An -N32 -tx1 /dev/urandom | tr -d ' \n' > "$JWT_SECRET"
+  RETH_ARGS+=(--authrpc.jwtsecret "$JWT_SECRET")
 fi
 
 if [ -n "${BENCH_METRICS_ADDR:-}" ]; then
@@ -455,7 +491,7 @@ if [ "$WARMUP" -gt 0 ] 2>/dev/null; then
   echo "Running txgen warmup (${WARMUP} blocks)..."
   $BENCH_NICE "$TXGEN_BENCH" send-blocks \
     --engine http://127.0.0.1:8551 \
-    --jwt-secret "$DATADIR/jwt.hex" \
+    --jwt-secret "$JWT_SECRET" \
     --input "$WARMUP_BLOCKS" \
     "${TXGEN_SEND_ARGS[@]}" \
     --wait-for-persistence never \
@@ -523,7 +559,7 @@ fi
 echo "Running txgen measured benchmark (${BLOCKS} blocks)..."
 $BENCH_NICE "$TXGEN_BENCH" send-blocks \
   --engine http://127.0.0.1:8551 \
-  --jwt-secret "$DATADIR/jwt.hex" \
+  --jwt-secret "$JWT_SECRET" \
   --input "$BENCHMARK_BLOCKS" \
   "${TXGEN_SEND_ARGS[@]}" \
   "${METRICS_ARGS[@]}" \

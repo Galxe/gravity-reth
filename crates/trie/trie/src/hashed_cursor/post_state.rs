@@ -144,6 +144,10 @@ where
     /// The returned account key is memoized and the cursor remains positioned at that key until
     /// [`HashedCursor::seek`] or [`HashedCursor::next`] are called.
     fn seek(&mut self, key: B256) -> Result<Option<(B256, Self::Value)>, DatabaseError> {
+        // The database seek repositions freely, while the overlay cursor only advances.
+        if self.last_account.is_none_or(|last| key < last) {
+            self.post_state_cursor.reset();
+        }
         // Find the closes account.
         let entry = self.seek_inner(key)?;
         self.last_account = entry.as_ref().map(|entry| entry.0);
@@ -281,6 +285,11 @@ where
 
     /// Seek the next account storage entry for a given hashed key pair.
     fn seek(&mut self, subkey: B256) -> Result<Option<(B256, Self::Value)>, DatabaseError> {
+        if self.last_slot.is_none_or(|last| subkey < last) &&
+            let Some(cursor) = &mut self.post_state_cursor
+        {
+            cursor.reset();
+        }
         let entry = self.seek_inner(subkey)?;
         self.last_slot = entry.as_ref().map(|entry| entry.0);
         Ok(entry)
@@ -320,5 +329,65 @@ where
             None => self.cursor.is_storage_empty()?,
         };
         Ok(is_empty)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hashed_cursor::mock::MockHashedCursorFactory;
+    use alloy_primitives::map::B256Map;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn account_overlay_rewinds_after_backward_and_exhausted_seeks() {
+        let [a, b, c] = [1, 2, 3].map(B256::repeat_byte);
+        let old = Account { nonce: 1, ..Default::default() };
+        let new = Account { nonce: 2, ..Default::default() };
+        let factory = MockHashedCursorFactory::new(
+            BTreeMap::from([(a, old), (b, old), (c, old)]),
+            B256Map::default(),
+        );
+        let overlay = HashedAccountsSorted {
+            accounts: vec![(a, new), (c, new)],
+            destroyed_accounts: B256Set::from_iter([b]),
+        };
+        let mut cursor =
+            HashedPostStateAccountCursor::new(factory.hashed_account_cursor().unwrap(), &overlay);
+        assert_eq!(cursor.seek(c).unwrap(), Some((c, new)));
+        assert_eq!(cursor.seek(a).unwrap(), Some((a, new)));
+        assert_eq!(cursor.seek(b).unwrap(), Some((c, new)));
+        assert_eq!(cursor.seek(B256::repeat_byte(0xff)).unwrap(), None);
+        assert_eq!(cursor.seek(a).unwrap(), Some((a, new)));
+        assert_eq!(cursor.next().unwrap(), Some((c, new)));
+    }
+
+    #[test]
+    fn storage_overlay_rewinds_and_keeps_deletions() {
+        let [a, b, c] = [1, 2, 3].map(B256::repeat_byte);
+        let factory = MockHashedCursorFactory::new(
+            BTreeMap::new(),
+            B256Map::from_iter([(
+                B256::ZERO,
+                BTreeMap::from([(a, U256::from(1)), (b, U256::from(2)), (c, U256::from(3))]),
+            )]),
+        );
+        for wiped in [false, true] {
+            let overlay = HashedStorageSorted {
+                non_zero_valued_slots: vec![(a, U256::from(10)), (c, U256::from(30))],
+                zero_valued_slots: B256Set::from_iter([b]),
+                wiped,
+            };
+            let mut cursor = HashedPostStateStorageCursor::new(
+                factory.hashed_storage_cursor(B256::ZERO).unwrap(),
+                Some(&overlay),
+            );
+            assert_eq!(cursor.seek(c).unwrap(), Some((c, U256::from(30))));
+            assert_eq!(cursor.seek(a).unwrap(), Some((a, U256::from(10))));
+            assert_eq!(cursor.seek(b).unwrap(), Some((c, U256::from(30))));
+            assert_eq!(cursor.seek(B256::repeat_byte(0xff)).unwrap(), None);
+            assert_eq!(cursor.seek(a).unwrap(), Some((a, U256::from(10))));
+            assert_eq!(cursor.next().unwrap(), Some((c, U256::from(30))));
+        }
     }
 }

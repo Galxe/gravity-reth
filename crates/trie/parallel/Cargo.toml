@@ -12,6 +12,7 @@ description = "Parallel implementation of merkle root algorithm"
 workspace = true
 
 [dependencies]
+revm.workspace = true
 # reth
 reth-db-api.workspace = true
 reth-execution-errors.workspace = true
@@ -25,11 +26,9 @@ reth-trie.workspace = true
 # alloy
 alloy-rlp.workspace = true
 alloy-primitives.workspace = true
-alloy-eip7928.workspace = true
 alloy-evm.workspace = true
 
 # revm
-revm-state.workspace = true
 
 # tracing
 tracing.workspace = true

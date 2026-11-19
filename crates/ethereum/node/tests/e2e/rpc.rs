@@ -12,7 +12,7 @@ use alloy_rpc_types_engine::{BlobsBundleV1, ExecutionPayloadV3};
 use alloy_rpc_types_eth::TransactionRequest;
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use reth_chainspec::{ChainSpecBuilder, EthChainSpec, MAINNET};
-use reth_e2e_test_utils::setup_engine;
+use reth_e2e_test_utils::{setup_engine, E2ETestSetupBuilder};
 use reth_network::{types::NatResolver, PeersInfo};
 use reth_node_builder::{NodeBuilder, NodeHandle};
 use reth_node_core::{
@@ -212,6 +212,72 @@ async fn test_flashbots_validate_v3() -> eyre::Result<()> {
         .raw_request::<_, ()>("flashbots_validateBuilderSubmissionV3".into(), (&request,))
         .await
         .is_err());
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_flashbots_validate_uses_shared_sender_recovery_cache() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let chain_spec = Arc::new(
+        ChainSpecBuilder::default()
+            .chain(MAINNET.chain)
+            .genesis(serde_json::from_str(include_str!("../assets/genesis.json")).unwrap())
+            .cancun_activated()
+            .build(),
+    );
+
+    let (mut nodes, wallet) =
+        E2ETestSetupBuilder::<EthereumNode, _>::new(1, chain_spec, eth_payload_attributes)
+            .with_node_config_modifier(|mut config| {
+                config.engine.sender_recovery_cache_enabled = true;
+                config
+            })
+            .build()
+            .await?;
+    let mut node = nodes.pop().unwrap();
+    let cache = node.inner.evm_config.sender_recovery_cache.clone().expect("cache is enabled");
+
+    let signer = wallet.wallet_gen().swap_remove(0);
+    let sender = signer.address();
+    let provider =
+        ProviderBuilder::new().wallet(EthereumWallet::new(signer)).connect_http(node.rpc_url());
+
+    let tx_hash = *provider
+        .send_transaction(TransactionRequest::default().to(Address::ZERO))
+        .await?
+        .tx_hash();
+    // Transaction ingress has already recovered the sender through the shared cache.
+    let payload = node.new_payload().await?;
+    assert!(payload.block().body().transactions.iter().any(|tx| *tx.tx_hash() == tx_hash));
+    assert_eq!(cache.get(&tx_hash), Some(sender));
+
+    let request = BuilderBlockValidationRequestV3 {
+        request: SignedBidSubmissionV3 {
+            message: BidTrace {
+                parent_hash: payload.block().parent_hash,
+                block_hash: payload.block().hash(),
+                gas_used: payload.block().gas_used,
+                gas_limit: payload.block().gas_limit,
+                ..Default::default()
+            },
+            execution_payload: ExecutionPayloadV3::from_block_unchecked(
+                payload.block().hash(),
+                &payload.block().clone().into_block(),
+            ),
+            blobs_bundle: BlobsBundleV1::new([]),
+            signature: Default::default(),
+        },
+        parent_beacon_block_root: payload.block().parent_beacon_block_root.unwrap(),
+        registered_gas_limit: payload.block().gas_limit,
+    };
+
+    provider
+        .raw_request::<_, ()>("flashbots_validateBuilderSubmissionV3".into(), (&request,))
+        .await?;
+    // Validation accepts the submission while reusing the sender cached by transaction ingress.
+    assert_eq!(cache.get(&tx_hash), Some(sender));
+
     Ok(())
 }
 
@@ -461,6 +527,38 @@ async fn test_admin_external_ip() -> eyre::Result<()> {
     let info = api.node_info().await.unwrap();
 
     assert_eq!(info.ip, external_ip);
+
+    Ok(())
+}
+
+// <https://github.com/paradigmxyz/reth/issues/27867>
+#[tokio::test]
+async fn test_disable_auth_server_skips_jwt_secret() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let missing_dir = tempfile::tempdir()?;
+    let missing = missing_dir.path().join("missing-jwt.hex");
+    for auth_jwtsecret in [None, Some(missing.clone())] {
+        let mut rpc = RpcServerArgs::default().with_unused_ports();
+        rpc.disable_auth_server = true;
+        rpc.auth_jwtsecret = auth_jwtsecret;
+        let node_config = NodeConfig::test()
+            .with_chain(Arc::new(
+                ChainSpecBuilder::default()
+                    .chain(MAINNET.chain)
+                    .genesis(serde_json::from_str(include_str!("../assets/genesis.json")).unwrap())
+                    .build(),
+            ))
+            .with_unused_ports()
+            .with_rpc(rpc);
+        let NodeHandle { node, node_exit_future: _ } = NodeBuilder::new(node_config)
+            .testing_node(Runtime::test())
+            .node(EthereumNode::default())
+            .launch()
+            .await?;
+        assert!(!node.data_dir.jwt().exists());
+    }
+    assert!(!missing.exists());
 
     Ok(())
 }

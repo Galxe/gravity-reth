@@ -68,8 +68,10 @@ use reth_ethereum_primitives::TransactionSigned;
 use reth_evm::ParallelDatabase;
 use reth_evm_ethereum::revm_spec_by_timestamp_and_block_number;
 use reth_primitives_traits::constants::GRAVITY_TX_GAS_LIMIT_CAP;
-use revm::state::AccountInfo;
-use revm_primitives::{eip3860::MAX_INITCODE_SIZE, hardfork::SpecId};
+use revm::{
+    primitives::{eip3860::MAX_INITCODE_SIZE, hardfork::SpecId},
+    state::AccountInfo,
+};
 use tracing::info;
 
 /// Return the discarded transaction indexes (not included in the block body).
@@ -302,7 +304,7 @@ pub(crate) fn filter_invalid_txs<DB: ParallelDatabase>(
         // Mirror reth pool's `ensure_intrinsic_gas` so non-pool-injected txs (e.g. consensus-side
         // mempool) cannot reach grevm with `gas_limit < initial_gas` and panic the executor.
         let access_list = tx.access_list();
-        let intrinsic = revm_interpreter::gas::calculate_initial_tx_gas(
+        let intrinsic = revm::interpreter::gas::calculate_initial_tx_gas(
             spec_id,
             tx.input(),
             tx.is_create(),

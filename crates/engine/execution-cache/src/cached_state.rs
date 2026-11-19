@@ -104,6 +104,9 @@ pub struct CachedStateProvider<S> {
     /// Metrics for the cached state provider.
     metrics: Option<CachedStateMetrics>,
 
+    /// Provider-local hit/miss counters flushed when the provider is dropped.
+    metric_counts: CacheMetricCounts,
+
     /// Whether cache misses should populate the shared execution cache.
     fill_mode: CacheFillMode,
 
@@ -139,65 +142,84 @@ impl<S> CachedStateProvider<S> {
         metrics: Option<CachedStateMetrics>,
         cache_stats: Option<Arc<CacheStats>>,
     ) -> Self {
-        Self { state_provider, caches, metrics, fill_mode, cache_stats }
+        Self {
+            state_provider,
+            caches,
+            metrics,
+            metric_counts: CacheMetricCounts::new(),
+            fill_mode,
+            cache_stats,
+        }
     }
 
     fn record_account_hit(&self) {
-        if let Some(metrics) = &self.metrics {
-            metrics.account_cache_hits.increment(1);
-        }
+        self.record_metric(CacheMetricKind::AccountHit);
         if let Some(stats) = &self.cache_stats {
             stats.record_account_hit();
         }
     }
 
     fn record_account_miss(&self) {
-        if let Some(metrics) = &self.metrics {
-            metrics.account_cache_misses.increment(1);
-        }
+        self.record_metric(CacheMetricKind::AccountMiss);
         if let Some(stats) = &self.cache_stats {
             stats.record_account_miss();
         }
     }
 
     fn record_storage_hit(&self) {
-        if let Some(metrics) = &self.metrics {
-            metrics.storage_cache_hits.increment(1);
-        }
+        self.record_metric(CacheMetricKind::StorageHit);
         if let Some(stats) = &self.cache_stats {
             stats.record_storage_hit();
         }
     }
 
     fn record_storage_miss(&self) {
-        if let Some(metrics) = &self.metrics {
-            metrics.storage_cache_misses.increment(1);
-        }
+        self.record_metric(CacheMetricKind::StorageMiss);
         if let Some(stats) = &self.cache_stats {
             stats.record_storage_miss();
         }
     }
 
     fn record_code_hit(&self) {
-        if let Some(metrics) = &self.metrics {
-            metrics.code_cache_hits.increment(1);
-        }
+        self.record_metric(CacheMetricKind::CodeHit);
         if let Some(stats) = &self.cache_stats {
             stats.record_code_hit();
         }
     }
 
     fn record_code_miss(&self) {
-        if let Some(metrics) = &self.metrics {
-            metrics.code_cache_misses.increment(1);
-        }
+        self.record_metric(CacheMetricKind::CodeMiss);
         if let Some(stats) = &self.cache_stats {
             stats.record_code_miss();
         }
     }
 
+    #[inline]
+    fn record_metric(&self, kind: CacheMetricKind) {
+        if self.metrics.is_some() {
+            self.metric_counts.record(kind);
+        }
+    }
+
+    fn flush_buffered_metrics(&self) {
+        let counts = self.metric_counts.take();
+        if counts.is_empty() {
+            return;
+        }
+
+        if let Some(metrics) = &self.metrics {
+            metrics.record_access_counts(counts);
+        }
+    }
+
     const fn should_fill_on_miss(&self) -> bool {
         matches!(self.fill_mode, CacheFillMode::FillOnMiss)
+    }
+}
+
+impl<S> Drop for CachedStateProvider<S> {
+    fn drop(&mut self) {
+        self.flush_buffered_metrics();
     }
 }
 
@@ -208,6 +230,85 @@ pub enum CacheFillMode {
     LookupOnly,
     /// Insert values loaded from the underlying provider.
     FillOnMiss,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CacheMetricKind {
+    AccountHit,
+    AccountMiss,
+    StorageHit,
+    StorageMiss,
+    CodeHit,
+    CodeMiss,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct CacheMetricSnapshot {
+    account_hits: u64,
+    account_misses: u64,
+    storage_hits: u64,
+    storage_misses: u64,
+    code_hits: u64,
+    code_misses: u64,
+}
+
+impl CacheMetricSnapshot {
+    const fn is_empty(&self) -> bool {
+        self.account_hits == 0 &&
+            self.account_misses == 0 &&
+            self.storage_hits == 0 &&
+            self.storage_misses == 0 &&
+            self.code_hits == 0 &&
+            self.code_misses == 0
+    }
+}
+
+// StateProvider is Sync; keep the buffered counters safe for shared provider reads.
+#[derive(Debug, Default)]
+struct CacheMetricCounts {
+    account_hits: AtomicU64,
+    account_misses: AtomicU64,
+    storage_hits: AtomicU64,
+    storage_misses: AtomicU64,
+    code_hits: AtomicU64,
+    code_misses: AtomicU64,
+}
+
+impl CacheMetricCounts {
+    const fn new() -> Self {
+        Self {
+            account_hits: AtomicU64::new(0),
+            account_misses: AtomicU64::new(0),
+            storage_hits: AtomicU64::new(0),
+            storage_misses: AtomicU64::new(0),
+            code_hits: AtomicU64::new(0),
+            code_misses: AtomicU64::new(0),
+        }
+    }
+
+    #[inline]
+    fn record(&self, kind: CacheMetricKind) {
+        let counter = match kind {
+            CacheMetricKind::AccountHit => &self.account_hits,
+            CacheMetricKind::AccountMiss => &self.account_misses,
+            CacheMetricKind::StorageHit => &self.storage_hits,
+            CacheMetricKind::StorageMiss => &self.storage_misses,
+            CacheMetricKind::CodeHit => &self.code_hits,
+            CacheMetricKind::CodeMiss => &self.code_misses,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn take(&self) -> CacheMetricSnapshot {
+        CacheMetricSnapshot {
+            account_hits: self.account_hits.swap(0, Ordering::Relaxed),
+            account_misses: self.account_misses.swap(0, Ordering::Relaxed),
+            storage_hits: self.storage_hits.swap(0, Ordering::Relaxed),
+            storage_misses: self.storage_misses.swap(0, Ordering::Relaxed),
+            code_hits: self.code_hits.swap(0, Ordering::Relaxed),
+            code_misses: self.code_misses.swap(0, Ordering::Relaxed),
+        }
+    }
 }
 
 /// Represents the status of a key in the cache.
@@ -325,6 +426,38 @@ impl CachedStateMetrics {
         let zeroed = Self::new_with_labels(&[("source", source.to_string())]);
         zeroed.reset();
         zeroed
+    }
+
+    fn record_access(&self, kind: CacheMetricKind, count: u64) {
+        match kind {
+            CacheMetricKind::AccountHit => self.account_cache_hits.increment(count as f64),
+            CacheMetricKind::AccountMiss => self.account_cache_misses.increment(count as f64),
+            CacheMetricKind::StorageHit => self.storage_cache_hits.increment(count as f64),
+            CacheMetricKind::StorageMiss => self.storage_cache_misses.increment(count as f64),
+            CacheMetricKind::CodeHit => self.code_cache_hits.increment(count as f64),
+            CacheMetricKind::CodeMiss => self.code_cache_misses.increment(count as f64),
+        }
+    }
+
+    fn record_access_counts(&self, counts: CacheMetricSnapshot) {
+        if counts.account_hits != 0 {
+            self.record_access(CacheMetricKind::AccountHit, counts.account_hits);
+        }
+        if counts.account_misses != 0 {
+            self.record_access(CacheMetricKind::AccountMiss, counts.account_misses);
+        }
+        if counts.storage_hits != 0 {
+            self.record_access(CacheMetricKind::StorageHit, counts.storage_hits);
+        }
+        if counts.storage_misses != 0 {
+            self.record_access(CacheMetricKind::StorageMiss, counts.storage_misses);
+        }
+        if counts.code_hits != 0 {
+            self.record_access(CacheMetricKind::CodeHit, counts.code_hits);
+        }
+        if counts.code_misses != 0 {
+            self.record_access(CacheMetricKind::CodeMiss, counts.code_misses);
+        }
     }
 
     /// Records a new execution cache creation with its duration.
@@ -776,6 +909,11 @@ impl ExecutionCache {
         }))
     }
 
+    /// Returns the number of active handles to the shared cache.
+    fn usage_count(&self) -> usize {
+        Arc::strong_count(&self.0)
+    }
+
     /// Gets code from cache, or inserts using the provided function.
     pub fn get_or_try_insert_code_with<E>(
         &self,
@@ -898,8 +1036,8 @@ impl ExecutionCache {
             // because we can't efficiently invalidate all storage slots for a single address.
             // This should only happen on pre-Dencun networks.
             //
-            // If the original account had no code (was an EOA or a not yet deployed contract), we
-            // just remove the account from cache - no storage exists for it.
+            // Without original code, only a still-destroyed account can be removed. A recreated
+            // account has final info and storage that must update the cache below.
             if account.was_destroyed() {
                 let had_code =
                     account.original_info.as_ref().is_some_and(|info| !info.is_empty_code_hash());
@@ -917,8 +1055,10 @@ impl ExecutionCache {
                     return Ok(())
                 }
 
-                self.0.account_cache.remove(addr);
-                continue;
+                if account.info.is_none() {
+                    self.0.account_cache.remove(addr);
+                    continue;
+                }
             }
 
             // If we have an account that was modified, but it has a `None` account info, some wild
@@ -983,16 +1123,12 @@ pub struct SavedCache {
 
     /// The caches used for the provider.
     caches: ExecutionCache,
-
-    /// A guard to track in-flight usage of this cache.
-    /// The cache is considered available if the strong count is 1.
-    usage_guard: Arc<()>,
 }
 
 impl SavedCache {
     /// Creates a new instance with the internals
-    pub fn new(hash: B256, caches: ExecutionCache) -> Self {
-        Self { hash, caches, usage_guard: Arc::new(()) }
+    pub const fn new(hash: B256, caches: ExecutionCache) -> Self {
+        Self { hash, caches }
     }
 
     /// Returns the hash for this cache
@@ -1000,14 +1136,19 @@ impl SavedCache {
         self.hash
     }
 
-    /// Returns true if the cache is available for use (no other tasks are currently using it).
-    pub fn is_available(&self) -> bool {
-        Arc::strong_count(&self.usage_guard) == 1
+    /// Returns whether the two saved values share the same cache allocation, regardless of hash.
+    pub fn shares_cache_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.caches.0, &other.caches.0)
     }
 
-    /// Returns the current strong count of the usage guard.
+    /// Returns true if the cache is available for use (no other tasks are currently using it).
+    pub fn is_available(&self) -> bool {
+        self.caches.usage_count() == 1
+    }
+
+    /// Returns the current number of active handles to the shared cache.
     pub fn usage_count(&self) -> usize {
-        Arc::strong_count(&self.usage_guard)
+        self.caches.usage_count()
     }
 
     /// Returns the [`ExecutionCache`] belonging to the tracked hash.
@@ -1032,9 +1173,9 @@ impl SavedCache {
 
 #[cfg(any(test, feature = "test-utils"))]
 impl SavedCache {
-    /// Clones the usage guard for testing availability tracking.
-    pub fn clone_guard_for_test(&self) -> Arc<()> {
-        self.usage_guard.clone()
+    /// Clones the cache handle that acts as the availability guard.
+    pub fn clone_guard_for_test(&self) -> ExecutionCache {
+        self.caches.clone()
     }
 }
 
@@ -1044,7 +1185,26 @@ mod tests {
     use alloy_primitives::{map::HashMap, U256};
     use reth_provider::test_utils::{ExtendedAccount, MockEthProvider};
     use reth_revm::db::{AccountStatus, BundleAccount};
-    use revm_state::AccountInfo;
+    use revm::state::AccountInfo;
+
+    #[test]
+    fn buffered_metrics_count_concurrent_reads_and_drain_once() {
+        let counts = super::CacheMetricCounts::new();
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                scope.spawn(|| {
+                    for _ in 0..1_000 {
+                        counts.record(super::CacheMetricKind::AccountHit);
+                        counts.record(super::CacheMetricKind::StorageMiss);
+                    }
+                });
+            }
+        });
+        let snapshot = counts.take();
+        assert_eq!(snapshot.account_hits, 4_000);
+        assert_eq!(snapshot.storage_misses, 4_000);
+        assert!(counts.take().is_empty());
+    }
 
     #[test]
     fn test_empty_storage_cached_state_provider() {
@@ -1124,9 +1284,9 @@ mod tests {
 
         assert!(cache.is_available(), "Cache should be available initially");
 
-        let _guard = cache.clone_guard_for_test();
+        let _cache = cache.clone_guard_for_test();
 
-        assert!(!cache.is_available(), "Cache should not be available with active guard");
+        assert!(!cache.is_available(), "Cache should not be available with active handle");
     }
 
     #[test]
@@ -1134,19 +1294,19 @@ mod tests {
         let execution_cache = ExecutionCache::new(1000);
         let cache = SavedCache::new(B256::from([2u8; 32]), execution_cache);
 
-        let guard1 = cache.clone_guard_for_test();
-        let guard2 = cache.clone_guard_for_test();
-        let guard3 = guard1.clone();
+        let cache1 = cache.clone_guard_for_test();
+        let cache2 = cache.clone_guard_for_test();
+        let cache3 = cache1.clone();
 
         assert!(!cache.is_available());
 
-        drop(guard1);
+        drop(cache1);
         assert!(!cache.is_available());
 
-        drop(guard2);
+        drop(cache2);
         assert!(!cache.is_available());
 
-        drop(guard3);
+        drop(cache3);
         assert!(cache.is_available());
     }
 
@@ -1242,6 +1402,49 @@ mod tests {
         assert!(caches.0.account_cache.get(&addr1).is_none());
         assert!(caches.0.account_cache.get(&addr2).is_some());
         assert!(caches.0.storage_cache.get(&(addr1, storage_key)).is_some());
+    }
+
+    #[test]
+    fn test_insert_state_recreated_account_updates_cached_storage() {
+        use reth_revm::db::states::StorageSlot;
+        let caches = ExecutionCache::new(1000);
+        let addr = Address::random();
+        let other_addr = Address::random();
+        let key = StorageKey::from(U256::from(1));
+        let other_key = StorageKey::from(U256::from(2));
+        let provider = MockEthProvider::default();
+        provider.extend_accounts(vec![(addr, ExtendedAccount::new(0, U256::from(100)))]);
+        let state_provider = CachedStateProvider::new_prewarm(provider, caches.clone());
+        assert_eq!(state_provider.storage(addr, key).unwrap(), None);
+        assert_eq!(caches.0.storage_cache.get(&(addr, key)), Some(U256::ZERO));
+        drop(state_provider);
+        caches.insert_storage(other_addr, other_key, Some(U256::from(42)));
+        let current_info =
+            AccountInfo { nonce: 1, code_hash: B256::random(), ..Default::default() };
+        let bundle = BundleState {
+            state: HashMap::from_iter([(
+                addr,
+                BundleAccount::new(
+                    Some(AccountInfo {
+                        balance: U256::from(100),
+                        code_hash: alloy_primitives::KECCAK256_EMPTY,
+                        ..Default::default()
+                    }),
+                    Some(current_info.clone()),
+                    HashMap::from_iter([(
+                        U256::from(1),
+                        StorageSlot::new_changed(U256::ZERO, U256::from(7)),
+                    )]),
+                    AccountStatus::DestroyedChanged,
+                ),
+            )]),
+            ..Default::default()
+        };
+        assert!(caches.insert_state(&bundle).is_ok());
+        assert_eq!(caches.0.storage_cache.get(&(addr, key)), Some(U256::from(7)));
+        let cached_account = caches.0.account_cache.get(&addr).flatten().unwrap();
+        assert_eq!(cached_account.bytecode_hash, Some(current_info.code_hash));
+        assert_eq!(caches.0.storage_cache.get(&(other_addr, other_key)), Some(U256::from(42)));
     }
 
     #[test]

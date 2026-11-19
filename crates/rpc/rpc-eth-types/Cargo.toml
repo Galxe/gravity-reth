@@ -25,8 +25,8 @@ reth-revm.workspace = true
 reth-rpc-server-types.workspace = true
 reth-rpc-convert.workspace = true
 reth-tasks.workspace = true
+reth-lru.workspace = true
 reth-transaction-pool.workspace = true
-reth-trie.workspace = true
 
 # ethereum
 alloy-chains.workspace = true
@@ -61,12 +61,12 @@ serde = { workspace = true, features = ["derive"] }
 url = { workspace = true, features = ["serde"] }
 thiserror.workspace = true
 derive_more.workspace = true
-schnellru.workspace = true
 rand.workspace = true
 tracing.workspace = true
 itertools.workspace = true
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 reth-db-models.workspace = true
 reth-storage-api = { workspace = true, features = ["std"] }
 serde_json.workspace = true

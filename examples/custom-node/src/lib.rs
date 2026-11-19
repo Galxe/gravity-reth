@@ -7,6 +7,9 @@
 
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 
+// Keep the original component feature edges without enabling broader revm facade features.
+use revm_primitives as _;
+
 use crate::{
     engine::{CustomEngineValidatorBuilder, CustomPayloadTypes},
     engine_api::CustomEngineApiBuilder,

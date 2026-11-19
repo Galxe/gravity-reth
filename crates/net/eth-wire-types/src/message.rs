@@ -13,16 +13,16 @@ use super::{
     PooledTransactions, Receipts, Status, StatusEth69, Transactions,
 };
 use crate::{
-    status::StatusMessage, BlockRangeUpdate, Cells, EthNetworkPrimitives, EthVersion, GetCells,
-    NetworkPrimitives, NewPooledTransactionHashes72, RawCapabilityMessage, Receipts69, Receipts70,
-    SharedTransactions,
+    status::StatusMessage, BlockRangeUpdate, BroadcastPoolTransactions, Cells,
+    EthNetworkPrimitives, EthVersion, GetCells, NetworkPrimitives, NewPooledTransactionHashes72,
+    RawCapabilityMessage, Receipts69, Receipts70, SharedTransactions,
 };
 use alloc::{boxed::Box, string::String, sync::Arc};
 use alloy_primitives::{
     bytes::{Buf, BufMut},
     Bytes,
 };
-use alloy_rlp::{length_of_length, Decodable, Encodable, Header};
+use alloy_rlp::{Decodable, Encodable, Header};
 use core::fmt::Debug;
 
 /// [`MAX_MESSAGE_SIZE`] is the maximum cap on the size of a protocol message.
@@ -570,12 +570,14 @@ impl<N: NetworkPrimitives> Encodable for EthMessage<N> {
 /// never receive a hash of an object (block, transaction) it has already seen.
 ///
 /// Note: This is only useful for outgoing messages.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub enum EthBroadcastMessage<N: NetworkPrimitives = EthNetworkPrimitives> {
     /// Represents a new block broadcast message.
     NewBlock(Arc<N::NewBlockPayload>),
     /// Represents a transactions broadcast message.
     Transactions(SharedTransactions<N::BroadcastedTransaction>),
+    /// Represents cached outbound pool transactions broadcast message.
+    BroadcastPoolTransactions(BroadcastPoolTransactions),
 }
 
 // === impl EthBroadcastMessage ===
@@ -585,8 +587,15 @@ impl<N: NetworkPrimitives> EthBroadcastMessage<N> {
     pub const fn message_id(&self) -> EthMessageID {
         match self {
             Self::NewBlock(_) => EthMessageID::NewBlock,
-            Self::Transactions(_) => EthMessageID::Transactions,
+            Self::Transactions(_) | Self::BroadcastPoolTransactions(_) => {
+                EthMessageID::Transactions
+            }
         }
+    }
+
+    /// Encodes this broadcast to its id-prefixed `RLPx` message bytes.
+    pub fn encoded(self) -> alloy_primitives::bytes::Bytes {
+        alloy_rlp::encode(ProtocolBroadcastMessage::from(self)).into()
     }
 }
 
@@ -595,6 +604,7 @@ impl<N: NetworkPrimitives> Encodable for EthBroadcastMessage<N> {
         match self {
             Self::NewBlock(new_block) => new_block.encode(out),
             Self::Transactions(transactions) => transactions.encode(out),
+            Self::BroadcastPoolTransactions(transactions) => transactions.encode(out),
         }
     }
 
@@ -602,6 +612,7 @@ impl<N: NetworkPrimitives> Encodable for EthBroadcastMessage<N> {
         match self {
             Self::NewBlock(new_block) => new_block.length(),
             Self::Transactions(transactions) => transactions.length(),
+            Self::BroadcastPoolTransactions(transactions) => transactions.length(),
         }
     }
 }
@@ -845,11 +856,8 @@ where
     }
 
     fn length(&self) -> usize {
-        let mut length = 0;
-        length += self.request_id.length();
-        length += self.message.length();
-        length += length_of_length(length);
-        length
+        let payload_length = self.request_id.length() + self.message.length();
+        Header { list: true, payload_length }.length_with_payload()
     }
 }
 
@@ -882,9 +890,10 @@ mod tests {
     use crate::{
         message::RequestPair, BlockAccessLists, EthMessage, EthMessageID, EthNetworkPrimitives,
         EthVersion, GetBlockAccessLists, GetNodeData, NodeData, ProtocolMessage,
-        RawCapabilityMessage,
+        RawCapabilityMessage, Status, StatusMessage,
     };
-    use alloy_primitives::hex;
+    use alloy_hardforks::{ForkHash, ForkId};
+    use alloy_primitives::{hex, B256, U256};
     use alloy_rlp::{Decodable, Encodable, Error};
     use reth_ethereum_primitives::BlockBody;
 
@@ -1103,10 +1112,6 @@ mod tests {
 
     #[test]
     fn decode_status_success() {
-        use crate::{Status, StatusMessage};
-        use alloy_hardforks::{ForkHash, ForkId};
-        use alloy_primitives::{B256, U256};
-
         let status = Status {
             version: EthVersion::Eth68,
             chain: alloy_chains::Chain::mainnet(),

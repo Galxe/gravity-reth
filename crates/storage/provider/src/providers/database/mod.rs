@@ -24,6 +24,7 @@ use reth_db_api::{
     transaction::DbTx,
 };
 use reth_errors::{RethError, RethResult};
+use reth_execution_types::RecoveredBlockAndExecutionOutput;
 use reth_node_types::{
     BlockTy, HeaderTy, NodeTypes, NodeTypesWithDB, NodeTypesWithDBAdapter, ReceiptTy, TxTy,
 };
@@ -37,7 +38,7 @@ use reth_storage_api::{
 };
 use reth_storage_errors::provider::ProviderResult;
 use reth_trie::HashedPostState;
-use revm_database::BundleState;
+use revm::database::BundleState;
 use std::{
     ops::{RangeBounds, RangeInclusive},
     path::Path,
@@ -550,13 +551,13 @@ impl<N: ProviderNodeTypes> BlockReader for ProviderFactory<N> {
         self.provider()?.block(id)
     }
 
-    fn pending_block(&self) -> ProviderResult<Option<RecoveredBlock<Self::Block>>> {
+    fn pending_block(&self) -> ProviderResult<Option<Arc<RecoveredBlock<Self::Block>>>> {
         self.provider()?.pending_block()
     }
 
     fn pending_block_and_receipts(
         &self,
-    ) -> ProviderResult<Option<(RecoveredBlock<Self::Block>, Vec<Self::Receipt>)>> {
+    ) -> ProviderResult<Option<RecoveredBlockAndExecutionOutput<Self::Block, Self::Receipt>>> {
         self.provider()?.pending_block_and_receipts()
     }
 
@@ -774,6 +775,11 @@ impl<N: ProviderNodeTypes> PruneCheckpointReader for ProviderFactory<N> {
     fn get_prune_checkpoints(&self) -> ProviderResult<Vec<(PruneSegment, PruneCheckpoint)>> {
         self.provider()?.get_prune_checkpoints()
     }
+    fn get_prune_checkpoints_for_availability(
+        &self,
+    ) -> ProviderResult<Vec<(PruneSegment, PruneCheckpoint)>> {
+        self.provider()?.get_prune_checkpoints_for_availability()
+    }
 }
 
 impl<N: ProviderNodeTypes> HashedPostStateProvider for ProviderFactory<N> {
@@ -957,6 +963,61 @@ mod tests {
         let provider_rw = factory.provider_rw().unwrap();
         provider_rw.block_hash(0).unwrap();
         provider.block_hash(0).unwrap();
+    }
+
+    #[test]
+    fn block_range_readers_reject_expired_history() {
+        use reth_static_file_types::{SegmentHeader, SegmentRangeInclusive, StaticFileSegment};
+
+        let factory = create_test_provider_factory();
+        let mut rng = generators::rng();
+        let mut parent = None;
+        for number in 0..6 {
+            let provider = factory.database_provider_rw().unwrap();
+            let block = random_block(
+                &mut rng,
+                number,
+                BlockParams { parent, tx_count: Some(1), ..Default::default() },
+            );
+            parent = Some(block.hash());
+            provider
+                .insert_block(block.try_recover().unwrap(), StorageLocation::StaticFiles)
+                .unwrap();
+            // RocksDB batch reads do not see the previous block's pending transaction counter.
+            crate::writer::UnifiedStorageWriter::commit(provider).unwrap();
+        }
+
+        let static_provider = factory.static_file_provider();
+        {
+            let mut writer =
+                static_provider.latest_writer(StaticFileSegment::Transactions).unwrap();
+            let header = writer.user_header().clone();
+            *writer.user_header_mut() = SegmentHeader::new(
+                header.expected_block_range(),
+                Some(SegmentRangeInclusive::new(3, 5)),
+                header.tx_range(),
+                StaticFileSegment::Transactions,
+            );
+            writer.inner().set_dirty();
+            writer.commit().unwrap();
+        }
+        static_provider.initialize_index().unwrap();
+        assert_eq!(static_provider.earliest_history_height(), 3);
+
+        let provider = factory.provider().unwrap();
+        for result in [
+            provider.block_range(1..=4).map(|blocks| blocks.len()),
+            provider.block_with_senders_range(1..=4).map(|blocks| blocks.len()),
+            provider.recovered_block_range(1..=4).map(|blocks| blocks.len()),
+        ] {
+            assert_matches!(
+                result,
+                Err(ProviderError::BlockExpired { requested: 1, earliest_available: 3 })
+            );
+        }
+        assert_eq!(provider.block_range(3..=5).unwrap().len(), 3);
+        assert_eq!(provider.recovered_block_range(3..=5).unwrap().len(), 3);
+        assert!(provider.block_range(RangeInclusive::new(3, 2)).unwrap().is_empty());
     }
 
     #[test]
@@ -1147,5 +1208,141 @@ mod tests {
         let local_head = provider.local_tip_header(checkpoint).unwrap();
 
         assert_eq!(local_head, head);
+    }
+}
+
+#[cfg(test)]
+mod receipt_availability_tests {
+    use super::*;
+    use crate::{
+        providers::{StaticFileProvider, StaticFileWriter},
+        test_utils::{create_test_provider_factory, MockNodeTypesWithDB},
+    };
+    use reth_db_api::{tables, transaction::DbTxMut};
+    use reth_ethereum_primitives::Receipt;
+    use reth_prune_types::PruneMode;
+    use reth_storage_api::PruneCheckpointWriter;
+    #[test]
+    fn receipt_availability_preserves_prune_checkpoints() {
+        let moved = PruneCheckpoint {
+            block_number: Some(7),
+            tx_number: Some(15),
+            prune_mode: PruneMode::Before(8),
+        };
+        let available = PruneCheckpoint { block_number: None, tx_number: None, ..moved };
+        let pruned = PruneCheckpoint { block_number: Some(4), tx_number: Some(9), ..moved };
+        let covered = PruneCheckpoint { block_number: Some(2), tx_number: Some(5), ..moved };
+        let anchor = PruneCheckpoint { tx_number: None, ..moved };
+
+        for (case, blocks_per_file, receipt_blocks, stored, expected) in [
+            ("continuous", 3, vec![(0, 9)], [moved; 2], [available; 2]),
+            ("pruned prefix", 10, vec![(5, 9)], [pruned; 2], [pruned; 2]),
+            ("padded prefix", 10, vec![(5, 9)], [moved; 2], [pruned; 2]),
+            ("above tip", 3, vec![(0, 4)], [moved; 2], [moved; 2]),
+            ("gap", 3, vec![(0, 2), (4, 9)], [moved; 2], [moved; 2]),
+            ("empty file gap", 3, vec![(0, 2), (6, 9)], [moved; 2], [moved; 2]),
+            ("covered receipts", 3, vec![(0, 2), (4, 9)], [covered, moved], [available, moved]),
+            ("covered logs", 3, vec![(0, 2), (4, 9)], [moved, covered], [moved, available]),
+            ("snap anchor", 3, vec![(0, 9)], [anchor; 2], [anchor; 2]),
+            ("empty first file", 3, vec![(5, 9)], [moved; 2], [moved; 2]),
+            ("no files", 3, vec![], [moved; 2], [moved; 2]),
+        ] {
+            let factory =
+                receipt_availability_test_factory(blocks_per_file, &receipt_blocks, stored);
+            let before = factory.get_prune_checkpoints().unwrap();
+            assert_eq!(
+                factory.get_prune_checkpoints_for_availability().unwrap(),
+                [(PruneSegment::Receipts, expected[0]), (PruneSegment::ContractLogs, expected[1])],
+                "{case}",
+            );
+            assert_eq!(factory.get_prune_checkpoints().unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn receipt_availability_requires_body_indices() {
+        let stored = PruneCheckpoint {
+            block_number: Some(7),
+            tx_number: Some(15),
+            prune_mode: PruneMode::Before(8),
+        };
+        let factory = receipt_availability_test_factory(10, &[(5, 9)], [stored; 2]);
+        let unchanged = || {
+            assert_eq!(
+                factory.get_prune_checkpoints_for_availability().unwrap(),
+                factory.get_prune_checkpoints().unwrap(),
+            );
+        };
+
+        let provider = factory.provider_rw().unwrap();
+        provider.tx_ref().delete::<tables::BlockBodyIndices>(4, None).unwrap();
+        provider.commit().unwrap();
+        unchanged();
+
+        // A seek can land on the next block after expired history.
+        let provider = factory.provider_rw().unwrap();
+        provider.tx_ref().delete::<tables::TransactionBlocks>(9, None).unwrap();
+        provider.commit().unwrap();
+        unchanged();
+
+        let provider = factory.provider_rw().unwrap();
+        provider.tx_ref().clear::<tables::TransactionBlocks>().unwrap();
+        provider.commit().unwrap();
+        unchanged();
+    }
+
+    fn receipt_availability_test_factory(
+        blocks_per_file: u64,
+        receipt_blocks: &[(u64, u64)],
+        checkpoints: [PruneCheckpoint; 2],
+    ) -> ProviderFactory<MockNodeTypesWithDB> {
+        let mut factory = create_test_provider_factory().with_prune_modes(PruneModes {
+            receipts: Some(PruneMode::Distance(100)),
+            ..PruneModes::default()
+        });
+        factory.static_file_provider =
+            StaticFileProvider::read_write(factory.db.path().join("receipt_files"))
+                .unwrap()
+                .with_custom_blocks_per_file(blocks_per_file);
+        assert_eq!(factory.get_prune_checkpoints_for_availability().unwrap(), Vec::new());
+
+        let provider = factory.provider_rw().unwrap();
+        // All blocks have two transactions, including blocks whose receipts were pruned.
+        for block in 0..=9 {
+            provider
+                .tx_ref()
+                .put::<tables::BlockBodyIndices>(
+                    block,
+                    StoredBlockBodyIndices { first_tx_num: 2 * block, tx_count: 2 },
+                )
+                .unwrap();
+            provider.tx_ref().put::<tables::TransactionBlocks>(2 * block + 1, block).unwrap();
+        }
+        for (segment, checkpoint) in
+            [PruneSegment::Receipts, PruneSegment::ContractLogs].into_iter().zip(checkpoints)
+        {
+            provider.save_prune_checkpoint(segment, checkpoint).unwrap();
+        }
+        provider.commit().unwrap();
+
+        for &(start, end) in receipt_blocks {
+            let static_file_provider = factory.static_file_provider();
+            let mut writer =
+                static_file_provider.latest_writer(StaticFileSegment::Receipts).unwrap();
+            // V1 writers advance sequentially. Empty blocks pad the prefix and any gaps
+            // without inventing receipt rows, including fully empty intermediate files.
+            while writer.next_block_number() < start {
+                let next = writer.next_block_number();
+                writer.increment_block(next).unwrap();
+            }
+            for block in start..=end {
+                writer.increment_block(block).unwrap();
+                for tx in 2 * block..2 * block + 2 {
+                    writer.append_receipt(tx, &Receipt::default()).unwrap();
+                }
+            }
+            writer.commit().unwrap();
+        }
+        factory
     }
 }

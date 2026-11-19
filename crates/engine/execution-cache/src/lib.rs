@@ -14,6 +14,9 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 
+/// Cross-block caches for pure precompile results.
+pub mod precompile_cache;
+
 mod cached_state;
 pub use cached_state::*;
 
@@ -122,8 +125,9 @@ impl PayloadExecutionCache {
         elapsed
     }
 
-    /// Updates the cache with a closure that has exclusive access to the guard.
-    /// This ensures that all cache operations happen atomically.
+    /// Runs a closure with exclusive access to the stored cache.
+    ///
+    /// Returns its result after releasing the lock, so removed caches can be dropped outside it.
     ///
     /// ## CRITICAL SAFETY REQUIREMENT
     ///
@@ -135,12 +139,12 @@ impl PayloadExecutionCache {
     ///
     /// Violating this requirement can result in cache corruption, incorrect state data,
     /// and potential consensus failures.
-    pub fn update_with_guard<F>(&self, update_fn: F)
+    pub fn update_with_guard<F, R>(&self, update_fn: F) -> R
     where
-        F: FnOnce(&mut Option<SavedCache>),
+        F: FnOnce(&mut Option<SavedCache>) -> R,
     {
         let mut guard = self.inner.lock();
-        update_fn(&mut guard);
+        update_fn(&mut guard)
     }
 }
 
@@ -190,6 +194,28 @@ mod tests {
 
         let second = cache.get_cache_for(hash);
         assert!(second.is_some());
+    }
+
+    #[test]
+    fn raw_cache_handle_blocks_checkout_until_drop() {
+        let cache = PayloadExecutionCache::default();
+        let hash = B256::from([3u8; 32]);
+
+        cache.update_with_guard(|slot| {
+            *slot = Some(SavedCache::new(hash, ExecutionCache::new(1_000)))
+        });
+
+        let checked_out = cache.get_cache_for(hash).expect("checkout should succeed");
+        let cache_handle = checked_out.cache().clone();
+        drop(checked_out);
+
+        let blocked = cache.get_cache_for(hash);
+        assert!(blocked.is_none(), "raw ExecutionCache handle should keep slot in use");
+
+        drop(cache_handle);
+
+        let available = cache.get_cache_for(hash);
+        assert!(available.is_some(), "checkout should succeed after raw handle is dropped");
     }
 
     #[test]

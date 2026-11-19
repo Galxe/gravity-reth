@@ -1,3 +1,4 @@
+use self::blob_cache::BlobValidationCache;
 use alloy_consensus::{
     BlobTransactionValidationError, BlockHeader, EnvKzgSettings, Transaction, TxReceipt,
 };
@@ -21,16 +22,16 @@ use reth_consensus::{Consensus, FullConsensus};
 use reth_consensus_common::validation::MAX_RLP_BLOCK_SIZE;
 use reth_engine_primitives::PayloadValidator;
 use reth_errors::{BlockExecutionError, ConsensusError, ProviderError};
-use reth_evm::{execute::Executor, ConfigureEvm, ConfigureEvmForRead};
+use reth_evm::{execute::Executor, ConfigureEvm, ConfigureEvmForRead, SenderRecoveryCache};
 use reth_execution_types::BlockExecutionOutput;
 use reth_metrics::{
     metrics,
     metrics::{gauge, Gauge},
     Metrics,
 };
-use reth_node_api::{NewPayloadError, PayloadTypes};
+use reth_payload_primitives::{NewPayloadError, PayloadTypes};
 use reth_primitives_traits::{
-    constants::GAS_LIMIT_BOUND_DIVISOR, BlockBody, GotExpected, NodePrimitives, RecoveredBlock,
+    block::error::SealedBlockRecoveryError, BlockBody, GotExpected, NodePrimitives, RecoveredBlock,
     SealedBlock, SealedHeaderFor,
 };
 use reth_revm::{cached::CachedReads, database::StateProviderDatabase};
@@ -38,12 +39,14 @@ use reth_rpc_api::BlockSubmissionValidationApiServer;
 use reth_rpc_server_types::result::{internal_rpc_err, invalid_params_rpc_err};
 use reth_storage_api::{BlockReaderIdExt, ProviderReadView, StateProviderFactory};
 use reth_tasks::Runtime;
-use revm_primitives::{Address, B256, U256};
+use revm::primitives::{Address, B256, U256};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tokio::sync::{oneshot, RwLock};
 use tracing::warn;
+
+mod blob_cache;
 
 /// The type that implements the `validation` rpc namespace trait
 #[derive(Clone, Debug, derive_more::Deref)]
@@ -57,7 +60,7 @@ where
     E: ConfigureEvm,
     T: PayloadTypes,
 {
-    /// Create a new instance of the [`ValidationApi`]
+    /// Creates validation without sharing sender recovery with other node components.
     pub fn new(
         provider: Provider,
         consensus: Arc<dyn FullConsensus<E::Primitives>>,
@@ -67,6 +70,30 @@ where
         payload_validator: Arc<
             dyn PayloadValidator<T, Block = <E::Primitives as NodePrimitives>::Block>,
         >,
+    ) -> Self {
+        Self::new_with_sender_recovery_cache(
+            provider,
+            consensus,
+            evm_config,
+            config,
+            task_spawner,
+            payload_validator,
+            None,
+        )
+    }
+
+    /// Creates validation using the optional sender cache shared by the node.
+    /// Without a cache, preserves the payload validator's specialized recovery method.
+    pub fn new_with_sender_recovery_cache(
+        provider: Provider,
+        consensus: Arc<dyn FullConsensus<E::Primitives>>,
+        evm_config: E,
+        config: ValidationApiConfig,
+        task_spawner: Runtime,
+        payload_validator: Arc<
+            dyn PayloadValidator<T, Block = <E::Primitives as NodePrimitives>::Block>,
+        >,
+        sender_recovery_cache: Option<SenderRecoveryCache>,
     ) -> Self {
         let ValidationApiConfig { disallow, validation_window } = config;
 
@@ -78,7 +105,9 @@ where
             disallow,
             validation_window,
             cached_state: Default::default(),
+            validated_blobs: Default::default(),
             task_spawner,
+            sender_recovery_cache,
             metrics: Default::default(),
         });
 
@@ -109,6 +138,28 @@ where
         } else {
             *cache = (head, cached_state)
         }
+    }
+
+    /// Runs the validation on a blocking task.
+    ///
+    /// The validation is skipped if the request is dropped before it starts and stopped if the
+    /// request is dropped while the validation waits for the cached reads.
+    async fn spawn_validation<F>(&self, validation: F) -> RpcResult<()>
+    where
+        F: Future<Output = Result<(), ValidationApiError>> + Send + 'static,
+    {
+        let (mut tx, rx) = oneshot::channel();
+
+        self.task_spawner.spawn_blocking_task(async move {
+            let result = tokio::select! {
+                biased;
+                _ = tx.closed() => return,
+                result = validation => result.map_err(ErrorObject::from),
+            };
+            let _ = tx.send(result);
+        });
+
+        rx.await.map_err(|_| internal_rpc_err("Internal blocking task error"))?
     }
 }
 
@@ -179,7 +230,14 @@ where
         };
 
         self.consensus.validate_header_against_parent(block.sealed_header(), &parent_header)?;
-        self.validate_gas_limit(registered_gas_limit, &parent_header, block.sealed_header())?;
+        parent_header.validate_gas_limit(registered_gas_limit, block.gas_limit()).map_err(
+            |err| {
+                ValidationApiError::GasLimitMismatch(GotExpected {
+                    got: err.got,
+                    expected: err.expected,
+                })
+            },
+        )?;
         let parent_header_hash = parent_header.hash();
         let state_provider = provider.state_by_block_hash(parent_header_hash)?;
 
@@ -256,34 +314,6 @@ where
         }
     }
 
-    /// Ensures that the chosen gas limit is the closest possible value for the validator's
-    /// registered gas limit.
-    ///
-    /// Ref: <https://github.com/flashbots/builder/blob/a742641e24df68bc2fc476199b012b0abce40ffe/core/blockchain.go#L2474-L2477>
-    fn validate_gas_limit(
-        &self,
-        registered_gas_limit: u64,
-        parent_header: &SealedHeaderFor<E::Primitives>,
-        header: &SealedHeaderFor<E::Primitives>,
-    ) -> Result<(), ValidationApiError> {
-        let max_gas_limit =
-            parent_header.gas_limit() + parent_header.gas_limit() / GAS_LIMIT_BOUND_DIVISOR - 1;
-        let min_gas_limit =
-            parent_header.gas_limit() - parent_header.gas_limit() / GAS_LIMIT_BOUND_DIVISOR + 1;
-
-        let best_gas_limit =
-            std::cmp::max(min_gas_limit, std::cmp::min(max_gas_limit, registered_gas_limit));
-
-        if best_gas_limit != header.gas_limit() {
-            return Err(ValidationApiError::GasLimitMismatch(GotExpected {
-                got: header.gas_limit(),
-                expected: best_gas_limit,
-            }))
-        }
-
-        Ok(())
-    }
-
     /// Ensures that the proposer has received [`BidTrace::value`] for this block.
     ///
     /// Firstly attempts to verify the payment by checking the state changes, otherwise falls back
@@ -294,8 +324,13 @@ where
         output: &BlockExecutionOutput<<E::Primitives as NodePrimitives>::Receipt>,
         message: &BidTrace,
     ) -> Result<(), ValidationApiError> {
+        // A zero-value bid promises the proposer nothing, so the payload owes nothing.
+        if message.value.is_zero() {
+            return Ok(())
+        }
+
         let (mut balance_before, balance_after) = if let Some(acc) =
-            output.state.state.get(&message.proposer_fee_recipient)
+            output.state.account(&message.proposer_fee_recipient)
         {
             let balance_before = acc.original_info.as_ref().map(|i| i.balance).unwrap_or_default();
             let balance_after = acc.info.as_ref().map(|i| i.balance).unwrap_or_default();
@@ -364,16 +399,42 @@ where
     }
 
     /// Validates the given [`BlobsBundleV2`] and returns versioned hashes for blobs.
+    ///
+    /// Exact blob, commitment, and cell-proof matches from recent submissions reuse KZG
+    /// validation. The resulting hashes are still checked against the block's EIP-4844
+    /// transactions during payload validation.
     pub fn validate_blobs_bundle_v2(
         &self,
         blobs_bundle: BlobsBundleV2,
     ) -> Result<Vec<B256>, ValidationApiError> {
-        let versioned_hashes = blobs_bundle.versioned_hashes();
-        let sidecar =
-            blobs_bundle.try_into_sidecar().map_err(|_| ValidationApiError::InvalidBlobsBundle)?;
+        self.validated_blobs.validate(blobs_bundle)
+    }
 
-        sidecar.validate(&versioned_hashes, EnvKzgSettings::default().get())?;
-        Ok(versioned_hashes)
+    /// Converts the payload into a block and recovers the transaction senders.
+    ///
+    /// Like the engine's `newPayload` handling, this leaves payload validation and conversion to
+    /// the payload validator and recovers senders through the shared [`SenderRecoveryCache`] if
+    /// one is configured, so senders already recovered on transaction ingress or payload
+    /// execution are reused. Without a cache, this calls
+    /// [`PayloadValidator::ensure_well_formed_payload`] so validator overrides are preserved.
+    ///
+    /// Senders recovered here are cached before the block is validated. Competing submissions for
+    /// the same slot share most of their transactions, so the senders are likely to be needed again
+    /// even if this submission is rejected, and only successfully recovered senders can be cached.
+    fn recover_payload(
+        &self,
+        payload: ExecutionData,
+    ) -> Result<RecoveredBlock<<E::Primitives as NodePrimitives>::Block>, ValidationApiError> {
+        let Some(cache) = &self.sender_recovery_cache else {
+            return self.payload_validator.ensure_well_formed_payload(payload).map_err(Into::into)
+        };
+
+        let block = self.payload_validator.convert_payload_to_block(payload)?;
+        let recovered = match cache.recover_signers(block.body().transactions()) {
+            Ok(senders) => Ok(RecoveredBlock::new_sealed(block, senders)),
+            Err(_) => Err(SealedBlockRecoveryError::new(block)),
+        };
+        recovered.map_err(|err| NewPayloadError::Other(err.into()).into())
     }
 
     /// Core logic for validating the builder submission v3
@@ -381,7 +442,7 @@ where
         &self,
         request: BuilderBlockValidationRequestV3,
     ) -> Result<(), ValidationApiError> {
-        let block = self.payload_validator.ensure_well_formed_payload(ExecutionData {
+        let block = self.recover_payload(ExecutionData {
             payload: ExecutionPayload::V3(request.request.execution_payload),
             sidecar: ExecutionPayloadSidecar::v3(CancunPayloadFields {
                 parent_beacon_block_root: request.parent_beacon_block_root,
@@ -403,7 +464,7 @@ where
         &self,
         request: BuilderBlockValidationRequestV4,
     ) -> Result<(), ValidationApiError> {
-        let block = self.payload_validator.ensure_well_formed_payload(ExecutionData {
+        let block = self.recover_payload(ExecutionData {
             payload: ExecutionPayload::V3(request.request.execution_payload),
             sidecar: ExecutionPayloadSidecar::v4(
                 CancunPayloadFields {
@@ -432,8 +493,10 @@ where
         &self,
         request: BuilderBlockValidationRequestV5,
     ) -> Result<(), ValidationApiError> {
-        let block = self.payload_validator.ensure_well_formed_payload(ExecutionData {
-            payload: ExecutionPayload::V3(request.request.execution_payload),
+        let payload = ExecutionPayload::V3(request.request.execution_payload);
+        validate_message_against_payload(&request.request.message, &payload)?;
+        let block = self.recover_payload(ExecutionData {
+            payload,
             sidecar: ExecutionPayloadSidecar::v4(
                 CancunPayloadFields {
                     parent_beacon_block_root: request.parent_beacon_block_root,
@@ -450,13 +513,14 @@ where
 
         // Check block size as per EIP-7934 (only applies when Osaka hardfork is active)
         let chain_spec = self.provider.chain_spec();
-        if chain_spec.is_osaka_active_at_timestamp(block.timestamp()) &&
-            block.rlp_length() > MAX_RLP_BLOCK_SIZE
-        {
-            return Err(ValidationApiError::Consensus(ConsensusError::BlockTooLarge {
-                rlp_length: block.rlp_length(),
-                max_rlp_length: MAX_RLP_BLOCK_SIZE,
-            }));
+        if chain_spec.is_osaka_active_at_timestamp(block.timestamp()) {
+            let rlp_length = block.rlp_length();
+            if rlp_length > MAX_RLP_BLOCK_SIZE {
+                return Err(ValidationApiError::Consensus(ConsensusError::BlockTooLarge {
+                    rlp_length,
+                    max_rlp_length: MAX_RLP_BLOCK_SIZE,
+                }));
+            }
         }
 
         self.validate_message_against_block(
@@ -473,12 +537,14 @@ where
         &self,
         request: BuilderBlockValidationRequestV6,
     ) -> Result<(), ValidationApiError> {
+        let payload = ExecutionPayload::V4(request.request.execution_payload);
+        validate_message_against_payload(&request.request.message, &payload)?;
         let decoded_bal =
-            DecodedBal::from_rlp_bytes(request.request.execution_payload.block_access_list.clone())
+            DecodedBal::from_rlp_bytes(payload.as_v4().unwrap().block_access_list.clone())
                 .map_err(ValidationApiError::InvalidBlockAccessList)?;
 
-        let block = self.payload_validator.ensure_well_formed_payload(ExecutionData {
-            payload: ExecutionPayload::V4(request.request.execution_payload),
+        let block = self.recover_payload(ExecutionData {
+            payload,
             sidecar: ExecutionPayloadSidecar::v4(
                 CancunPayloadFields {
                     parent_beacon_block_root: request.parent_beacon_block_root,
@@ -494,13 +560,14 @@ where
         })?;
 
         let chain_spec = self.provider.chain_spec();
-        if chain_spec.is_osaka_active_at_timestamp(block.timestamp()) &&
-            block.rlp_length() > MAX_RLP_BLOCK_SIZE
-        {
-            return Err(ValidationApiError::Consensus(ConsensusError::BlockTooLarge {
-                rlp_length: block.rlp_length(),
-                max_rlp_length: MAX_RLP_BLOCK_SIZE,
-            }));
+        if chain_spec.is_osaka_active_at_timestamp(block.timestamp()) {
+            let rlp_length = block.rlp_length();
+            if rlp_length > MAX_RLP_BLOCK_SIZE {
+                return Err(ValidationApiError::Consensus(ConsensusError::BlockTooLarge {
+                    rlp_length,
+                    max_rlp_length: MAX_RLP_BLOCK_SIZE,
+                }));
+            }
         }
 
         self.validate_message_against_block(
@@ -549,16 +616,8 @@ where
         request: BuilderBlockValidationRequestV3,
     ) -> RpcResult<()> {
         let this = self.clone();
-        let (tx, rx) = oneshot::channel();
-
-        self.task_spawner.spawn_blocking_task(async move {
-            let result = Self::validate_builder_submission_v3(&this, request)
-                .await
-                .map_err(ErrorObject::from);
-            let _ = tx.send(result);
-        });
-
-        rx.await.map_err(|_| internal_rpc_err("Internal blocking task error"))?
+        let validation = async move { Self::validate_builder_submission_v3(&this, request).await };
+        self.spawn_validation(validation).await
     }
 
     /// Validates a block submitted to the relay
@@ -567,16 +626,8 @@ where
         request: BuilderBlockValidationRequestV4,
     ) -> RpcResult<()> {
         let this = self.clone();
-        let (tx, rx) = oneshot::channel();
-
-        self.task_spawner.spawn_blocking_task(async move {
-            let result = Self::validate_builder_submission_v4(&this, request)
-                .await
-                .map_err(ErrorObject::from);
-            let _ = tx.send(result);
-        });
-
-        rx.await.map_err(|_| internal_rpc_err("Internal blocking task error"))?
+        let validation = async move { Self::validate_builder_submission_v4(&this, request).await };
+        self.spawn_validation(validation).await
     }
 
     /// Validates a block submitted to the relay
@@ -585,16 +636,8 @@ where
         request: BuilderBlockValidationRequestV5,
     ) -> RpcResult<()> {
         let this = self.clone();
-        let (tx, rx) = oneshot::channel();
-
-        self.task_spawner.spawn_blocking_task(async move {
-            let result = Self::validate_builder_submission_v5(&this, request)
-                .await
-                .map_err(ErrorObject::from);
-            let _ = tx.send(result);
-        });
-
-        rx.await.map_err(|_| internal_rpc_err("Internal blocking task error"))?
+        let validation = async move { Self::validate_builder_submission_v5(&this, request).await };
+        self.spawn_validation(validation).await
     }
 
     /// Validates a block submitted to the relay
@@ -603,16 +646,8 @@ where
         request: BuilderBlockValidationRequestV6,
     ) -> RpcResult<()> {
         let this = self.clone();
-        let (tx, rx) = oneshot::channel();
-
-        self.task_spawner.spawn_blocking_task(async move {
-            let result = Self::validate_builder_submission_v6(&this, request)
-                .await
-                .map_err(ErrorObject::from);
-            let _ = tx.send(result);
-        });
-
-        rx.await.map_err(|_| internal_rpc_err("Internal blocking task error"))?
+        let validation = async move { Self::validate_builder_submission_v6(&this, request).await };
+        self.spawn_validation(validation).await
     }
 }
 
@@ -635,10 +670,47 @@ pub struct ValidationApiInner<Provider, E: ConfigureEvm, T: PayloadTypes> {
     /// latest head block state. Uses async `RwLock` to safely handle concurrent validation
     /// requests.
     cached_state: RwLock<(B256, CachedReads)>,
+    /// Recently validated blob, commitment, and cell-proof tuples shared by V2 submissions.
+    validated_blobs: BlobValidationCache,
     /// Task spawner for blocking operations
     task_spawner: Runtime,
+    /// Cache of recovered transaction senders shared with transaction ingress and payload
+    /// execution, if enabled.
+    sender_recovery_cache: Option<SenderRecoveryCache>,
     /// Validation metrics
     metrics: ValidationMetrics,
+}
+
+/// Ensures that the raw execution payload fields match the corresponding [`BidTrace`] fields.
+fn validate_message_against_payload(
+    message: &BidTrace,
+    payload: &ExecutionPayload,
+) -> Result<(), ValidationApiError> {
+    let payload = payload.as_v1();
+
+    if payload.block_hash != message.block_hash {
+        Err(ValidationApiError::BlockHashMismatch(GotExpected {
+            got: message.block_hash,
+            expected: payload.block_hash,
+        }))
+    } else if payload.parent_hash != message.parent_hash {
+        Err(ValidationApiError::ParentHashMismatch(GotExpected {
+            got: message.parent_hash,
+            expected: payload.parent_hash,
+        }))
+    } else if payload.gas_limit != message.gas_limit {
+        Err(ValidationApiError::GasLimitMismatch(GotExpected {
+            got: message.gas_limit,
+            expected: payload.gas_limit,
+        }))
+    } else if payload.gas_used != message.gas_used {
+        Err(ValidationApiError::GasUsedMismatch(GotExpected {
+            got: message.gas_used,
+            expected: payload.gas_used,
+        }))
+    } else {
+        Ok(())
+    }
 }
 
 /// Calculates a deterministic hash of the blocklist for change detection.
@@ -731,12 +803,12 @@ impl From<ValidationApiError> for ErrorObject<'static> {
             ValidationApiError::ProposerPayment |
             ValidationApiError::InvalidBlobsBundle |
             ValidationApiError::InvalidBlockAccessList(_) |
-            ValidationApiError::Blob(_) => invalid_params_rpc_err(error.to_string()),
+            ValidationApiError::Blob(_) |
+            ValidationApiError::Consensus(_) => invalid_params_rpc_err(error.to_string()),
 
             ValidationApiError::MissingLatestBlock |
             ValidationApiError::MissingParentBlock |
             ValidationApiError::BlockTooOld |
-            ValidationApiError::Consensus(_) |
             ValidationApiError::Provider(_) => internal_rpc_err(error.to_string()),
             ValidationApiError::Execution(err) => match err {
                 error @ BlockExecutionError::Validation(_) => {
@@ -762,8 +834,28 @@ pub(crate) struct ValidationMetrics {
 
 #[cfg(test)]
 mod tests {
-    use super::{hash_disallow_list, AddressSet};
-    use revm_primitives::Address;
+    use super::*;
+    use alloy_consensus::Header;
+    use alloy_rpc_types_engine::ExecutionData;
+    use reth_consensus::noop::NoopConsensus;
+    use reth_engine_primitives::PayloadValidator;
+    use reth_ethereum_engine_primitives::EthPayloadTypes;
+    use reth_ethereum_primitives::Block;
+    use reth_evm_ethereum::EthEvmConfig;
+    use reth_primitives_traits::{RecoveredBlock, SealedBlock, SealedHeader};
+    use reth_provider::test_utils::MockEthProvider;
+    use reth_revm::db::{AccountStatus, BundleAccount, BundleState};
+    use revm::state::AccountInfo;
+
+    #[test]
+    fn consensus_errors_are_invalid_params_and_node_faults_are_internal() {
+        let consensus = jsonrpsee::types::ErrorObjectOwned::from(ValidationApiError::Consensus(
+            ConsensusError::BaseFeeMissing,
+        ));
+        assert_eq!(consensus.code(), jsonrpsee::types::error::INVALID_PARAMS_CODE);
+        let node = jsonrpsee::types::ErrorObjectOwned::from(ValidationApiError::MissingParentBlock);
+        assert_eq!(node.code(), jsonrpsee::types::error::INTERNAL_ERROR_CODE);
+    }
 
     #[test]
     fn test_hash_disallow_list_deterministic() {
@@ -816,5 +908,265 @@ mod tests {
         let expected_hash = "ee14e9d115e182f61871a5a385ab2f32ecf434f3b17bdbacc71044810d89e608";
         let hash = hash_disallow_list(&blocklist);
         assert_eq!(expected_hash, hash);
+    }
+
+    /// Only [`ValidationApi::validate_message_against_block`] is exercised below, which never
+    /// converts a payload.
+    #[derive(Debug)]
+    struct UnusedPayloadValidator;
+
+    impl PayloadValidator<EthPayloadTypes> for UnusedPayloadValidator {
+        type Block = Block;
+
+        fn convert_payload_to_block(
+            &self,
+            _payload: ExecutionData,
+        ) -> Result<SealedBlock<Self::Block>, NewPayloadError> {
+            unimplemented!()
+        }
+    }
+
+    #[derive(Debug)]
+    struct SpecializedPayloadValidator;
+
+    impl PayloadValidator<EthPayloadTypes> for SpecializedPayloadValidator {
+        type Block = Block;
+
+        fn convert_payload_to_block(
+            &self,
+            _payload: ExecutionData,
+        ) -> Result<SealedBlock<Self::Block>, NewPayloadError> {
+            panic!("the specialized recovery method must be used without a cache")
+        }
+
+        fn ensure_well_formed_payload(
+            &self,
+            _payload: ExecutionData,
+        ) -> Result<RecoveredBlock<Self::Block>, NewPayloadError> {
+            Ok(SealedBlock::seal_slow(Block::default()).try_recover().unwrap())
+        }
+    }
+
+    #[test]
+    fn recover_payload_without_cache_uses_validator_override() {
+        let api = ValidationApi::new_with_sender_recovery_cache(
+            MockEthProvider::default(),
+            NoopConsensus::arc(),
+            EthEvmConfig::mainnet(),
+            ValidationApiConfig::default(),
+            Runtime::test(),
+            Arc::new(SpecializedPayloadValidator),
+            None,
+        );
+
+        api.recover_payload(ExecutionData {
+            payload: ExecutionPayload::from_block_unchecked(B256::ZERO, &Block::default()).0,
+            sidecar: Default::default(),
+        })
+        .unwrap();
+    }
+
+    fn test_validation_api(
+        provider: MockEthProvider,
+    ) -> ValidationApi<MockEthProvider, EthEvmConfig, EthPayloadTypes> {
+        ValidationApi::new_with_sender_recovery_cache(
+            provider,
+            NoopConsensus::arc(),
+            EthEvmConfig::mainnet(),
+            ValidationApiConfig::default(),
+            Runtime::test(),
+            Arc::new(UnusedPayloadValidator),
+            None,
+        )
+    }
+
+    /// A submission whose payload pays the proposer nothing, like a trustless ePBS bid: there the
+    /// payment settles from the builder's stake on the consensus layer.
+    fn payment_free_submission() -> (MockEthProvider, RecoveredBlock<Block>, BidTrace) {
+        let provider = MockEthProvider::default();
+
+        let parent = Header { gas_limit: 30_000_000, ..Default::default() };
+        let parent = SealedHeader::seal_slow(parent);
+        provider.add_block(
+            parent.hash(),
+            Block { header: parent.clone_header(), body: Default::default() },
+        );
+
+        let header = Header {
+            parent_hash: parent.hash(),
+            number: parent.number() + 1,
+            gas_limit: parent.gas_limit(),
+            timestamp: parent.timestamp() + 12,
+            ..Default::default()
+        };
+        let block = SealedBlock::seal_slow(Block { header, body: Default::default() })
+            .try_recover()
+            .unwrap();
+        provider.state_roots.lock().push(block.state_root());
+
+        let message = BidTrace {
+            parent_hash: block.parent_hash(),
+            block_hash: block.hash(),
+            gas_limit: block.gas_limit(),
+            gas_used: block.gas_used(),
+            proposer_fee_recipient: Address::repeat_byte(0x42),
+            value: U256::from(1_000_000_000_000_000_000u64),
+            ..Default::default()
+        };
+
+        (provider, block, message)
+    }
+
+    #[tokio::test]
+    async fn test_payment_check_runs_for_a_nonzero_bid() {
+        let (provider, block, message) = payment_free_submission();
+        let registered_gas_limit = block.gas_limit();
+
+        let err = test_validation_api(provider)
+            .validate_message_against_block(block, message, registered_gas_limit, None)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, ValidationApiError::ProposerPayment), "unexpected error: {err}");
+    }
+
+    #[tokio::test]
+    async fn test_zero_value_bid_skips_the_payment_check() {
+        let (provider, block, mut message) = payment_free_submission();
+        let registered_gas_limit = block.gas_limit();
+        message.value = U256::ZERO;
+
+        test_validation_api(provider)
+            .validate_message_against_block(block, message, registered_gas_limit, None)
+            .await
+            .unwrap();
+    }
+
+    /// A zero-value bid promises the proposer nothing, so there is nothing to verify. The
+    /// balance-delta branch already lets one through whenever the fee recipient's balance does
+    /// not fall -- but a fee recipient that merely sends a transaction of its own in the same
+    /// block ends it poorer, drops through to the last-transaction fallback and is rejected.
+    #[test]
+    fn test_zero_value_bid_is_accepted_when_the_fee_recipient_spends() {
+        let (provider, block, mut message) = payment_free_submission();
+        message.value = U256::ZERO;
+
+        let output = BlockExecutionOutput {
+            result: Default::default(),
+            state: fee_recipient_spent(message.proposer_fee_recipient),
+        };
+
+        test_validation_api(provider)
+            .ensure_payment(block.sealed_block(), &output, &message)
+            .unwrap();
+    }
+
+    /// Execution state for a block in which `address` ended up poorer than it started.
+    fn fee_recipient_spent(address: Address) -> BundleState {
+        let balance =
+            |wei: u64| Some(AccountInfo { balance: U256::from(wei), ..Default::default() });
+
+        let mut state = BundleState::default();
+        state.state.insert(
+            address,
+            BundleAccount {
+                original_info: balance(1_000),
+                info: balance(999),
+                storage: Default::default(),
+                status: AccountStatus::Changed,
+            },
+        );
+        state
+    }
+}
+
+#[cfg(test)]
+mod raw_payload_tests {
+    use super::*;
+    use alloy_rpc_types_engine::ExecutionPayloadV1;
+    fn test_execution_payload() -> ExecutionPayload {
+        ExecutionPayload::V1(ExecutionPayloadV1 {
+            parent_hash: B256::repeat_byte(0x11),
+            fee_recipient: Address::ZERO,
+            state_root: B256::ZERO,
+            receipts_root: B256::ZERO,
+            logs_bloom: Default::default(),
+            prev_randao: B256::ZERO,
+            block_number: 1,
+            gas_limit: 30_000_000,
+            gas_used: 15_000_000,
+            timestamp: 1,
+            extra_data: Default::default(),
+            base_fee_per_gas: Default::default(),
+            block_hash: B256::repeat_byte(0x22),
+            transactions: Default::default(),
+        })
+    }
+
+    fn matching_bid_trace(payload: &ExecutionPayload) -> BidTrace {
+        let payload = payload.as_v1();
+        BidTrace {
+            parent_hash: payload.parent_hash,
+            block_hash: payload.block_hash,
+            gas_limit: payload.gas_limit,
+            gas_used: payload.gas_used,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_validate_message_against_payload_block_hash_mismatch() {
+        let payload = test_execution_payload();
+        let mut message = matching_bid_trace(&payload);
+        message.block_hash = B256::repeat_byte(0x33);
+
+        let err = validate_message_against_payload(&message, &payload).unwrap_err();
+        let ValidationApiError::BlockHashMismatch(mismatch) = err else {
+            panic!("unexpected error: {err}")
+        };
+        assert_eq!(mismatch.got, message.block_hash);
+        assert_eq!(mismatch.expected, payload.block_hash());
+    }
+
+    #[test]
+    fn test_validate_message_against_payload_parent_hash_mismatch() {
+        let payload = test_execution_payload();
+        let mut message = matching_bid_trace(&payload);
+        message.parent_hash = B256::repeat_byte(0x33);
+
+        let err = validate_message_against_payload(&message, &payload).unwrap_err();
+        let ValidationApiError::ParentHashMismatch(mismatch) = err else {
+            panic!("unexpected error: {err}")
+        };
+        assert_eq!(mismatch.got, message.parent_hash);
+        assert_eq!(mismatch.expected, payload.parent_hash());
+    }
+
+    #[test]
+    fn test_validate_message_against_payload_gas_limit_mismatch() {
+        let payload = test_execution_payload();
+        let mut message = matching_bid_trace(&payload);
+        message.gas_limit += 1;
+
+        let err = validate_message_against_payload(&message, &payload).unwrap_err();
+        let ValidationApiError::GasLimitMismatch(mismatch) = err else {
+            panic!("unexpected error: {err}")
+        };
+        assert_eq!(mismatch.got, message.gas_limit);
+        assert_eq!(mismatch.expected, payload.gas_limit());
+    }
+
+    #[test]
+    fn test_validate_message_against_payload_gas_used_mismatch() {
+        let payload = test_execution_payload();
+        let mut message = matching_bid_trace(&payload);
+        message.gas_used += 1;
+
+        let err = validate_message_against_payload(&message, &payload).unwrap_err();
+        let ValidationApiError::GasUsedMismatch(mismatch) = err else {
+            panic!("unexpected error: {err}")
+        };
+        assert_eq!(mismatch.got, message.gas_used);
+        assert_eq!(mismatch.expected, payload.as_v1().gas_used);
     }
 }

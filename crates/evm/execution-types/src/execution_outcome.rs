@@ -199,7 +199,7 @@ impl<T> ExecutionOutcome<T> {
     ///
     /// This means that depending on status we can potentially return `U256::ZERO`.
     pub fn storage(&self, address: &Address, storage_key: U256) -> Option<U256> {
-        self.bundle.account(address).and_then(|a| a.storage_slot(storage_key))
+        self.bundle.storage(address, storage_key)
     }
 
     /// Return bytecode if known.
@@ -411,7 +411,7 @@ impl ExecutionOutcome {
     pub fn ethereum_receipts_root(&self, block_number: BlockNumber) -> Option<B256> {
         self.generic_receipts_root_slow(
             block_number,
-            reth_ethereum_primitives::calculate_receipt_root_no_memo,
+            reth_ethereum_primitives::Receipt::calculate_receipt_root_no_memo,
         )
     }
 }

@@ -6,35 +6,27 @@ use alloy_rpc_types_eth::BlockId;
 use reth_errors::RethError;
 use reth_evm::{block::BlockExecutor, ConfigureEvm, ConfigureEvmForRead, Evm};
 use reth_revm::{database::StateProviderDatabase, State};
-use reth_rpc_eth_types::{
-    cache::db::StateProviderTraitObjWrapper, error::FromEthApiError, EthApiError,
-};
+use reth_rpc_eth_types::{error::FromEthApiError, EthApiError};
 use reth_storage_api::StateProviderFactory;
 
 use crate::{
-    helpers::{Call, LoadBlock, Trace},
-    RpcNodeCore, RpcNodeCoreExt,
+    helpers::{LoadBlock, Trace},
+    RpcNodeCore,
 };
 
 /// Helper trait for `eth_blockAccessList` RPC method.
-pub trait GetBlockAccessList: Trace + Call + LoadBlock + RpcNodeCoreExt {
+pub trait GetBlockAccessList: Trace + LoadBlock {
     /// Retrieves the block access list for a block identified by its hash.
     fn get_block_access_list(
         &self,
         block_id: BlockId,
     ) -> impl Future<Output = Result<Option<BlockAccessList>, Self::Error>> + Send {
         async move {
-            let this = self.view().await?;
-            let block = this
-                .recovered_block(block_id)
-                .await?
-                .ok_or_else(|| EthApiError::HeaderNotFound(block_id))?;
-
-            if let Some(cached_bal) =
-                this.cache().get_bal(block.hash()).await.map_err(Self::Error::from_eth_err)?
-            {
-                return Ok(Some(cached_bal.as_bal().clone().into_alloy_bal()))
+            if block_id.is_pending() {
+                return Ok(None)
             }
+            let this = self.view().await?;
+            let Some(block) = this.recovered_block(block_id).await? else { return Ok(None) };
 
             let permit = this
                 .acquire_owned_blocking_io()
@@ -49,7 +41,7 @@ pub trait GetBlockAccessList: Trace + Call + LoadBlock + RpcNodeCoreExt {
                     .map_err(Self::Error::from_eth_err)?;
 
                 let mut db = State::builder()
-                    .with_database(StateProviderDatabase::new(StateProviderTraitObjWrapper(state)))
+                    .with_database(StateProviderDatabase::new(state))
                     .with_bal_builder()
                     .build();
 
@@ -66,6 +58,9 @@ pub trait GetBlockAccessList: Trace + Call + LoadBlock + RpcNodeCoreExt {
 
                 // replay all transactions prior to the targeted transaction
                 for block_tx in block_txs {
+                    if reth_tasks::cancel::is_cancelled() {
+                        return Err(EthApiError::InternalEthError.into())
+                    }
                     executor.execute_transaction(block_tx).map_err(Self::Error::from_eth_err)?;
                     executor.evm_mut().db_mut().bump_bal_index();
                 }
@@ -87,19 +82,21 @@ pub trait GetBlockAccessList: Trace + Call + LoadBlock + RpcNodeCoreExt {
         block_id: BlockId,
     ) -> impl Future<Output = Result<Option<Bytes>, Self::Error>> + Send {
         async move {
+            if block_id.is_pending() {
+                return Ok(None)
+            }
             let this = self.view().await?;
             let block = this
                 .recovered_block(block_id)
                 .await?
                 .ok_or_else(|| EthApiError::HeaderNotFound(block_id))?;
 
-            if let Some(cached_bal) =
-                this.cache().get_bal(block.hash()).await.map_err(Self::Error::from_eth_err)?
-            {
-                return Ok(Some(cached_bal.as_raw().clone()))
-            }
-
-            Ok(this.get_block_access_list(block_id).await?.map(|bal| alloy_rlp::encode(bal).into()))
+            Ok(this
+                .get_block_access_list(BlockId::hash(block.hash()))
+                .await?
+                .map(|bal| alloy_rlp::encode(bal).into()))
         }
     }
 }
+
+impl<T> GetBlockAccessList for T where T: Trace + LoadBlock {}

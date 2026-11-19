@@ -22,12 +22,15 @@ reth-network-api.workspace = true
 reth-network-p2p.workspace = true
 reth-discv4.workspace = true
 reth-discv5.workspace = true
+reth-net-nat.workspace = true
 reth-dns-discovery.workspace = true
 reth-ethereum-forks.workspace = true
+reth-evm.workspace = true
 reth-eth-wire.workspace = true
 reth-eth-wire-types.workspace = true
 reth-ecies.workspace = true
 reth-tasks.workspace = true
+reth-lru.workspace = true
 reth-transaction-pool.workspace = true
 reth-storage-api.workspace = true
 reth-tokio-util.workspace = true
@@ -37,6 +40,7 @@ reth-network-types = { workspace = true, features = ["serde"] }
 
 # ethereum
 alloy-consensus.workspace = true
+alloy-trie = { workspace = true, features = ["ethereum"] }
 alloy-eips.workspace = true
 alloy-primitives.workspace = true
 alloy-rlp.workspace = true
@@ -73,11 +77,13 @@ rand.workspace = true
 rand_08.workspace = true
 secp256k1 = { workspace = true, features = ["global-context", "std", "recovery"] }
 derive_more.workspace = true
-schnellru.workspace = true
 itertools.workspace = true
 smallvec.workspace = true
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+test-case.workspace = true
+criterion = { workspace = true, features = ["async_tokio"] }
 # reth
 reth-discv4 = { workspace = true, features = ["test-utils"] }
 
@@ -123,6 +129,7 @@ serde = [
     "rand_08/serde",
     "reth-storage-api/serde",
     "reth-network-types/serde",
+    "alloy-trie/serde",
 ]
 test-utils = [
     "reth-transaction-pool/test-utils",
@@ -138,4 +145,10 @@ test-utils = [
     "dep:reth-evm-ethereum",
     "reth-evm-ethereum?/test-utils",
     "reth-tasks/test-utils",
+    "reth-evm/test-utils",
 ]
+
+[[bench]]
+name = "tx_fetcher"
+harness = false
+required-features = ["test-utils"]

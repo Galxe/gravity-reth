@@ -4,8 +4,7 @@ use alloy_consensus::BlockHeader;
 use alloy_eips::BlockNumberOrTag;
 use alloy_primitives::{Sealable, TxHash};
 use alloy_rpc_types_eth::{
-    BlockNumHash, Filter, FilterBlockOption, FilterChanges, FilterId, Log,
-    PendingTransactionFilterKind,
+    Filter, FilterBlockOption, FilterChanges, FilterId, PendingTransactionFilterKind,
 };
 use async_trait::async_trait;
 use futures::{
@@ -20,7 +19,7 @@ use reth_primitives_traits::{NodePrimitives, SealedHeader};
 use reth_rpc_eth_api::{
     helpers::{EthBlocks, LoadReceipt},
     EngineEthFilter, EthApiTypes, EthFilterApiServer, FullEthApiTypes, QueryLimits, RpcConvert,
-    RpcNodeCoreExt, RpcTransaction,
+    RpcLog, RpcNodeCoreExt, RpcTransaction,
 };
 use reth_rpc_eth_types::{
     logs_utils::{self, append_matching_block_logs, ProviderOrBlock},
@@ -48,20 +47,16 @@ use tokio::{
 };
 use tracing::{debug, error, trace};
 
-impl<Eth> EngineEthFilter for EthFilter<Eth>
+impl<Eth> EngineEthFilter<RpcLog<Eth::NetworkTypes>> for EthFilter<Eth>
 where
-    Eth: FullEthApiTypes
-        + RpcNodeCoreExt<Provider: BlockIdReader>
-        + LoadReceipt
-        + EthBlocks
-        + 'static,
+    Eth: FullEthApiTypes + RpcNodeCoreExt<Provider: BlockIdReader> + LoadReceipt + EthBlocks,
 {
     /// Returns logs matching given filter object, no query limits
     fn logs(
         &self,
         filter: Filter,
         limits: QueryLimits,
-    ) -> impl Future<Output = RpcResult<Vec<Log>>> + Send {
+    ) -> impl Future<Output = RpcResult<Vec<RpcLog<Eth::NetworkTypes>>>> + Send {
         trace!(target: "rpc::eth", "Serving eth_getLogs");
         self.logs_for_filter(filter, limits).map_err(|e| e.into())
     }
@@ -209,11 +204,7 @@ where
 
 impl<Eth> EthFilter<Eth>
 where
-    Eth: FullEthApiTypes<Provider: BlockReader + BlockIdReader>
-        + RpcNodeCoreExt
-        + LoadReceipt
-        + EthBlocks
-        + 'static,
+    Eth: FullEthApiTypes<Provider: BlockReader + BlockIdReader> + LoadReceipt + EthBlocks,
 {
     /// Access the underlying provider.
     fn provider(&self) -> &Eth::Provider {
@@ -229,7 +220,10 @@ where
     pub async fn filter_changes(
         &self,
         id: FilterId,
-    ) -> Result<FilterChanges<RpcTransaction<Eth::NetworkTypes>>, EthFilterError> {
+    ) -> Result<
+        FilterChanges<RpcTransaction<Eth::NetworkTypes>, RpcLog<Eth::NetworkTypes>>,
+        EthFilterError,
+    > {
         let info = self.provider().chain_info()?;
         let best_number = info.best_number;
 
@@ -255,7 +249,14 @@ where
         };
 
         match kind {
-            FilterKind::PendingTransaction(filter) => Ok(filter.drain().await),
+            FilterKind::PendingTransaction(filter) => Ok(match filter.drain().await {
+                FilterChanges::Empty => FilterChanges::Empty,
+                FilterChanges::Hashes(hashes) => FilterChanges::Hashes(hashes),
+                FilterChanges::Transactions(transactions) => {
+                    FilterChanges::Transactions(transactions)
+                }
+                FilterChanges::Logs(_) => unreachable!("pending transaction filter returned logs"),
+            }),
             FilterKind::Block => {
                 // Note: we need to fetch the block hashes from inclusive range
                 // [start_block..best_block]
@@ -310,7 +311,10 @@ where
     /// Returns an error if no matching log filter exists.
     ///
     /// Handler for `eth_getFilterLogs`
-    pub async fn filter_logs(&self, id: FilterId) -> Result<Vec<Log>, EthFilterError> {
+    pub async fn filter_logs(
+        &self,
+        id: FilterId,
+    ) -> Result<Vec<RpcLog<Eth::NetworkTypes>>, EthFilterError> {
         let filter = {
             let mut filters = self.inner.active_filters.inner.lock().await;
             let filter =
@@ -332,15 +336,16 @@ where
         &self,
         filter: Filter,
         limits: QueryLimits,
-    ) -> Result<Vec<Log>, EthFilterError> {
+    ) -> Result<Vec<RpcLog<Eth::NetworkTypes>>, EthFilterError> {
         self.inner.clone().logs_for_filter(filter, limits).await
     }
 }
 
 #[async_trait]
-impl<Eth> EthFilterApiServer<RpcTransaction<Eth::NetworkTypes>> for EthFilter<Eth>
+impl<Eth> EthFilterApiServer<RpcTransaction<Eth::NetworkTypes>, RpcLog<Eth::NetworkTypes>>
+    for EthFilter<Eth>
 where
-    Eth: FullEthApiTypes + RpcNodeCoreExt + LoadReceipt + EthBlocks + 'static,
+    Eth: FullEthApiTypes + LoadReceipt + EthBlocks,
 {
     /// Handler for `eth_newFilter`
     async fn new_filter(&self, filter: Filter) -> RpcResult<FilterId> {
@@ -389,7 +394,8 @@ where
     async fn filter_changes(
         &self,
         id: FilterId,
-    ) -> RpcResult<FilterChanges<RpcTransaction<Eth::NetworkTypes>>> {
+    ) -> RpcResult<FilterChanges<RpcTransaction<Eth::NetworkTypes>, RpcLog<Eth::NetworkTypes>>>
+    {
         trace!(target: "rpc::eth", "Serving eth_getFilterChanges");
         Ok(Self::filter_changes(self, id).await?)
     }
@@ -399,7 +405,7 @@ where
     /// Returns an error if no matching log filter exists.
     ///
     /// Handler for `eth_getFilterLogs`
-    async fn filter_logs(&self, id: FilterId) -> RpcResult<Vec<Log>> {
+    async fn filter_logs(&self, id: FilterId) -> RpcResult<Vec<RpcLog<Eth::NetworkTypes>>> {
         trace!(target: "rpc::eth", "Serving eth_getFilterLogs");
         Ok(Self::filter_logs(self, id).await?)
     }
@@ -419,7 +425,7 @@ where
     /// Returns logs matching given filter object.
     ///
     /// Handler for `eth_getLogs`
-    async fn logs(&self, filter: Filter) -> RpcResult<Vec<Log>> {
+    async fn logs(&self, filter: Filter) -> RpcResult<Vec<RpcLog<Eth::NetworkTypes>>> {
         trace!(target: "rpc::eth", "Serving eth_getLogs");
         Ok(self.logs_for_filter(filter, self.inner.query_limits).await?)
     }
@@ -458,8 +464,7 @@ where
     Eth: RpcNodeCoreExt<Provider: BlockIdReader, Pool: TransactionPool>
         + EthApiTypes<NetworkTypes: reth_rpc_eth_api::types::RpcTypes>
         + LoadReceipt
-        + EthBlocks
-        + 'static,
+        + EthBlocks,
 {
     /// Access the underlying provider.
     fn provider(&self) -> &Eth::Provider {
@@ -476,55 +481,55 @@ where
         self: Arc<Self>,
         filter: Filter,
         limits: QueryLimits,
-    ) -> Result<Vec<Log>, EthFilterError> {
+    ) -> Result<Vec<RpcLog<Eth::NetworkTypes>>, EthFilterError> {
         match filter.block_option {
             FilterBlockOption::AtBlockHash(block_hash) => {
                 // First try to get cached block and receipts, as it's likely they're already cached
                 let Some((receipts, maybe_block)) =
                     self.eth_cache().get_receipts_and_maybe_block(block_hash).await?
                 else {
-                    return Err(ProviderError::HeaderNotFound(block_hash.into()).into())
+                    return Err(match self.provider().block_number(block_hash)? {
+                        Some(number) => EthFilterError::ReceiptsUnavailable(number),
+                        None => ProviderError::HeaderNotFound(block_hash.into()).into(),
+                    });
                 };
 
-                // Read number and timestamp from cached block or provider header
-                let (block_number, block_timestamp, bloom_matches) = if let Some(block) =
-                    &maybe_block
-                {
-                    (
-                        block.header().number(),
-                        block.header().timestamp(),
-                        filter.matches_bloom(block.header().logs_bloom()),
-                    )
+                let header = if let Some(block) = &maybe_block {
+                    block.clone_sealed_header()
                 } else {
                     let header = self
                         .provider()
                         .header_by_hash_or_number(block_hash.into())?
                         .ok_or_else(|| ProviderError::HeaderNotFound(block_hash.into()))?;
-                    (header.number(), header.timestamp(), filter.matches_bloom(header.logs_bloom()))
+                    SealedHeader::new(header, block_hash)
                 };
+                let block_number = header.number();
+                let bloom_matches = filter.matches_bloom(header.logs_bloom());
 
                 // Check if the block has been pruned (EIP-4444)
                 let earliest_block = self.provider().earliest_block_number()?;
                 if block_number < earliest_block {
-                    return Err(EthApiError::PrunedHistoryUnavailable.into());
+                    return Err(EthApiError::PrunedHistoryUnavailable {
+                        requested: block_number,
+                        earliest_available: earliest_block,
+                    }
+                    .into());
                 }
 
                 if !bloom_matches {
                     return Ok(Vec::new())
                 }
-                let block_num_hash = BlockNumHash::new(block_number, block_hash);
-
                 let mut all_logs = Vec::new();
                 append_matching_block_logs(
                     &mut all_logs,
+                    self.eth_api.converter(),
                     maybe_block
                         .map(ProviderOrBlock::Block)
                         .unwrap_or_else(|| ProviderOrBlock::Provider(self.provider())),
                     &filter,
-                    block_num_hash,
+                    &header,
                     &receipts,
                     false,
-                    block_timestamp,
                 )?;
 
                 Ok(all_logs)
@@ -550,29 +555,32 @@ where
                         if pending_block.block.number() > info.best_number {
                             // only consider the pending block if it is ahead of the chain
                             let mut all_logs = Vec::new();
-                            let timestamp = pending_block.block.timestamp();
-                            let block_num_hash = pending_block.block.num_hash();
+                            let header = pending_block.block.clone_sealed_header();
                             append_matching_block_logs(
                                 &mut all_logs,
+                                self.eth_api.converter(),
                                 ProviderOrBlock::<Eth::Provider>::Block(pending_block.block),
                                 &filter,
-                                block_num_hash,
+                                &header,
                                 &pending_block.receipts,
                                 false, // removed = false for pending blocks
-                                timestamp,
                             )?;
-                            return Ok(all_logs);
+                            return Ok(all_logs)
                         }
                     }
                 }
 
                 let info = self.provider().chain_info()?;
                 let start_block = info.best_number;
+                // Without a pending block to serve, a `pending` bound resolves to the head on both
+                // ends instead of to whatever payload the engine currently holds
                 let from = from_block
+                    .filter(|num| !num.is_pending())
                     .map(|num| self.provider().convert_block_number(num))
                     .transpose()?
                     .flatten();
                 let to = to_block
+                    .filter(|num| !num.is_pending())
                     .map(|num| self.provider().convert_block_number(num))
                     .transpose()?
                     .flatten();
@@ -587,20 +595,17 @@ where
                     });
                 }
 
-                if let Some(f) = from &&
-                    f > info.best_number
-                {
-                    // start block higher than local head, can return empty
-                    return Ok(Vec::new());
-                }
-
                 let (from_block_number, to_block_number) =
                     logs_utils::get_filter_block_range(from, to, start_block, info)?;
 
                 // Check if the requested range overlaps with pruned history (EIP-4444)
                 let earliest_block = self.provider().earliest_block_number()?;
                 if from_block_number < earliest_block {
-                    return Err(EthApiError::PrunedHistoryUnavailable.into());
+                    return Err(EthApiError::PrunedHistoryUnavailable {
+                        requested: from_block_number,
+                        earliest_available: earliest_block,
+                    }
+                    .into());
                 }
 
                 self.get_logs_in_block_range(filter, from_block_number, to_block_number, limits)
@@ -644,7 +649,7 @@ where
         from_block: u64,
         to_block: u64,
         limits: QueryLimits,
-    ) -> Result<Vec<Log>, EthFilterError> {
+    ) -> Result<Vec<RpcLog<Eth::NetworkTypes>>, EthFilterError> {
         trace!(target: "rpc::eth::filter", from=from_block, to=to_block, ?filter, "finding logs in range");
 
         // perform boundary checks first
@@ -701,7 +706,7 @@ where
         from_block: u64,
         to_block: u64,
         limits: QueryLimits,
-    ) -> Result<Vec<Log>, EthFilterError> {
+    ) -> Result<Vec<RpcLog<Eth::NetworkTypes>>, EthFilterError> {
         let mut all_logs = Vec::new();
 
         // get current chain tip to determine processing mode
@@ -757,17 +762,16 @@ where
             while let Some(ReceiptBlockResult { receipts, recovered_block, header }) =
                 range_mode.next().await?
             {
-                let num_hash = header.num_hash();
                 append_matching_block_logs(
                     &mut all_logs,
+                    self.eth_api.converter(),
                     recovered_block
                         .map(ProviderOrBlock::Block)
                         .unwrap_or_else(|| ProviderOrBlock::Provider(self.provider())),
                     filter,
-                    num_hash,
+                    &header,
                     &receipts,
                     false,
-                    header.timestamp(),
                 )?;
 
                 // size check but only if range is multiple blocks, so we always return all
@@ -777,10 +781,10 @@ where
                     is_multi_block_range &&
                     all_logs.len() > max_logs_per_response
                 {
-                    let retry_to_block = if num_hash.number == from_block {
+                    let retry_to_block = if header.number() == from_block {
                         from_block
                     } else {
-                        num_hash.number - 1
+                        header.number() - 1
                     };
 
                     debug!(
@@ -921,7 +925,7 @@ impl<T, TxCompat> FullTransactionsFilter<RpcTransaction<TxCompat::Network>>
     for FullTransactionsReceiver<T, TxCompat>
 where
     T: PoolTransaction + 'static,
-    TxCompat: RpcConvert<Primitives: NodePrimitives<SignedTx = T::Consensus>> + 'static,
+    TxCompat: RpcConvert<Primitives: NodePrimitives<SignedTx = T::Consensus>>,
 {
     async fn drain(&self) -> FilterChanges<RpcTransaction<TxCompat::Network>> {
         Self::drain(self).await
@@ -1002,6 +1006,9 @@ pub enum EthFilterError {
     /// Query scope is too broad.
     #[error("query exceeds max block range {0}")]
     QueryExceedsMaxBlocks(u64),
+    /// Receipts of a block the filter matched are gone, most likely pruned.
+    #[error("pruned history unavailable")]
+    ReceiptsUnavailable(u64),
     /// Query result is too large.
     #[error("query exceeds max results {max_logs}, retry with the range {from_block}-{to_block}")]
     QueryExceedsMaxResults {
@@ -1023,14 +1030,18 @@ pub enum EthFilterError {
 impl From<EthFilterError> for jsonrpsee::types::error::ErrorObject<'static> {
     fn from(err: EthFilterError) -> Self {
         match err {
+            // geth and Nethermind answer -32000 for unknown filter ids
             EthFilterError::FilterNotFound(_) => rpc_error_with_code(
-                jsonrpsee::types::error::INVALID_PARAMS_CODE,
+                jsonrpsee::types::error::CALL_EXECUTION_FAILED_CODE,
                 "filter not found",
             ),
             err @ EthFilterError::InternalError => {
                 rpc_error_with_code(jsonrpsee::types::error::INTERNAL_ERROR_CODE, err.to_string())
             }
             EthFilterError::EthAPIError(err) => err.into(),
+            err @ EthFilterError::ReceiptsUnavailable(_) => {
+                rpc_error_with_code(4444, err.to_string())
+            }
             err @ (EthFilterError::InvalidBlockRangeParams |
             EthFilterError::QueryExceedsMaxBlocks(_) |
             EthFilterError::QueryExceedsMaxResults { .. } |
@@ -1062,7 +1073,7 @@ impl From<logs_utils::FilterBlockRangeError> for EthFilterError {
 /// a match for the filter.
 struct ReceiptBlockResult<P>
 where
-    P: ReceiptProvider + BlockReader,
+    P: BlockReader,
 {
     /// We always need the entire receipts for the matching block.
     receipts: Arc<Vec<ProviderReceipt<P>>>,
@@ -1074,11 +1085,7 @@ where
 
 /// Represents different modes for processing block ranges when filtering logs
 enum RangeMode<
-    Eth: RpcNodeCoreExt<Provider: BlockIdReader, Pool: TransactionPool>
-        + EthApiTypes
-        + LoadReceipt
-        + EthBlocks
-        + 'static,
+    Eth: RpcNodeCoreExt<Provider: BlockIdReader, Pool: TransactionPool> + LoadReceipt + EthBlocks,
 > {
     /// Use cache-based processing for recent blocks
     Cached(CachedMode<Eth>),
@@ -1088,7 +1095,6 @@ enum RangeMode<
 
 impl<
         Eth: RpcNodeCoreExt<Provider: BlockIdReader, Pool: TransactionPool>
-            + EthApiTypes
             + LoadReceipt
             + EthBlocks
             + 'static,
@@ -1169,7 +1175,6 @@ impl<
 /// Mode for processing blocks using cache optimization for recent blocks
 struct CachedMode<
     Eth: RpcNodeCoreExt<Provider: BlockIdReader, Pool: TransactionPool>
-        + EthApiTypes
         + LoadReceipt
         + EthBlocks
         + 'static,
@@ -1180,27 +1185,22 @@ struct CachedMode<
 
 impl<
         Eth: RpcNodeCoreExt<Provider: BlockIdReader, Pool: TransactionPool>
-            + EthApiTypes
             + LoadReceipt
             + EthBlocks
             + 'static,
     > CachedMode<Eth>
 {
     async fn next(&mut self) -> Result<Option<ReceiptBlockResult<Eth::Provider>>, EthFilterError> {
-        for header in self.headers_iter.by_ref() {
-            // Use get_receipts_and_maybe_block which has automatic fallback to provider
-            if let Some((receipts, maybe_block)) =
-                self.filter_inner.eth_cache().get_receipts_and_maybe_block(header.hash()).await?
-            {
-                return Ok(Some(ReceiptBlockResult {
-                    receipts,
-                    recovered_block: maybe_block,
-                    header,
-                }));
-            }
-        }
+        let Some(header) = self.headers_iter.next() else { return Ok(None) };
 
-        Ok(None) // No more headers
+        // Use get_receipts_and_maybe_block which has automatic fallback to provider
+        let Some((receipts, maybe_block)) =
+            self.filter_inner.eth_cache().get_receipts_and_maybe_block(header.hash()).await?
+        else {
+            return Err(EthFilterError::ReceiptsUnavailable(header.number()))
+        };
+
+        Ok(Some(ReceiptBlockResult { receipts, recovered_block: maybe_block, header }))
     }
 }
 
@@ -1210,11 +1210,7 @@ type ReceiptFetchFuture<P> =
 
 /// Mode for processing blocks using range queries for older blocks
 struct RangeBlockMode<
-    Eth: RpcNodeCoreExt<Provider: BlockIdReader, Pool: TransactionPool>
-        + EthApiTypes
-        + LoadReceipt
-        + EthBlocks
-        + 'static,
+    Eth: RpcNodeCoreExt<Provider: BlockIdReader, Pool: TransactionPool> + LoadReceipt + EthBlocks,
 > {
     filter_inner: Arc<EthFilterInner<Eth>>,
     iter: Peekable<std::vec::IntoIter<SealedHeader<<Eth::Provider as HeaderProvider>::Header>>>,
@@ -1229,7 +1225,6 @@ struct RangeBlockMode<
 
 impl<
         Eth: RpcNodeCoreExt<Provider: BlockIdReader, Pool: TransactionPool>
-            + EthApiTypes
             + LoadReceipt
             + EthBlocks
             + 'static,
@@ -1315,7 +1310,7 @@ impl<
                     // Not cached - fetch directly from provider
                     match self.filter_inner.provider().receipts_by_block(header.hash().into())? {
                         Some(receipts) => Arc::new(receipts),
-                        None => continue, // No receipts found
+                        None => return Err(EthFilterError::ReceiptsUnavailable(header.number())),
                     }
                 }
             };
@@ -1363,7 +1358,7 @@ impl<
                 .try_acquire_owned()
             {
                 Ok(permit) => Box::pin(async move {
-                    let chunk_task = tokio::task::spawn_blocking(move || {
+                    let chunk_task = reth_tasks::spawn_blocking(move || {
                         let _permit = permit;
                         fetch()
                     });
@@ -1396,7 +1391,7 @@ impl<
             // unlikely to be cached
             let receipts = match filter_inner.provider().receipts_by_block(header.hash().into())? {
                 Some(receipts) => Arc::new(receipts),
-                None => continue, // No receipts found
+                None => return Err(EthFilterError::ReceiptsUnavailable(header.number())),
             };
 
             if !receipts.is_empty() {
@@ -1412,21 +1407,31 @@ impl<
 mod tests {
     use super::*;
     use crate::{eth::EthApi, EthApiBuilder};
+    use alloy_consensus::TxLegacy;
     use alloy_network::Ethereum;
     use alloy_primitives::FixedBytes;
     use rand::Rng;
     use reth_chainspec::{ChainSpec, ChainSpecProvider};
+    use reth_db_api::models::StoredBlockBodyIndices;
     use reth_ethereum_primitives::TxType;
     use reth_evm_ethereum::EthEvmConfig;
     use reth_network_api::noop::NoopNetwork;
     use reth_provider::test_utils::MockEthProvider;
     use reth_rpc_convert::RpcConverter;
-    use reth_rpc_eth_api::node::RpcNodeCoreAdapter;
+    use reth_rpc_eth_api::{helpers::SpawnBlocking, node::RpcNodeCoreAdapter};
     use reth_rpc_eth_types::receipt::EthReceiptConverter;
     use reth_tasks::Runtime;
     use reth_testing_utils::generators;
     use reth_transaction_pool::test_utils::{testing_pool, TestPool};
     use std::{collections::VecDeque, sync::Arc};
+
+    #[test]
+    fn receipts_unavailable_error_matches_geth() {
+        let err: jsonrpsee::types::error::ErrorObject<'static> =
+            EthFilterError::ReceiptsUnavailable(100).into();
+        assert_eq!(err.code(), 4444);
+        assert_eq!(err.message(), "pruned history unavailable");
+    }
 
     #[test]
     fn test_block_range_iter() {
@@ -1468,6 +1473,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_logs_for_filter_from_block_beyond_head() {
+        let provider = MockEthProvider::default();
+        provider.add_header(FixedBytes::random(), alloy_consensus::Header::default());
+        let eth_api = build_test_eth_api(provider);
+
+        let eth_filter =
+            super::EthFilter::new(eth_api, EthFilterConfig::default(), Runtime::test());
+
+        let filter = Filter::new().from_block(100u64).to_block(BlockNumberOrTag::Latest);
+        let result = eth_filter.inner.clone().logs_for_filter(filter, QueryLimits::default()).await;
+        assert!(matches!(result, Err(EthFilterError::InvalidBlockRangeParams)), "{result:?}");
+    }
+
+    #[tokio::test]
     async fn test_range_block_mode_empty_range() {
         let provider = MockEthProvider::default();
         let eth_api = build_test_eth_api(provider);
@@ -1497,11 +1516,6 @@ mod tests {
     #[tokio::test]
     async fn test_range_block_mode_queued_results_priority() {
         let provider = MockEthProvider::default();
-        let eth_api = build_test_eth_api(provider);
-
-        let eth_filter =
-            super::EthFilter::new(eth_api, EthFilterConfig::default(), Runtime::test());
-        let filter_inner = eth_filter.inner;
 
         let headers = vec![
             SealedHeader::new(
@@ -1513,6 +1527,16 @@ mod tests {
                 FixedBytes::random(),
             ),
         ];
+        for header in &headers {
+            provider.add_header(header.hash(), header.header().clone());
+            provider.add_receipts(header.number(), vec![]);
+        }
+
+        let eth_api = build_test_eth_api(provider);
+
+        let eth_filter =
+            super::EthFilter::new(eth_api, EthFilterConfig::default(), Runtime::test());
+        let filter_inner = eth_filter.inner;
 
         // create specific mock results to test ordering
         let expected_block_hash_1 = FixedBytes::from([1u8; 32]);
@@ -1612,7 +1636,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_range_block_mode_single_block_no_receipts() {
+    async fn test_range_block_mode_single_block_missing_receipts() {
         let provider = MockEthProvider::default();
         let eth_api = build_test_eth_api(provider);
 
@@ -1635,8 +1659,10 @@ mod tests {
             pending_tasks: FuturesOrdered::new(),
         };
 
-        let result = range_mode.next().await;
-        assert!(result.is_ok());
+        // a block whose header matched the filter but whose receipts are gone must not be
+        // silently skipped
+        let Err(err) = range_mode.next().await else { panic!("missing receipts must be an error") };
+        assert!(matches!(err, EthFilterError::ReceiptsUnavailable(100)), "{err:?}");
     }
 
     #[tokio::test]
@@ -1682,6 +1708,8 @@ mod tests {
 
         provider.add_receipts(100, vec![receipt_100_1.clone(), receipt_100_2.clone()]);
         provider.add_receipts(101, vec![receipt_101_1.clone()]);
+        // a block without transactions, which a provider reports as an empty list
+        provider.add_receipts(102, vec![]);
 
         let eth_api = build_test_eth_api(provider);
 
@@ -1897,8 +1925,6 @@ mod tests {
     async fn test_log_limit_retry_range_excludes_overflow_block() {
         let provider = MockEthProvider::default();
 
-        use alloy_consensus::TxLegacy;
-        use reth_db_api::models::StoredBlockBodyIndices;
         use reth_ethereum_primitives::{TransactionSigned, TxType};
 
         let tx_inner = TxLegacy {
@@ -1983,7 +2009,6 @@ mod tests {
         let mut prev_hash = alloy_primitives::B256::default();
 
         // Create a transaction for blocks that will have receipts
-        use alloy_consensus::TxLegacy;
         use reth_ethereum_primitives::{TransactionSigned, TxType};
 
         let tx_inner = TxLegacy {
@@ -2044,7 +2069,6 @@ mod tests {
         provider.add_receipts(103, vec![]);
 
         // Add block body indices for each block so receipts can be fetched
-        use reth_db_api::models::StoredBlockBodyIndices;
         provider
             .add_block_body_indices(100, StoredBlockBodyIndices { first_tx_num: 0, tx_count: 1 });
         provider
@@ -2081,10 +2105,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_range_scan_waits_for_blocking_io_permit() {
-        use reth_rpc_eth_api::helpers::SpawnBlocking;
-
         let provider = MockEthProvider::default();
-        provider.add_header(FixedBytes::random(), alloy_consensus::Header::default());
+        let header = alloy_consensus::Header::default();
+        provider.add_header(header.hash_slow(), header);
+        provider.add_receipts(0, vec![]);
         let eth_api = build_test_eth_api(provider);
 
         // take every permit so the scan has to wait for one
@@ -2111,9 +2135,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_range_scan_across_windows() {
-        use alloy_consensus::TxLegacy;
         use alloy_primitives::{Address, Bloom, Bytes, Log, LogData, Signature};
-        use reth_db_api::models::StoredBlockBodyIndices;
         use reth_ethereum_primitives::{Block, BlockBody, Receipt, TransactionSigned};
 
         let provider = MockEthProvider::default();
@@ -2205,5 +2227,81 @@ mod tests {
             ),
             "{err:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_logs_for_filter_pending_to_block_ends_at_head() {
+        let provider = MockEthProvider::default();
+        let header = alloy_consensus::Header { number: 2, ..Default::default() };
+        let hash = header.hash_slow();
+        provider.add_header(hash, header);
+        provider.add_receipts(2, vec![]);
+        // the engine holds a payload that is not canonical yet
+        provider.set_pending_block_num_hash(Some(alloy_eips::BlockNumHash::new(3, hash)));
+
+        let eth_filter = EthFilter::new(
+            build_test_eth_api(provider),
+            EthFilterConfig::default(),
+            Runtime::test(),
+        );
+        for filter in [
+            Filter::new().from_block(0u64).to_block(BlockNumberOrTag::Pending),
+            Filter::new().select(BlockNumberOrTag::Pending..),
+        ] {
+            let logs = eth_filter
+                .inner
+                .clone()
+                .logs_for_filter(filter, QueryLimits::default())
+                .await
+                .unwrap();
+            assert!(logs.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_logs_for_filter_over_pruned_receipts() {
+        let provider = MockEthProvider::default();
+        let mut parent_hash = FixedBytes::default();
+        for number in 0..=2u64 {
+            let header = alloy_consensus::Header {
+                number,
+                parent_hash,
+                logs_bloom: alloy_primitives::Bloom::from([1u8; 256]),
+                ..Default::default()
+            };
+            parent_hash = header.hash_slow();
+            provider.add_block(
+                parent_hash,
+                reth_ethereum_primitives::Block { header, body: Default::default() },
+            );
+            // the receipts of block 1 were pruned
+            if number != 1 {
+                provider.add_receipts(number, vec![]);
+            }
+        }
+
+        let eth_filter = EthFilter::new(
+            build_test_eth_api(provider),
+            EthFilterConfig::default(),
+            Runtime::test(),
+        );
+
+        // a range that reaches the pruned block is rejected instead of served incompletely
+        let err = eth_filter
+            .inner
+            .clone()
+            .logs_for_filter(Filter::new().from_block(0u64).to_block(2u64), QueryLimits::default())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, EthFilterError::ReceiptsUnavailable(1)), "{err:?}");
+
+        // a range that avoids it is served
+        let logs = eth_filter
+            .inner
+            .clone()
+            .logs_for_filter(Filter::new().from_block(2u64).to_block(2u64), QueryLimits::default())
+            .await
+            .unwrap();
+        assert!(logs.is_empty());
     }
 }

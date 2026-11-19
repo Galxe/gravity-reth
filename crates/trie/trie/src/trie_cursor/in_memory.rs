@@ -140,6 +140,9 @@ impl<C: TrieCursor> TrieCursor for InMemoryTrieCursor<'_, C> {
         &mut self,
         key: Nibbles,
     ) -> Result<Option<(Nibbles, BranchNodeCompact)>, DatabaseError> {
+        if self.last_key.is_none_or(|last| key < last) {
+            self.in_memory_cursor.reset();
+        }
         let entry = self.seek_inner(key, true)?;
         self.last_key = entry.as_ref().map(|(nibbles, _)| *nibbles);
         Ok(entry)
@@ -149,6 +152,9 @@ impl<C: TrieCursor> TrieCursor for InMemoryTrieCursor<'_, C> {
         &mut self,
         key: Nibbles,
     ) -> Result<Option<(Nibbles, BranchNodeCompact)>, DatabaseError> {
+        if self.last_key.is_none_or(|last| key < last) {
+            self.in_memory_cursor.reset();
+        }
         let entry = self.seek_inner(key, false)?;
         self.last_key = entry.as_ref().map(|(nibbles, _)| *nibbles);
         Ok(entry)
@@ -215,6 +221,25 @@ mod tests {
             "Results mismatch.\nGot: {:?}\nExpected: {:?}",
             results, test_case.expected_results
         );
+    }
+
+    #[test]
+    fn overlay_rewinds_after_backward_and_exhausted_seeks() {
+        let [a, b, c] = [1, 2, 3].map(|n| Nibbles::from_nibbles([n]));
+        let old = BranchNodeCompact::new(0b0011, 0b0001, 0, vec![], None);
+        let new = BranchNodeCompact::new(0b0011, 0b0010, 0, vec![], None);
+        let database = BTreeMap::from([(a, old.clone()), (b, old.clone()), (c, old)]);
+        let cursor = MockTrieCursor::new(Arc::new(database), Default::default());
+        let updates = [(a, Some(new.clone())), (b, None), (c, Some(new.clone()))];
+        let mut cursor = InMemoryTrieCursor::new(Some(cursor), &updates);
+        assert_eq!(cursor.seek(c).unwrap(), Some((c, new.clone())));
+        assert_eq!(cursor.seek(a).unwrap(), Some((a, new.clone())));
+        assert_eq!(cursor.seek(b).unwrap(), Some((c, new.clone())));
+        assert_eq!(cursor.seek_exact(b).unwrap(), None);
+        assert_eq!(cursor.seek_exact(a).unwrap(), Some((a, new.clone())));
+        assert_eq!(cursor.seek(Nibbles::from_nibbles([0xf])).unwrap(), None);
+        assert_eq!(cursor.seek_exact(a).unwrap(), Some((a, new.clone())));
+        assert_eq!(cursor.next().unwrap(), Some((c, new)));
     }
 
     #[test]
