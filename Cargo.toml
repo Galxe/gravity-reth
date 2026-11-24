@@ -545,7 +545,7 @@ alloy-rpc-types-debug = { version = "2.0.5", default-features = false }
 alloy-rpc-types-engine = { version = "=2.1.0", default-features = false }
 alloy-rpc-types-eth = { version = "2.0.5", default-features = false }
 alloy-rpc-types-mev = { version = "2.0.5", default-features = false }
-alloy-rpc-types-trace = { version = "2.0.5", default-features = false }
+alloy-rpc-types-trace = { version = "2.4.1", default-features = false }
 alloy-rpc-types-txpool = { version = "2.0.5", default-features = false }
 alloy-serde = { version = "2.0.5", default-features = false }
 alloy-signer = { version = "2.0.5", default-features = false }
