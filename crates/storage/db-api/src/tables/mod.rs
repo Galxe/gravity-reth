@@ -128,8 +128,7 @@ macro_rules! tables {
         // Table marker types.
         $(
             $(#[$attr])*
-            ///
-            #[doc = concat!("Marker type representing a database table mapping [`", stringify!($key), "`] to ", tables!(@value_doc $key, $value, $($($generic),*)?), ".")]
+            #[doc = concat!("\n\nMarker type representing a database table mapping [`", stringify!($key), "`] to ", tables!(@value_doc $key, $value, $($($generic),*)?), ".")]
             $(
                 #[doc = concat!("\n\nThis table's `DUPSORT` subkey is [`", stringify!($subkey), "`].")]
             )?

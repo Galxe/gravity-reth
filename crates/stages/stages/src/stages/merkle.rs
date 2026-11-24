@@ -308,7 +308,7 @@ where
                 {
                     nested_state_root.read_hashed_state_from_changesets(
                         provider.account_changesets_range(chunk_range.clone())?,
-                        provider.storage_changesets_range(chunk_range.clone())?,
+                        provider.storage_changesets_range(chunk_range)?,
                     )?
                 } else {
                     nested_state_root.read_hashed_state(Some(chunk_range))?

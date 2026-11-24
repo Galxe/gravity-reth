@@ -28,8 +28,8 @@ hardfork!(
         /// `betaTime` (timestamp). Missing/unknown key → Beta never active → pre-Beta
         /// policy stays on (fail-closed).
         Beta,
-        /// Gamma hardfork: atomically replaces the NativeOracle and
-        /// OracleTaskConfig runtimes while preserving their account state.
+        /// Gamma hardfork: atomically replaces the `NativeOracle` and
+        /// `OracleTaskConfig` runtimes while preserving their account state.
         ///
         /// Activation is timestamp-based via genesis `gammaTime`. Missing or
         /// malformed configuration leaves the migration disabled.

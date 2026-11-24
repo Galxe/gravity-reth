@@ -236,6 +236,10 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> + Call {
 
     /// Inspects a committed transaction after replaying its predecessors with the block executor.
     /// The returned result includes executor-level changes and the target remains uncommitted.
+    #[expect(
+        clippy::type_complexity,
+        reason = "The result retains both the inspector type and the EVM's halt reason."
+    )]
     fn inspect_transaction_in_block<Insp>(
         &self,
         block: &RecoveredBlock<ProviderBlock<Self::Provider>>,

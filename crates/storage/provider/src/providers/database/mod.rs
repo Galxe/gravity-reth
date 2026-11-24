@@ -793,15 +793,7 @@ where
     N: NodeTypesWithDB<DB: fmt::Debug, ChainSpec: fmt::Debug, Storage: fmt::Debug>,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let Self {
-            db,
-            chain_spec,
-            static_file_provider,
-            prune_modes,
-            storage,
-            storage_settings: _,
-            ..
-        } = self;
+        let Self { db, chain_spec, static_file_provider, prune_modes, storage, .. } = self;
         f.debug_struct("ProviderFactory")
             .field("db", &db)
             .field("chain_spec", &chain_spec)

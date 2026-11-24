@@ -467,6 +467,7 @@ where
 /// Reads `meta` with the [`EraBlockReaderWithReceipts`] `S`, appends its blocks within
 /// `block_numbers`, and marks `meta` processed if the file was fully consumed. Returns last block
 /// height.
+#[expect(clippy::too_many_arguments, reason = "Preserve the public archive import interface.")]
 pub fn process_with_receipts<S, P, B, BB, BH>(
     meta: &(impl EraMeta + ?Sized),
     writer: &mut StaticFileProviderRWRefMut<'_, <P as NodePrimitivesProvider>::Primitives>,
@@ -636,6 +637,7 @@ fn receipts_from_envelopes<R: RlpDecodableReceipt>(
 ///
 /// [`start_bound`]: RangeBounds::start_bound
 /// [`end_bound`]: RangeBounds::end_bound
+#[expect(clippy::too_many_arguments, reason = "Preserve the public archive import interface.")]
 pub fn process_iter_with_receipts<P, B, BB, BH>(
     mut iter: impl Iterator<Item = eyre::Result<EraBlock<BH, BB, ReceiptOf<P>>>>,
     writer: &mut StaticFileProviderRWRefMut<'_, <P as NodePrimitivesProvider>::Primitives>,

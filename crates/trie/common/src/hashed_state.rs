@@ -669,8 +669,9 @@ impl ChunkedHashedPostState {
             .into_iter()
             .flat_map(|(address, storage)| {
                 // Storage wipes should go first
-                Some((address, FlattenedHashedPostStateItem::StorageWipe))
-                    .filter(|_| storage.wiped)
+                storage
+                    .wiped
+                    .then_some((address, FlattenedHashedPostStateItem::StorageWipe))
                     .into_iter()
                     .chain(
                         storage.storage.into_iter().sorted_unstable_by_key(|(slot, _)| *slot).map(
