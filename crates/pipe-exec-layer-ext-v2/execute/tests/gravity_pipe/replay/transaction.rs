@@ -7,7 +7,7 @@
 //!   (`crates/rpc/rpc/src/trace.rs`) never sets the transaction's gas used on the root trace
 //!   (revm-inspectors' `ParityTraceBuilder::set_transaction_gas_used`), so the builder reports the
 //!   root call frame's gas, without intrinsic gas and refunds;
-//! - `trace_transaction`, `trace_get` (index 0): the root trace's transaction hash, position and
+//! - `trace_transaction`, `trace_get` (empty path): the root trace's transaction hash, position and
 //!   error (same gas caveat);
 //! - `trace_transactionOpcodeGas`: the transaction hash (opcode gas excludes intrinsic gas and
 //!   refunds);
@@ -61,7 +61,7 @@ pub(super) fn check_transaction(
         check_parity_root(report, endpoint, committed, index, traces.first());
     }
     let endpoint = "trace_get";
-    let response = rpc.call::<Option<LocalizedTransactionTrace>>(endpoint, json!([hash, ["0x0"]]));
+    let response = rpc.call::<Option<LocalizedTransactionTrace>>(endpoint, json!([hash, []]));
     if let Some(root) = present_or_record(report, endpoint, Some(index), "response", response) {
         check_parity_root(report, endpoint, committed, index, Some(&root));
     }

@@ -222,10 +222,14 @@ async fn test_testing_build_block_v1_osaka() -> eyre::Result<()> {
 
     let node_config =
         NodeConfig::test().with_chain(chain_spec.clone()).with_unused_ports().with_rpc(
-            RpcServerArgs::default()
-                .with_unused_ports()
-                .with_http()
-                .with_http_api(reth_rpc_server_types::RpcModuleSelection::All),
+            RpcServerArgs::default().with_unused_ports().with_http().with_http_api(
+                // The hidden testing namespace is deliberately excluded from `all`.
+                vec![
+                    reth_rpc_server_types::RethRpcModule::Eth,
+                    reth_rpc_server_types::RethRpcModule::Testing,
+                ]
+                .into(),
+            ),
         );
 
     let NodeHandle { node, node_exit_future: _ } = NodeBuilder::new(node_config)
@@ -299,10 +303,14 @@ async fn test_engine_ssz_proxy_can_mine_block() -> eyre::Result<()> {
     let genesis_hash = chain_spec.genesis_hash();
     let node_config =
         NodeConfig::test().with_chain(chain_spec.clone()).with_unused_ports().with_rpc(
-            RpcServerArgs::default()
-                .with_unused_ports()
-                .with_http()
-                .with_http_api(reth_rpc_server_types::RpcModuleSelection::All),
+            RpcServerArgs::default().with_unused_ports().with_http().with_http_api(
+                // The hidden testing namespace is deliberately excluded from `all`.
+                vec![
+                    reth_rpc_server_types::RethRpcModule::Eth,
+                    reth_rpc_server_types::RethRpcModule::Testing,
+                ]
+                .into(),
+            ),
         );
 
     let (ssz_layer, ssz_handle) = EngineSszProxyLayer::new();
