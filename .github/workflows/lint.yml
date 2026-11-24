@@ -327,12 +327,16 @@ jobs:
         run: cargo tree --package reth -e=features,no-dev | grep -Eq "arbitrary|proptest" && exit 1 || exit 0
 
   # Checks that selected crates can compile with power set of features
-  features:
-    name: features
+  features-partition:
+    name: features (${{ matrix.partition }}/4)
     runs-on: ubuntu-latest
     permissions:
       contents: read
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        partition: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -355,9 +359,22 @@ jobs:
           cargo hack check \
             --package reth-primitives-traits \
             --package reth-primitives \
-            --feature-powerset
+            --feature-powerset \
+            --partition ${{ matrix.partition }}/4
         env:
           RUSTFLAGS: -D warnings
+
+  features:
+    name: features
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [features-partition]
+    timeout-minutes: 5
+    steps:
+      - name: Require every feature partition to pass
+        uses: re-actors/alls-green@05ac9388f0aebcb5727afa17fcccfecd6f8ec5fe # release/v1
+        with:
+          jobs: ${{ toJSON(needs) }}
 
   # Check crates correctly propagate features
   feature-propagation:
