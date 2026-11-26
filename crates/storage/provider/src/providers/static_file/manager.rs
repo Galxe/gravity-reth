@@ -5,8 +5,8 @@ use super::{
 use crate::{
     changeset_walker::{StaticFileAccountChangesetWalker, StaticFileStorageChangesetWalker},
     to_range, BlockHashReader, BlockNumReader, BlockReader, BlockSource, HeaderProvider,
-    PruneCheckpointReader, ReceiptProvider, StageCheckpointReader, StatsReader, TransactionVariant,
-    TransactionsProvider, TransactionsProviderExt,
+    ReceiptProvider, StageCheckpointReader, StatsReader, TransactionVariant, TransactionsProvider,
+    TransactionsProviderExt,
 };
 use alloy_consensus::{
     transaction::{SignerRecoverable, TransactionMeta},
@@ -931,11 +931,7 @@ impl<N: NodePrimitives> StaticFileProvider<N> {
         has_receipt_pruning: bool,
     ) -> ProviderResult<Option<PipelineTarget>>
     where
-        Provider: DBProvider
-            + BlockReader
-            + StageCheckpointReader
-            + PruneCheckpointReader
-            + ChainSpecProvider,
+        Provider: DBProvider + BlockReader + StageCheckpointReader + ChainSpecProvider,
         N: NodePrimitives<Receipt: Value, BlockHeader: Value, SignedTx: Value>,
     {
         if !get_gravity_config().disable_pipe_execution {
@@ -955,11 +951,7 @@ impl<N: NodePrimitives> StaticFileProvider<N> {
         has_receipt_pruning: bool,
     ) -> ProviderResult<Option<PipelineTarget>>
     where
-        Provider: DBProvider
-            + BlockReader
-            + StageCheckpointReader
-            + PruneCheckpointReader
-            + ChainSpecProvider,
+        Provider: DBProvider + BlockReader + StageCheckpointReader + ChainSpecProvider,
         N: NodePrimitives<Receipt: Value, BlockHeader: Value, SignedTx: Value>,
     {
         // OVM historical import is broken and does not work with this check. It's importing
@@ -1163,7 +1155,7 @@ impl<N: NodePrimitives> StaticFileProvider<N> {
         highest_static_file_block: Option<BlockNumber>,
     ) -> ProviderResult<Option<BlockNumber>>
     where
-        Provider: DBProvider + BlockReader + StageCheckpointReader + PruneCheckpointReader,
+        Provider: DBProvider + BlockReader + StageCheckpointReader,
     {
         let mut db_cursor = provider.tx_ref().cursor_read::<T>()?;
 
@@ -1210,29 +1202,18 @@ impl<N: NodePrimitives> StaticFileProvider<N> {
             .unwrap_or_default()
             .block_number;
 
-        // Only receipts can be intentionally pruned from Gravity's v1 static segments.
-        // Missing headers and transactions must still be treated as data loss.
-        let effective_coverage_block = if segment.is_receipts() {
-            highest_static_file_block.max(
-                provider
-                    .get_prune_checkpoint(reth_prune_types::PruneSegment::Receipts)?
-                    .and_then(|checkpoint| checkpoint.block_number)
-                    .unwrap_or_default(),
-            )
-        } else {
-            highest_static_file_block
-        };
-
-        // A checkpoint beyond both available and intentionally pruned data indicates data loss.
-        if checkpoint_block_number > effective_coverage_block {
+        // The caller already skips receipts for pruned nodes. For archive nodes the
+        // receipt prune checkpoint can describe removal of DB duplicates, so it
+        // cannot prove that the corresponding static files still exist.
+        if checkpoint_block_number > highest_static_file_block {
             info!(
                 target: "reth::providers::static_file",
                 checkpoint_block_number,
-                unwind_target = effective_coverage_block,
+                unwind_target = highest_static_file_block,
                 ?segment,
                 "Setting unwind target."
             );
-            return Ok(Some(effective_coverage_block))
+            return Ok(Some(highest_static_file_block))
         }
 
         // If the checkpoint is behind, then we failed to do a database commit **but committed** to
@@ -2383,6 +2364,41 @@ mod cache_publication_tests {
         writer.increment_block(1)?;
         writer.append_transaction(0, &tx)?;
         writer.commit()?;
+        Ok(())
+    }
+
+    #[test]
+    fn archive_receipt_checkpoint_does_not_hide_missing_files() -> eyre::Result<()> {
+        use crate::{
+            test_utils::create_test_provider_factory, PruneCheckpointWriter, StageCheckpointWriter,
+            StaticFileProviderFactory,
+        };
+        use reth_prune_types::{PruneCheckpoint, PruneMode, PruneSegment};
+        use reth_stages_types::StageCheckpoint;
+
+        let factory = create_test_provider_factory();
+        let provider = factory.provider_rw()?;
+        provider.save_stage_checkpoint(StageId::Execution, StageCheckpoint::new(10))?;
+        provider.save_prune_checkpoint(
+            PruneSegment::Receipts,
+            PruneCheckpoint {
+                block_number: Some(10),
+                tx_number: Some(12),
+                prune_mode: PruneMode::Before(11),
+            },
+        )?;
+        provider.commit()?;
+
+        let static_files = factory.static_file_provider();
+        let provider = factory.provider()?;
+        let unwind = static_files
+            .ensure_invariants::<_, tables::Receipts<reth_ethereum_primitives::Receipt>>(
+                &provider,
+                StaticFileSegment::Receipts,
+                Some(9),
+                Some(8),
+            )?;
+        assert_eq!(unwind, Some(8));
         Ok(())
     }
 
