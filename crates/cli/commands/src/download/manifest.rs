@@ -161,6 +161,11 @@ impl OutputFileChecksum {
             "Invalid manifest output file path `{}`: must be a relative path without `..`",
             self.path
         );
+        eyre::ensure!(
+            !crate::snapshot_lock::is_lock_path(path),
+            "Manifest output overlaps an installation lock: {}",
+            path.display()
+        );
         Ok(path)
     }
 }
@@ -919,6 +924,9 @@ fn collect_files_recursive_inner(
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
+        if crate::snapshot_lock::is_lock_path(Path::new(&entry.file_name())) {
+            continue;
+        }
         let file_type = entry.file_type()?;
         if file_type.is_dir() {
             collect_files_recursive_inner(root, &path, output_prefix, files)?;

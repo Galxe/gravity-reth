@@ -214,10 +214,17 @@ where
         };
 
         let data_dir = node_config.datadir();
+        let snapshot_lock = crate::snapshot_lock::SnapshotLock::acquire(
+            &data_dir,
+            self.db.sharding_directories,
+            false,
+        )?;
         let db_path = data_dir.db();
 
         tracing::info!(target: "reth::cli", path = ?db_path, "Opening database");
         let database = Arc::new(init_db(db_path.clone(), self.db.database_args())?);
+        // The runner can cancel the command on SIGTERM before workers finish flushing.
+        ctx.task_executor.retain_resource(snapshot_lock);
 
         if with_unused_ports {
             node_config = node_config.with_unused_ports();

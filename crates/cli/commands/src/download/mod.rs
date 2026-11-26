@@ -99,7 +99,7 @@ mod verify;
 
 pub use planning::{DownloadPlan, DownloadPlanArchive};
 
-use crate::common::EnvironmentArgs;
+use crate::{common::EnvironmentArgs, snapshot_lock::SnapshotLock};
 use archive::run_modular_downloads;
 use clap::{builder::RangedU64ValueParser, Parser};
 use config_gen::{config_for_selections, write_config};
@@ -523,6 +523,16 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> DownloadCo
         // Legacy single-URL mode: download one archive and extract it
         if let Some(ref url) = self.url {
             let target_dir = data_dir.data_dir();
+            let install_lock = Arc::new(SnapshotLock::acquire(
+                &data_dir,
+                self.env.db.sharding_directories,
+                self.force,
+            )?);
+            prune::ensure_install_targets_idle(
+                target_dir,
+                static_files_dir.as_deref(),
+                self.env.db.sharding_directories,
+            )?;
             if self.force {
                 clear_existing_datadir(target_dir, static_files_dir.as_deref())?;
             }
@@ -543,6 +553,7 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> DownloadCo
                 Some(request_limiter),
                 cancel_token.clone(),
                 self.retry_backoff,
+                install_lock.clone(),
             )
             .await?;
             info!(target: "reth::cli", "Snapshot downloaded and extracted successfully");
@@ -558,6 +569,16 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> DownloadCo
         }
 
         let target_dir = data_dir.data_dir();
+        let install_lock = Arc::new(SnapshotLock::acquire(
+            &data_dir,
+            self.env.db.sharding_directories,
+            self.force || self.prune_unlisted,
+        )?);
+        prune::ensure_install_targets_idle(
+            target_dir,
+            static_files_dir.as_deref(),
+            self.env.db.sharding_directories,
+        )?;
         if self.force {
             clear_existing_datadir(target_dir, static_files_dir.as_deref())?;
         } else if self.prune_unlisted {
@@ -581,6 +602,7 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> DownloadCo
             self.download_concurrency.max(1),
             cancel_token.clone(),
             self.retry_backoff,
+            install_lock.clone(),
         )
         .await?;
 
@@ -972,15 +994,26 @@ fn selection_from_prune_mode(mode: Option<PruneMode>, snapshot_block: u64) -> Co
 /// Removes existing snapshot data that is managed by `reth download`.
 fn clear_existing_datadir(target_dir: &Path, static_files_dir: Option<&Path>) -> Result<()> {
     info!(target: "reth::cli", dir = ?target_dir, "Clearing existing snapshot data");
-    for entry in MANAGED_DATADIR_PATHS {
-        let path = managed_datadir_path(entry, target_dir, static_files_dir);
+    let paths = MANAGED_DATADIR_PATHS
+        .iter()
+        .map(|entry| managed_datadir_path(entry, target_dir, static_files_dir))
+        .collect::<Vec<_>>();
+    for path in &paths {
+        // Replacing a managed symlink would change which directory subsequent node
+        // starts lock. A selective cleanup can keep the link and clear its contents.
+        eyre::ensure!(
+            !path.is_symlink(),
+            "--force cannot replace a symlinked snapshot path: {}",
+            path.display()
+        );
+    }
+    for path in paths {
         if !path.try_exists()? {
             continue;
         }
-
         let metadata = fs::metadata(&path)?;
         if metadata.is_dir() {
-            fs::remove_dir_all(&path)?;
+            prune::prune_dir(&path, &Default::default())?;
         } else if metadata.is_file() {
             fs::remove_file(&path)?;
         }
@@ -1193,6 +1226,20 @@ mod tests {
             components,
             extensions: Default::default(),
         }
+    }
+
+    #[test]
+    fn force_cleanup_preserves_installation_locks() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("db");
+        let shard = db.join("state");
+        fs::create_dir_all(&shard).unwrap();
+        let marker = shard.join(".reth-snapshot.lock");
+        fs::write(&marker, b"").unwrap();
+        fs::write(shard.join("stale"), b"").unwrap();
+        clear_existing_datadir(dir.path(), None).unwrap();
+        assert!(marker.is_file());
+        assert!(!shard.join("stale").exists());
     }
 
     #[test]

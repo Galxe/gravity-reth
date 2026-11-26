@@ -1,4 +1,5 @@
 use super::progress::{DownloadRequestLimiter, SharedProgress};
+use crate::snapshot_lock::SnapshotLock;
 use eyre::Result;
 use reth_cli_util::cancellation::CancellationToken;
 use std::{
@@ -18,6 +19,8 @@ pub(crate) struct DownloadSession {
     cancel_token: CancellationToken,
     /// Optional fixed delay overriding the default retry backoff.
     retry_backoff: Option<Duration>,
+    // Blocking archive workers can outlive the command future on cancellation.
+    install_lock: Option<Arc<SnapshotLock>>,
 }
 
 impl DownloadSession {
@@ -27,12 +30,17 @@ impl DownloadSession {
         request_limiter: Option<Arc<DownloadRequestLimiter>>,
         cancel_token: CancellationToken,
     ) -> Self {
-        Self { progress, request_limiter, cancel_token, retry_backoff: None }
+        Self { progress, request_limiter, cancel_token, retry_backoff: None, install_lock: None }
     }
 
     /// Overrides the delay between retry attempts for this download.
     pub(crate) const fn with_retry_backoff(mut self, retry_backoff: Option<Duration>) -> Self {
         self.retry_backoff = retry_backoff;
+        self
+    }
+
+    pub(crate) fn with_install_lock(mut self, lock: Arc<SnapshotLock>) -> Self {
+        self.install_lock = Some(lock);
         self
     }
 

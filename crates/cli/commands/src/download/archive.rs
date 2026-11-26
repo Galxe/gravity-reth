@@ -11,6 +11,7 @@ use super::{
     verify::OutputVerifier,
     MAX_DOWNLOAD_RETRIES, RETRY_BACKOFF_SECS,
 };
+use crate::snapshot_lock::SnapshotLock;
 use eyre::Result;
 use futures::stream::{self, StreamExt};
 use reth_cli_util::cancellation::CancellationToken;
@@ -28,6 +29,7 @@ pub(crate) async fn run_modular_downloads(
     download_concurrency: usize,
     cancel_token: CancellationToken,
     retry_backoff: Option<Duration>,
+    install_lock: Arc<SnapshotLock>,
 ) -> Result<()> {
     let download_cache_dir = target_dir.join(DOWNLOAD_CACHE_DIR);
     fs::create_dir_all(&download_cache_dir)?;
@@ -43,7 +45,8 @@ pub(crate) async fn run_modular_downloads(
         Some(DownloadRequestLimiter::new(download_concurrency)),
         cancel_token,
     )
-    .with_retry_backoff(retry_backoff);
+    .with_retry_backoff(retry_backoff)
+    .with_install_lock(install_lock);
     let ctx = ArchiveProcessContext::new(
         target_dir.to_path_buf(),
         static_files_dir.map(Path::to_path_buf),

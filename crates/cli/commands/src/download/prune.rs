@@ -28,33 +28,18 @@ use tracing::info;
 /// never deletes files outside the data dir. Nested directories left empty are removed; the
 /// managed directories themselves are kept, since they may be mount points.
 ///
-/// Fails if a running node holds the database lock, since pruning would otherwise delete its
-/// lock and files from under it.
+/// The installer holds the shared snapshot lock and checks legacy writer locks before calling.
 pub(crate) fn prune_unlisted_outputs(
     planned: &[PlannedArchive],
     target_dir: &Path,
     static_files_dir: Option<&Path>,
 ) -> Result<()> {
-    let db_dir = target_dir.join("db");
-    if db_dir.is_dir() {
-        drop(StorageLock::try_acquire(&db_dir).wrap_err("refusing to prune a data dir in use")?);
-    }
-
     let verifier = OutputVerifier::new(target_dir, static_files_dir);
     let listed = planned
         .iter()
         .flat_map(|planned| &planned.archive.output_files)
         .map(|output| verifier.output_path(output))
         .collect::<Result<HashSet<_>>>()?;
-
-    // Gravity stores separate RocksDB shards below the managed roots. Check every
-    // native lock before deleting any output, without following nested symlinks.
-    for entry in MANAGED_DATADIR_PATHS {
-        let root = managed_datadir_path(entry, target_dir, static_files_dir);
-        if root.is_dir() {
-            ensure_rocksdb_tree_not_in_use(&root)?;
-        }
-    }
 
     let mut removed = 0;
     for entry in MANAGED_DATADIR_PATHS {
@@ -72,6 +57,37 @@ pub(crate) fn prune_unlisted_outputs(
     }
 
     info!(target: "reth::cli", removed, "Removed existing files not listed in the snapshot plan");
+    Ok(())
+}
+
+/// Detects older nodes that do not participate in the installation lock.
+pub(super) fn ensure_install_targets_idle(
+    target_dir: &Path,
+    static_files_dir: Option<&Path>,
+    shards: Option<&str>,
+) -> Result<()> {
+    let db_dir = target_dir.join("db");
+    if db_dir.is_dir() {
+        drop(StorageLock::try_acquire(&db_dir).wrap_err("refusing to prune a data dir in use")?);
+    }
+
+    let default_static = target_dir.join("static_files");
+    let static_root = static_files_dir.unwrap_or(&default_static);
+    if static_root.join("lock").try_exists()? {
+        drop(StorageLock::try_acquire(static_root).wrap_err("static files are in use")?);
+    }
+    // Gravity stores separate RocksDB shards below the managed roots. Check every
+    // native lock before deleting any output, without following nested symlinks.
+    for entry in MANAGED_DATADIR_PATHS {
+        let root = managed_datadir_path(entry, target_dir, static_files_dir);
+        if root.is_dir() {
+            ensure_rocksdb_tree_not_in_use(&root)?;
+        }
+    }
+
+    for root in crate::snapshot_lock::configured_shard_paths(shards) {
+        ensure_rocksdb_not_in_use(&root)?;
+    }
     Ok(())
 }
 
@@ -130,13 +146,17 @@ fn ensure_rocksdb_not_in_use(db_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Removes unlisted entries below `dir` without following symlinks, and returns how many files
-/// or links it removed. Removing a symlink leaves its target intact.
-fn prune_dir(dir: &Path, listed: &HashSet<PathBuf>) -> Result<usize> {
+/// Removes unlisted entries below `dir`, preserving lock files and avoiding nested symlinks.
+/// Returns how many files or links it removed.
+pub(super) fn prune_dir(dir: &Path, listed: &HashSet<PathBuf>) -> Result<usize> {
     let mut removed = 0;
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
+        // Unlinking a held lock would allow another process to lock a different inode.
+        if crate::snapshot_lock::is_lock_path(Path::new(&entry.file_name())) {
+            continue;
+        }
         // Unlike `fs::metadata`, this does not follow symlinks.
         let file_type = entry
             .file_type()
@@ -371,7 +391,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(dir.path().join("ready").exists(), "database fixture did not become ready");
-        let error = prune_unlisted_outputs(&[], dir.path(), None).unwrap_err();
+        let error = ensure_install_targets_idle(dir.path(), None, None).unwrap_err();
         assert!(error.to_string().contains("RocksDB data dir in use"), "{error:#}");
         assert!(db_dir.join("stale.dat").exists());
         assert!(db_dir.join("state/CURRENT").exists());

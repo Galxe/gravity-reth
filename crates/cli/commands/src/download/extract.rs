@@ -217,6 +217,11 @@ fn unpack_entry<R: Read>(
         entry.path()?.display()
     );
     let path = entry.path()?.into_owned();
+    eyre::ensure!(
+        !crate::snapshot_lock::is_lock_path(&path),
+        "snapshot archive entry overlaps an installation lock: {}",
+        path.display()
+    );
     if let Some(static_files_dir) = static_files_dir &&
         let Some(relative_path) = static_file_relative_path(&path)
     {
@@ -602,6 +607,7 @@ fn blocking_download_and_extract(
 ///
 /// Download progress is reported using a local progress bar.
 /// When `resumable` is true, uses two-phase download with `.part` files.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn stream_and_extract(
     url: &str,
     target_dir: &Path,
@@ -610,11 +616,13 @@ pub(crate) async fn stream_and_extract(
     request_limiter: Option<Arc<DownloadRequestLimiter>>,
     cancel_token: CancellationToken,
     retry_backoff: Option<Duration>,
+    install_lock: Arc<crate::snapshot_lock::SnapshotLock>,
 ) -> Result<()> {
     let target_dir = target_dir.to_path_buf();
     let static_files_dir = static_files_dir.map(Path::to_path_buf);
     let url = url.to_string();
     reth_tasks::spawn_blocking(move || {
+        let _install_lock = install_lock;
         blocking_download_and_extract(
             &url,
             &target_dir,

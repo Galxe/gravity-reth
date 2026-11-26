@@ -321,6 +321,8 @@ struct RuntimeInner {
     /// The task monitors critical tasks for panics and fires the shutdown signal.
     /// Can be taken via [`Runtime::take_task_manager_handle`] to poll for panic errors.
     task_manager_handle: Mutex<Option<JoinHandle<Result<(), PanickedTaskError>>>>,
+    /// Resources held across command cancellation while runtime workers shut down.
+    retained_resources: Mutex<Vec<Box<dyn Send>>>,
 }
 
 impl Drop for RuntimeInner {
@@ -362,6 +364,14 @@ impl Runtime {
     /// runs and logs panics at `debug!` level.
     pub fn take_task_manager_handle(&self) -> Option<JoinHandle<Result<(), PanickedTaskError>>> {
         self.0.task_manager_handle.lock().unwrap().take()
+    }
+
+    /// Holds a resource until the last runtime reference is dropped.
+    ///
+    /// This lets a command keep a guard alive even when its future is cancelled
+    /// before the runtime has finished draining background work.
+    pub fn retain_resource(&self, resource: impl Send + 'static) {
+        self.0.retained_resources.lock().unwrap().push(Box::new(resource));
     }
 
     /// Returns the tokio runtime [`Handle`].
@@ -1075,6 +1085,7 @@ impl RuntimeBuilder {
             state_trie_overlay_worker_pool,
             worker_map: WorkerMap::new(),
             task_manager_handle: Mutex::new(Some(task_manager_handle)),
+            retained_resources: Mutex::default(),
         };
 
         Ok(Runtime(Arc::new(inner)))
