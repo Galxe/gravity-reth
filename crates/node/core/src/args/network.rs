@@ -12,7 +12,7 @@ use std::{
 
 use crate::version::version_metadata;
 use clap::{
-    builder::{OsStr, Resettable},
+    builder::{OsStr, RangedU64ValueParser, Resettable},
     Args,
 };
 use reth_chainspec::EthChainSpec;
@@ -335,7 +335,7 @@ pub struct NetworkArgs {
     #[arg(long = "max-seen-tx-history", value_name = "COUNT", default_value_t = DefaultNetworkArgs::get_global().max_seen_tx_history, verbatim_doc_comment)]
     pub max_seen_tx_history: u32,
 
-    #[arg(long = "max-pending-imports", value_name = "COUNT", default_value_t = DefaultNetworkArgs::get_global().max_pending_pool_imports, verbatim_doc_comment)]
+    #[arg(long = "max-pending-imports", value_name = "COUNT", value_parser = RangedU64ValueParser::<usize>::new().range(1..), default_value_t = DefaultNetworkArgs::get_global().max_pending_pool_imports, verbatim_doc_comment)]
     /// Max number of transactions to import concurrently.
     pub max_pending_pool_imports: usize,
 
@@ -1255,6 +1255,16 @@ mod tests {
 
             assert_eq!(args.dns_retries, retries);
         }
+    }
+
+    #[test]
+    fn max_pending_imports_rejects_zero() {
+        assert!(CommandParser::<NetworkArgs>::try_parse_from([
+            "reth",
+            "--max-pending-imports",
+            "0",
+        ])
+        .is_err());
     }
 
     #[test]

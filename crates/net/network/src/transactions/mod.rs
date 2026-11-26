@@ -493,7 +493,10 @@ impl<Pool: TransactionPool, N: NetworkPrimitives> TransactionsManager<Pool, N> {
     /// Returns import capacity available to broadcasts after reserving space for fetched hashes.
     fn remaining_broadcast_import_capacity(&self) -> usize {
         let capacity = self.remaining_pool_import_capacity();
-        if self.transaction_fetcher.num_hashes() == 0 {
+        // A single-slot budget cannot reserve space without blocking all broadcasts.
+        if self.pending_pool_imports_info.max_pending_pool_imports <= 1 ||
+            self.transaction_fetcher.num_hashes() == 0
+        {
             return capacity
         }
         // Reserve one batch (or half a small import budget) for fetched transactions.
@@ -2840,6 +2843,23 @@ mod tests {
 
         assert!(!pool.is_empty());
         assert!(pool.get(signed_tx.tx_hash()).is_some());
+    }
+
+    #[tokio::test]
+    async fn single_import_slot_accepts_broadcast_with_pending_fetch() {
+        let (mut manager, _network) = new_tx_manager().await;
+        manager.pending_pool_imports_info.max_pending_pool_imports = 1;
+        let peer_id = PeerId::new([1; 64]);
+        buffer_hash_to_tx_fetcher(
+            &mut manager.transaction_fetcher,
+            B256::repeat_byte(1),
+            peer_id,
+            None,
+        );
+        assert_eq!(manager.transaction_fetcher.num_hashes(), 1);
+        assert_eq!(manager.remaining_broadcast_import_capacity(), 1);
+        manager.pending_pool_imports_info.pending_pool_imports.store(1, Ordering::Relaxed);
+        assert_eq!(manager.remaining_broadcast_import_capacity(), 0);
     }
 
     #[tokio::test(flavor = "multi_thread")]
