@@ -2188,3 +2188,43 @@ fn legacy_shutdown_records_durability_without_destructive_handoff() {
     assert!(harness.tree.canonical_in_memory_state.state_by_hash(last.hash).is_some());
     drop(lease);
 }
+
+#[test]
+fn legacy_shutdown_unwinds_a_completed_save_on_the_old_branch() {
+    let blocks: Vec<_> = TestBlockBuilder::eth().get_executed_blocks(1..4).collect();
+    let mut harness = TestHarness::new(MAINNET.clone()).with_blocks(blocks.clone());
+    let parent = blocks[1].recovered_block().num_hash();
+    let canonical = blocks[2].recovered_block().num_hash();
+    harness.tree.persistence_state.finish(parent.hash, parent.number);
+    let old = harness.block_builder.generate_random_block(canonical.number, parent.hash);
+    let old_tip = old.num_hash();
+    let old = old.into_sealed_block().into_block();
+    harness.provider.add_block(old_tip.hash, old);
+    let (done, rx) = crossbeam_channel::bounded(1);
+    harness.tree.persistence_state.start_save(old_tip, rx);
+    done.send(PersistenceResult { last_block: Some(old_tip), commit_duration: None }).unwrap();
+
+    std::thread::scope(|scope| {
+        let tree = &mut harness.tree;
+        let task = scope.spawn(move || tree.persist_legacy_until_complete());
+        let PersistenceAction::RemoveBlocksAbove(height, reply) =
+            harness.action_rx.recv_timeout(Duration::from_secs(5)).unwrap()
+        else {
+            panic!("expected disk unwind");
+        };
+        assert_eq!(height, parent.number);
+        reply.send(PersistenceResult { last_block: Some(parent), commit_duration: None }).unwrap();
+        let PersistenceAction::SaveBlocks(blocks, reply) =
+            harness.action_rx.recv_timeout(Duration::from_secs(5)).unwrap()
+        else {
+            panic!("expected canonical save");
+        };
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].recovered_block().num_hash(), canonical);
+        reply
+            .send(PersistenceResult { last_block: Some(canonical), commit_duration: None })
+            .unwrap();
+        task.join().unwrap().unwrap();
+    });
+    assert_eq!(harness.tree.persistence_state.last_persisted_block, canonical);
+}

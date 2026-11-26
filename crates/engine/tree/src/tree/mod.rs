@@ -1809,7 +1809,11 @@ where
             };
             match number {
                 Some(number) => self
-                    .backfill_sync_target(self.state.tree_state.canonical_block_number(), number, None)
+                    .backfill_sync_target(
+                        self.state.tree_state.canonical_block_number(),
+                        number,
+                        None,
+                    )
                     .map(Into::into),
                 // The earlier decision may have used a downloaded ancestor to measure the
                 // gap. The target header need not be locally available to start backfill.
@@ -1890,6 +1894,13 @@ where
                 debug!(target: "engine::tree", ?action, "waiting for in-flight persistence");
                 let result = rx.recv().map_err(|_| AdvancePersistenceError::ChannelClosed)?;
                 let _ = self.record_persistence_complete(result, start_time);
+            }
+
+            // The pending save may have completed on the old branch at the same height.
+            // Drain the unwind before choosing new blocks by height.
+            if let Some(common_ancestor) = self.find_disk_reorg()? {
+                self.remove_blocks(common_ancestor);
+                continue;
             }
 
             let blocks_to_persist = self.get_canonical_blocks_to_persist(PersistTarget::Head)?;
