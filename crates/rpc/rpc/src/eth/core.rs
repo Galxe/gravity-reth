@@ -852,6 +852,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn simulate_preserves_gravity_osaka_gas_cap_in_validation_mode() {
+        use alloy_rpc_types_eth::simulate::{SimBlock, SimulatePayload};
+        use reth_primitives_traits::constants::GRAVITY_TX_GAS_LIMIT_CAP;
+
+        for parent_timestamp in [0, 12, 24] {
+            let provider = MockEthProvider::default().with_chain_spec(
+                ChainSpecBuilder::mainnet().prague_activated().with_osaka_at(24).build(),
+            );
+            let header = Header {
+                timestamp: parent_timestamp,
+                gas_limit: 60_000_000,
+                base_fee_per_gas: Some(0),
+                excess_blob_gas: Some(0),
+                blob_gas_used: Some(0),
+                parent_beacon_block_root: Some(B256::ZERO),
+                ..Default::default()
+            };
+            provider.add_block(header.hash_slow(), Block { header, body: BlockBody::default() });
+            let api = build_test_eth_api_with_gas_cap(provider, 60_000_000);
+            for validation in [false, true] {
+                for gas in [GRAVITY_TX_GAS_LIMIT_CAP, GRAVITY_TX_GAS_LIMIT_CAP + 1] {
+                    let from = Address::with_last_byte(0x41);
+                    let call = TransactionRequest::default()
+                        .with_from(from)
+                        .with_to(Address::with_last_byte(0x42))
+                        .with_gas_limit(gas)
+                        .with_nonce(0);
+                    let mut payload = SimulatePayload::default().extend(
+                        SimBlock::default()
+                            .with_state_overrides(StateOverride::from_iter([(
+                                from,
+                                AccountOverride::default().with_nonce(0),
+                            )]))
+                            .call(call),
+                    );
+                    payload.validation = validation;
+                    let result = EthCall::simulate_v1(&api, payload, Some(BlockId::latest())).await;
+                    // Simulated blocks advance by 12 seconds, including across the fork.
+                    if validation && parent_timestamp + 12 >= 24 && gas > GRAVITY_TX_GAS_LIMIT_CAP {
+                        let err = result.expect_err("Osaka validation must enforce the gas cap");
+                        assert!(err.is_gas_too_high(), "unexpected error: {err}");
+                    } else {
+                        let blocks = result.unwrap();
+                        assert!(blocks[0].calls[0].status);
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn simulate_bal_hash_resets_each_block_across_amsterdam() {
         use alloy_rpc_types_eth::simulate::{SimBlock, SimulatePayload};
         let provider = MockEthProvider::default().with_chain_spec(
