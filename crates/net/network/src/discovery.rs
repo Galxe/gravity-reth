@@ -174,7 +174,7 @@ impl Discovery {
 
                     let (discv4, mut discv4_service, ingress) = Discv4::bind_shared_with_secondary(
                         socket.clone(),
-                        secondary_socket.clone(),
+                        secondary_socket,
                         local_enr,
                         sk,
                         config,
