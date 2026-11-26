@@ -121,11 +121,8 @@ impl Discovery {
 
         // In shared-port mode, bind the shared socket and start discv4 without its own receive
         // loop. Unrecognized frames from discv5 will be forwarded to the ingress handler, and
-        // discv5's opposite-family sibling socket doubles as discv4's secondary-family egress.
-        // The sibling binds at the shared port that discv4 advertises for both families, not at
-        // discv5's configured opposite-family port, and serves egress and replies only. Node
-        // config has no second-family external IP source, so the discv4 ENR advertises only the
-        // discovery address family. The discv5 ENR carries the dual-stack advertisement.
+        // The opposite family can serve discv4 as well when it uses the same UDP port.
+        // A distinct configured port is reserved for discv5.
         let (discv4, discv4_updates, _discv4_service, discv4_ingress, shared_sockets) =
             if let Some(mut config) = discv4_config {
                 if let Some(discv5_config) = &mut discv5_config &&
@@ -143,15 +140,26 @@ impl Discovery {
                         .port();
 
                     let listen_config = &discv5_config.discv5_config_mut().listen_config;
-                    let secondary_addr = reth_discv5::config::sibling_addr(
-                        listen_config,
-                        discovery_v4_addr,
-                        shared_port,
-                    );
-                    let secondary_socket = match secondary_addr {
-                        Some(addr) => Some(bind_socket(addr).await?),
+                    let secondary_addr = if discovery_v4_addr.is_ipv4() {
+                        reth_discv5::config::ipv6(listen_config).map(SocketAddr::V6)
+                    } else {
+                        reth_discv5::config::ipv4(listen_config).map(SocketAddr::V4)
+                    };
+                    let secondary = match secondary_addr {
+                        Some(mut addr) => {
+                            if addr.port() == 0 && discovery_v4_addr.port() == 0 {
+                                addr.set_port(shared_port);
+                            }
+                            Some(bind_socket(addr).await?)
+                        }
                         None => None,
                     };
+                    let secondary_socket = secondary
+                        .as_ref()
+                        .filter(|socket| {
+                            socket.local_addr().is_ok_and(|addr| addr.port() == shared_port)
+                        })
+                        .cloned();
 
                     if secondary_socket.is_some() {
                         // The TCP listener's family can differ from the primary discovery socket.
@@ -183,7 +191,7 @@ impl Discovery {
                         Some(discv4_updates),
                         Some(discv4_service),
                         Some(ingress),
-                        Some((socket, secondary_socket)),
+                        Some((socket, secondary)),
                     )
                 } else {
                     let (discv4, mut discv4_service) =
@@ -997,6 +1005,40 @@ mod tests {
         .expect("discovery should start with shared port + dual-stack");
     }
 
+    #[tokio::test]
+    async fn shared_primary_port_preserves_explicit_secondary_port() {
+        let Ok(secondary_probe) = UdpSocket::bind("[::1]:0").await else { return };
+        let secondary = secondary_probe.local_addr().unwrap();
+        let same_port_probe =
+            UdpSocket::bind((Ipv4Addr::LOCALHOST, secondary.port())).await.unwrap();
+        let primary_probe = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let primary = primary_probe.local_addr().unwrap();
+        drop((primary_probe, secondary_probe, same_port_probe));
+
+        let listen = discv5::ListenConfig::DualStack {
+            ipv4: Ipv4Addr::LOCALHOST,
+            ipv4_port: primary.port(),
+            ipv6: Ipv6Addr::LOCALHOST,
+            ipv6_port: secondary.port(),
+        };
+        let config = reth_discv5::Config::builder(primary)
+            .discv5_config(discv5::ConfigBuilder::new(listen).build())
+            .build();
+        let node = Discovery::new(
+            primary,
+            primary,
+            SecretKey::new(&mut rand_08::thread_rng()),
+            Some(Discv4ConfigBuilder::default().external_ip_resolver(None).build()),
+            Some(config),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(UdpSocket::bind(secondary).await.is_err());
+        assert!(node.discv5.is_some());
+    }
+
     /// A discv4 ping over the opposite family must complete the endpoint proof: the sibling
     /// socket bound for discv5's dual-stack listen config is discv4's secondary-family egress.
     #[tokio::test(flavor = "multi_thread")]
@@ -1033,13 +1075,11 @@ mod tests {
         let tcp_addr = SocketAddr::new(tcp_ip, 30303);
 
         let discv4_config = Discv4ConfigBuilder::default().external_ip_resolver(None).build();
-        // The sibling must use discv4's shared port despite a different configured port.
-        let other_port = if port == u16::MAX { port - 1 } else { port + 1 };
         let discv5_listen_config = discv5::ListenConfig::DualStack {
             ipv4: Ipv4Addr::LOCALHOST,
-            ipv4_port: if primary_ip.is_ipv4() { port } else { other_port },
+            ipv4_port: port,
             ipv6: Ipv6Addr::LOCALHOST,
-            ipv6_port: if primary_ip.is_ipv6() { port } else { other_port },
+            ipv6_port: port,
         };
         let discv5_config = reth_discv5::Config::builder(tcp_addr)
             .discv5_config(discv5::ConfigBuilder::new(discv5_listen_config).build())
