@@ -8,6 +8,7 @@
 //! These modes are mutually exclusive and the node can only be in one mode at a time.
 
 use alloy_primitives::B256;
+use alloy_rpc_types_engine::ForkchoiceState;
 use futures::FutureExt;
 use reth_provider::providers::ProviderNodeTypes;
 use reth_stages_api::{ControlFlow, Pipeline, PipelineError, PipelineTarget, PipelineWithResult};
@@ -27,7 +28,12 @@ pub enum BackfillSyncState {
     /// yet.
     Pending,
     /// A retained backfill request waits for readers/writes, then re-evaluates its current target.
-    PendingRevalidation,
+    PendingRevalidation {
+        /// Target selected before waiting for the persistence barrier.
+        target: PipelineTarget,
+        /// Forkchoice from which the original target was selected.
+        forkchoice: Option<ForkchoiceState>,
+    },
     /// The node is actively engaged in backfill synchronization.
     Active,
 }
@@ -45,7 +51,7 @@ impl BackfillSyncState {
 
     /// Returns true if retained backfill must be re-evaluated before it can start.
     pub const fn is_pending_revalidation(&self) -> bool {
-        matches!(self, Self::PendingRevalidation)
+        matches!(self, Self::PendingRevalidation { .. })
     }
 
     /// Returns true if the state is active.

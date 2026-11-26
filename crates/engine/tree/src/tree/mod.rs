@@ -1793,6 +1793,11 @@ where
     }
 
     fn revalidate_pending_backfill(&mut self) -> Result<(), AdvancePersistenceError> {
+        let BackfillSyncState::PendingRevalidation { target: original, forkchoice } =
+            self.backfill_sync_state
+        else {
+            return Ok(());
+        };
         let sync_target = self.state.forkchoice_state_tracker.sync_target_state();
         let target = if let Some(state) = sync_target {
             let configured = self.backfill_target_hash(state);
@@ -1802,13 +1807,19 @@ where
             } else {
                 self.sealed_header_by_hash(hash)?.map(|header| header.number())
             };
-            number.and_then(|number| {
-                self.backfill_sync_target(
-                    self.state.tree_state.canonical_block_number(),
-                    number,
-                    None,
-                )
-            })
+            match number {
+                Some(number) => self
+                    .backfill_sync_target(self.state.tree_state.canonical_block_number(), number, None)
+                    .map(Into::into),
+                // The earlier decision may have used a downloaded ancestor to measure the
+                // gap. The target header need not be locally available to start backfill.
+                None if forkchoice == sync_target && original.sync_target() == Some(hash) => {
+                    Some(original)
+                }
+                None => None,
+            }
+        } else if forkchoice.is_none() {
+            Some(original)
         } else {
             None
         };
@@ -1816,7 +1827,7 @@ where
             // SaveBlocks acknowledges before pruning; only a barrier proves exclusive access.
             self.persistence.wait_for_idle().map_err(|_| AdvancePersistenceError::ChannelClosed)?;
             self.backfill_sync_state = BackfillSyncState::Idle;
-            self.emit_event(EngineApiEvent::BackfillAction(BackfillAction::Start(target.into())));
+            self.emit_event(EngineApiEvent::BackfillAction(BackfillAction::Start(target)));
         } else {
             self.backfill_sync_state = BackfillSyncState::Idle;
             if let Some(state) = sync_target &&
@@ -2464,8 +2475,11 @@ where
 
     /// Queues retained backfill requests until old-view readers and background writes drain.
     fn on_legacy_tree_event(&mut self, event: TreeEvent) -> ProviderResult<()> {
-        if let TreeEvent::BackfillAction(BackfillAction::Start(_)) = event {
-            self.backfill_sync_state = BackfillSyncState::PendingRevalidation;
+        if let TreeEvent::BackfillAction(BackfillAction::Start(target)) = event {
+            self.backfill_sync_state = BackfillSyncState::PendingRevalidation {
+                target,
+                forkchoice: self.state.forkchoice_state_tracker.sync_target_state(),
+            };
             return Ok(())
         }
         self.on_tree_event(event)

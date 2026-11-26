@@ -2035,6 +2035,18 @@ fn deferred_backfill_uses_latest_sync_target_or_drops_local_target() {
 }
 
 #[test]
+fn deferred_backfill_keeps_its_target_after_the_buffer_evicts_it() {
+    let (mut harness, target) = legacy_deferred_backfill_harness();
+    harness
+        .tree
+        .on_legacy_tree_event(TreeEvent::BackfillAction(BackfillAction::Start(target.into())))
+        .unwrap();
+    harness.tree.state.buffer.remove_old_blocks(u64::MAX);
+    assert!(harness.tree.state.buffer.block(&target).is_none());
+    advance_legacy_through_barrier(&mut harness, target);
+}
+
+#[test]
 fn backfill_request_survives_save_ack_and_waits_for_backend_barrier() {
     let (mut harness, target) = legacy_deferred_backfill_harness();
     let last = harness.blocks[0].recovered_block().num_hash();
@@ -2078,7 +2090,10 @@ fn failed_legacy_backfill_barrier_is_fatal_without_starting_pipeline() {
 #[test]
 fn forkchoice_does_not_notify_a_backfill_awaiting_revalidation() {
     let (mut harness, target) = legacy_deferred_backfill_harness();
-    harness.tree.backfill_sync_state = BackfillSyncState::PendingRevalidation;
+    harness
+        .tree
+        .on_legacy_tree_event(TreeEvent::BackfillAction(BackfillAction::Start(target.into())))
+        .unwrap();
     harness
         .tree
         .validate_forkchoice_state(ForkchoiceState {
