@@ -532,7 +532,7 @@ mod tests {
     }
 
     #[test]
-    fn test_consistency_receipts_distance_prune_checkpoint() {
+    fn test_consistency_missing_receipts_with_prune_checkpoint() {
         let db = seed_data(90).unwrap();
         let static_files = db.factory.static_file_provider();
         while let Some(block) =
@@ -540,27 +540,30 @@ mod tests {
         {
             static_files.delete_jar(StaticFileSegment::Receipts, block).unwrap();
         }
-        let check = || {
+        let check = |has_receipt_pruning| {
             static_files
-                .check_consistency_staged_sync(&db.factory.database_provider_ro().unwrap(), false)
+                .check_consistency_staged_sync(
+                    &db.factory.database_provider_ro().unwrap(),
+                    has_receipt_pruning,
+                )
                 .unwrap()
         };
-        assert_eq!(check(), Some(PipelineTarget::Unwind(0)));
-        // A partial checkpoint bounds recovery without concealing genuinely missing receipts.
-        for (pruned, expected) in [(50, Some(PipelineTarget::Unwind(50))), (89, None)] {
-            let provider = db.factory.provider_rw().unwrap();
-            provider
-                .save_prune_checkpoint(
-                    PruneSegment::Receipts,
-                    PruneCheckpoint {
-                        block_number: Some(pruned),
-                        tx_number: None,
-                        prune_mode: PruneMode::Distance(2_000_000),
-                    },
-                )
-                .unwrap();
-            provider.commit().unwrap();
-            assert_eq!(check(), expected);
-        }
+        let provider = db.factory.provider_rw().unwrap();
+        provider
+            .save_prune_checkpoint(
+                PruneSegment::Receipts,
+                PruneCheckpoint {
+                    block_number: Some(89),
+                    tx_number: None,
+                    prune_mode: PruneMode::Distance(2_000_000),
+                },
+            )
+            .unwrap();
+        provider.commit().unwrap();
+
+        // A checkpoint can survive a change in configuration. The current pruning mode decides
+        // whether receipts are required in the static files.
+        assert_eq!(check(false), Some(PipelineTarget::Unwind(0)));
+        assert_eq!(check(true), None);
     }
 }
