@@ -824,7 +824,7 @@ where
             };
             match engine_api.get_blobs_v1_metered(hashes) {
                 Ok(response) => ssz_response(response),
-                Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
+                Err(err) => legacy_blob_error_response(err),
             }
         }
         2 => {
@@ -835,7 +835,7 @@ where
             match engine_api.get_blobs_v2_metered(hashes) {
                 Ok(Some(response)) => ssz_response(response),
                 Ok(None) => no_content_response(),
-                Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
+                Err(err) => legacy_blob_error_response(err),
             }
         }
         3 => {
@@ -846,7 +846,7 @@ where
             match engine_api.get_blobs_v3_metered(hashes) {
                 Ok(Some(response)) => ssz_response(response),
                 Ok(None) => no_content_response(),
-                Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
+                Err(err) => legacy_blob_error_response(err),
             }
         }
         4 => {
@@ -857,11 +857,22 @@ where
             match engine_api.get_blobs_v4_metered(hashes, indices_bitarray) {
                 Ok(Some(response)) => ssz_response(response),
                 Ok(None) => no_content_response(),
-                Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
+                Err(err) => legacy_blob_error_response(err),
             }
         }
         _ => text_response(STATUS_NOT_FOUND, "unsupported blobs endpoint version"),
     }
+}
+
+fn legacy_blob_error_response(err: EngineApiError) -> HttpResponse {
+    let status = match &err {
+        EngineApiError::BlobRequestTooLarge { .. } => STATUS_PAYLOAD_TOO_LARGE,
+        EngineApiError::EngineObjectValidationError(
+            reth_payload_primitives::EngineObjectValidationError::UnsupportedFork,
+        ) => STATUS_BAD_REQUEST,
+        _ => STATUS_INTERNAL_SERVER_ERROR,
+    };
+    text_response(status, err.to_string())
 }
 
 async fn handle_get_blobs<ChainSpec, Provider, Pool, Validator>(
@@ -2134,6 +2145,29 @@ mod tests {
                 assert_eq!(decoded.entries.len(), 1);
                 assert!(!decoded.entries[0].available);
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_blob_routes_preserve_client_error_statuses() {
+        let chain = Arc::new(
+            reth_chainspec::ChainSpecBuilder::mainnet()
+                .with_fork(EthereumHardfork::Osaka, reth_chainspec::ForkCondition::Never)
+                .build(),
+        );
+        let (api, _) = test_api_with_provider(Arc::new(Default::default()), chain);
+        let handle = TestHandle::with_engine_api(api);
+        for (version, count, status) in
+            [(2, 1, STATUS_BAD_REQUEST), (1, MAX_BLOB_LIMIT + 1, STATUS_PAYLOAD_TOO_LARGE)]
+        {
+            let request = HttpRequest::builder()
+                .method("POST")
+                .uri(format!("/engine/v2/blobs/v{version}"))
+                .body(HttpBody::from(vec![B256::ZERO; count].as_ssz_bytes()))
+                .unwrap();
+            let response = handle_engine_ssz_request(handle.clone(), request).await;
+            assert_eq!(response.status(), status);
+            assert_eq!(response.headers()[CONTENT_TYPE], TEXT_PLAIN);
         }
     }
 
