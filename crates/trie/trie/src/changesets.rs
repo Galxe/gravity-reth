@@ -18,7 +18,7 @@
 //!
 //! And returns `TrieUpdatesSorted` containing the old node values.
 
-use crate::trie_cursor::TrieCursorIter;
+use crate::proof_v2::TrieStorageCursor;
 use alloy_primitives::{map::B256Map, B256};
 use itertools::{merge_join_by, EitherOrBoth};
 use reth_storage_errors::db::DatabaseError;
@@ -28,7 +28,7 @@ use reth_trie_common::{
 };
 use std::cmp::Ordering;
 
-use crate::trie_cursor::{TrieCursor, TrieCursorFactory, TrieStorageCursor};
+use crate::trie_cursor::{TrieCursor, TrieCursorFactory};
 
 /// Result type for changeset operations.
 pub type ChangesetResult<T> = Result<T, DatabaseError>;
@@ -46,13 +46,18 @@ pub type ChangesetResult<T> = Result<T, DatabaseError>;
 ///
 /// # Returns
 ///
-/// `TrieUpdatesSorted` containing old node values (before this block)
+/// `TrieUpdatesSorted` containing old node values (before this block).
+///
+/// Factories must expose one immutable view throughout the lookup and any storage rebinds.
+/// For example, wrap immutable factories in [`crate::proof_v2::ProofCursorFactory`]; reopening
+/// independent live database cursors does not establish snapshot consistency.
 pub fn compute_trie_changesets<Factory>(
     factory: &Factory,
     trie_updates: &TrieUpdatesSorted,
 ) -> ChangesetResult<TrieUpdatesSorted>
 where
     Factory: TrieCursorFactory,
+    Factory::StorageTrieCursor: TrieStorageCursor,
 {
     // Compute account trie changesets
     let account_nodes = compute_account_changesets(factory, trie_updates)?;
@@ -64,7 +69,7 @@ where
     let mut storage_cursor = factory.storage_trie_cursor(B256::default())?;
 
     for (hashed_address, storage_updates) in trie_updates.storage_tries_ref() {
-        storage_cursor.set_hashed_address(*hashed_address);
+        storage_cursor.set_hashed_address(*hashed_address)?;
 
         let storage_changesets = if storage_updates.is_deleted() {
             // Handle wiped storage
@@ -164,7 +169,7 @@ fn compute_wiped_storage_changesets(
 ) -> ChangesetResult<Vec<(Nibbles, Option<BranchNodeCompact>)>> {
     // Set the hashed address for this account's storage trie
     // Create an iterator that yields all nodes in the storage trie
-    let all_nodes = TrieCursorIter::new(cursor);
+    let all_nodes = stored_nodes(cursor);
 
     // Merge the two sorted iterators
     let merged = storage_trie_wiped_changeset_iter(
@@ -179,6 +184,36 @@ fn compute_wiped_storage_changesets(
     }
 
     Ok(storage_changesets)
+}
+
+/// Iterates stored nodes, yielding a read error once and never continuing at a stale position.
+fn stored_nodes(
+    cursor: &mut impl TrieCursor,
+) -> impl Iterator<Item = Result<(Nibbles, BranchNodeCompact), DatabaseError>> + '_ {
+    let mut initialized = false;
+    let mut finished = false;
+    std::iter::from_fn(move || {
+        if finished {
+            return None;
+        }
+        let entry = if initialized {
+            cursor.next()
+        } else {
+            initialized = true;
+            cursor.seek(Nibbles::default())
+        };
+        match entry {
+            Ok(Some(node)) => Some(Ok(node)),
+            Ok(None) => {
+                finished = true;
+                None
+            }
+            Err(error) => {
+                finished = true;
+                Some(Err(error))
+            }
+        }
+    })
 }
 
 /// Returns an iterator which produces the changeset values for an account whose storage was wiped
@@ -237,10 +272,68 @@ pub fn storage_trie_wiped_changeset_iter(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::trie_cursor::mock::MockTrieCursorFactory;
+    use crate::{proof_v2::ProofCursorFactory, trie_cursor::mock::MockTrieCursorFactory};
     use alloy_primitives::map::B256Map;
     use reth_trie_common::updates::StorageTrieUpdatesSorted;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn failed_storage_rebind_returns_original_error_instead_of_old_address() {
+        let missing = B256::with_last_byte(42);
+        let factory = ProofCursorFactory::new(MockTrieCursorFactory::new(
+            BTreeMap::new(),
+            B256Map::from_iter([(B256::ZERO, BTreeMap::new())]),
+        ));
+        let updates = TrieUpdatesSorted::new(
+            Vec::new(),
+            B256Map::from_iter([(
+                missing,
+                StorageTrieUpdatesSorted {
+                    is_deleted: false,
+                    storage_nodes: vec![(Nibbles::from_nibbles([1]), None)],
+                },
+            )]),
+        );
+        match compute_trie_changesets(&factory, &updates) {
+            Err(DatabaseError::Other(message)) => {
+                assert_eq!(message, format!("storage trie for {missing:?} not found"))
+            }
+            other => panic!("expected original storage factory error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wiped_storage_scan_yields_read_error_once_and_stops() {
+        #[derive(Debug)]
+        struct FailingCursor;
+        impl TrieCursor for FailingCursor {
+            fn seek_exact(
+                &mut self,
+                key: Nibbles,
+            ) -> Result<Option<(Nibbles, BranchNodeCompact)>, DatabaseError> {
+                self.seek(key)
+            }
+            fn seek(
+                &mut self,
+                _key: Nibbles,
+            ) -> Result<Option<(Nibbles, BranchNodeCompact)>, DatabaseError> {
+                Ok(Some((Nibbles::from_nibbles([1]), BranchNodeCompact::default())))
+            }
+            fn next(&mut self) -> Result<Option<(Nibbles, BranchNodeCompact)>, DatabaseError> {
+                Err(DatabaseError::Other("storage scan failed".into()))
+            }
+            fn current(&mut self) -> Result<Option<Nibbles>, DatabaseError> {
+                Ok(Some(Nibbles::from_nibbles([1])))
+            }
+        }
+        let mut cursor = FailingCursor;
+        let mut nodes = stored_nodes(&mut cursor);
+        assert!(nodes.next().unwrap().is_ok());
+        assert!(
+            matches!(nodes.next(), Some(Err(DatabaseError::Other(message))) if message == "storage scan failed")
+        );
+        assert!(nodes.next().is_none());
+    }
 
     #[test]
     fn test_empty_updates() {
@@ -249,7 +342,8 @@ mod tests {
         // compute_trie_changesets creates cursors for it upfront
         let mut storage_tries = B256Map::default();
         storage_tries.insert(B256::default(), BTreeMap::new());
-        let factory = MockTrieCursorFactory::new(BTreeMap::new(), storage_tries);
+        let factory =
+            ProofCursorFactory::new(MockTrieCursorFactory::new(BTreeMap::new(), storage_tries));
 
         // Create empty updates
         let updates = TrieUpdatesSorted::new(vec![], B256Map::default());
@@ -278,7 +372,8 @@ mod tests {
         // Need to include B256::default() for cursor creation
         let mut storage_tries = B256Map::default();
         storage_tries.insert(B256::default(), BTreeMap::new());
-        let factory = MockTrieCursorFactory::new(account_nodes, storage_tries);
+        let factory =
+            ProofCursorFactory::new(MockTrieCursorFactory::new(account_nodes, storage_tries));
 
         // Create updates that modify path1 and add a new path3
         let path3 = Nibbles::from_nibbles([0x7, 0x8, 0x9]);
@@ -323,7 +418,8 @@ mod tests {
         storage_tries.insert(B256::default(), BTreeMap::new()); // For cursor creation
         storage_tries.insert(hashed_address, storage_nodes);
 
-        let factory = MockTrieCursorFactory::new(BTreeMap::new(), storage_tries);
+        let factory =
+            ProofCursorFactory::new(MockTrieCursorFactory::new(BTreeMap::new(), storage_tries));
 
         // Create updates that modify path1 and add a new path3
         let path3 = Nibbles::from_nibbles([0x5, 0x6]);
@@ -380,7 +476,8 @@ mod tests {
         storage_tries.insert(B256::default(), BTreeMap::new()); // For cursor creation
         storage_tries.insert(hashed_address, storage_nodes);
 
-        let factory = MockTrieCursorFactory::new(BTreeMap::new(), storage_tries);
+        let factory =
+            ProofCursorFactory::new(MockTrieCursorFactory::new(BTreeMap::new(), storage_tries));
 
         // Create updates that modify path1 and mark storage as wiped
         let new_node1 = BranchNodeCompact::new(0b1111, 0b1000, 0, vec![], None);
@@ -436,7 +533,8 @@ mod tests {
         storage_tries.insert(B256::default(), BTreeMap::new()); // For cursor creation
         storage_tries.insert(hashed_address, storage_nodes);
 
-        let factory = MockTrieCursorFactory::new(BTreeMap::new(), storage_tries);
+        let factory =
+            ProofCursorFactory::new(MockTrieCursorFactory::new(BTreeMap::new(), storage_tries));
 
         // Create updates that add a new path2 that didn't exist before
         let path2 = Nibbles::from_nibbles([0x3, 0x4]);

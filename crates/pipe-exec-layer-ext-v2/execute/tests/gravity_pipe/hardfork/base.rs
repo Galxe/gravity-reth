@@ -31,7 +31,7 @@ use gravity_precompiles::{
 use reth_pipe_exec_layer_ext_v2::onchain_config::{
     epoch::Reconfiguration, EPOCH_MANAGER_ADDR, NATIVE_MINT_PRECOMPILE_ADDR,
 };
-use revm_primitives::eip3860::MAX_INITCODE_SIZE;
+use revm::primitives::eip3860::MAX_INITCODE_SIZE;
 
 sol! {
     event NativeMinted(address indexed recipient, uint256 amount, uint128 indexed nonce);

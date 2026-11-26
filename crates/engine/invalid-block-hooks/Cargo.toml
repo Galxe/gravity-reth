@@ -13,14 +13,14 @@ workspace = true
 [dependencies]
 # reth
 revm.workspace = true
-revm-bytecode.workspace = true
-revm-database.workspace = true
 reth-engine-primitives.workspace = true
 reth-evm.workspace = true
 reth-primitives-traits.workspace = true
 reth-provider.workspace = true
 reth-revm = { workspace = true, features = ["serde"] }
 reth-rpc-api = { workspace = true, features = ["client"] }
+reth-fs-util.workspace = true
+reth-tasks.workspace = true
 reth-tracing.workspace = true
 reth-trie.workspace = true
 
@@ -32,13 +32,15 @@ alloy-consensus.workspace = true
 
 # async
 futures.workspace = true
+tokio = { workspace = true, features = ["sync"] }
 
 # misc
 eyre.workspace = true
 jsonrpsee.workspace = true
-pretty_assertions.workspace = true
+metrics.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+similar = { workspace = true, features = ["text"] }
 
 [dev-dependencies]
 alloy-eips.workspace = true
@@ -49,3 +51,5 @@ reth-provider = { workspace = true, features = ["test-utils"] }
 reth-revm = { workspace = true, features = ["test-utils"] }
 reth-testing-utils.workspace = true
 tempfile.workspace = true
+jsonrpsee = { workspace = true, features = ["server"] }
+tokio = { workspace = true, features = ["macros", "time"] }

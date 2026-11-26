@@ -17,6 +17,7 @@ use revm::context::{BlockEnv, CfgEnv};
 pub struct CustomRpcTypes;
 
 impl RpcTypes for CustomRpcTypes {
+    type Log = alloy_rpc_types_eth::Log;
     type Header = alloy_rpc_types_eth::Header<CustomHeader>;
     type Receipt = OpTransactionReceipt;
     type TransactionRequest = OpTransactionRequest;

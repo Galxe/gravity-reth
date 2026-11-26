@@ -46,7 +46,7 @@ gravity-primitives.workspace = true
 [workspace.package]
 version = "2.3.0"
 edition = "2024"
-rust-version = "1.93"
+rust-version = "1.95"
 license = "MIT OR Apache-2.0"
 homepage = "https://paradigmxyz.github.io/reth"
 repository = "https://github.com/paradigmxyz/reth"
@@ -55,6 +55,7 @@ exclude = [".github/"]
 [workspace]
 members = [
     "bin/reth/",
+    "crates/alloy-provider/",
     "crates/storage/rpc-provider/",
     "crates/chain-state/",
     "crates/chainspec/",
@@ -96,6 +97,7 @@ members = [
     "crates/gravity-storage/",
     "crates/gravity-primitives/",
     "crates/gravity-precompiles/",
+    "crates/lru/",
     "crates/metrics/",
     "crates/net/banlist/",
     "crates/net/discv4/",
@@ -126,7 +128,6 @@ members = [
     "crates/payload/util/",
     "crates/primitives/",
     "crates/primitives-traits/",
-    "crates/prune/db",
     "crates/prune/prune",
     "crates/prune/types",
     "crates/ress/protocol",
@@ -173,6 +174,7 @@ members = [
     "examples/bsc-p2p",
     "examples/custom-dev-node/",
     "examples/custom-engine-types/",
+    "examples/custom-evm/",
     "examples/custom-hardforks/",
     "examples/custom-inspector/",
     "examples/custom-node-components/",
@@ -323,6 +325,11 @@ proptest.opt-level = 3
 rand_chacha.opt-level = 3
 rand_xorshift.opt-level = 3
 unarray.opt-level = 3
+blst.opt-level = 3
+c-kzg.opt-level = 3
+secp256k1-sys.opt-level = 3
+# `cc` builds C++ with full `-g` when `debug` is on, making `librocksdb.a` 854 MiB instead of 180 MiB.
+librocksdb-sys.debug = false
 
 # Meant for testing - all optimizations, but with debug assertions and overflow checks.
 [profile.hivetests]
@@ -423,6 +430,7 @@ reth-fs-util = { path = "crates/fs-util" }
 reth-invalid-block-hooks = { path = "crates/engine/invalid-block-hooks" }
 reth-ipc = { path = "crates/rpc/ipc" }
 reth-libmdbx = { path = "crates/storage/libmdbx-rs" }
+reth-lru = { path = "crates/lru" }
 reth-mdbx-sys = { path = "crates/storage/libmdbx-rs/mdbx-sys" }
 reth-metrics = { path = "crates/metrics" }
 reth-net-banlist = { path = "crates/net/banlist" }
@@ -502,7 +510,7 @@ revm-state = { version = "12.0.0", default-features = false }
 revm-primitives = { version = "24.0.0", default-features = false }
 revm-interpreter = { version = "37.0.0", default-features = false }
 revm-database-interface = { version = "12.0.0", default-features = false }
-revm-inspectors = "0.40.1"
+revm-inspectors = "0.40.4"
 
 # eth
 alloy-dyn-abi = "1.6.0"
@@ -517,7 +525,7 @@ alloy-evm = { version = "0.36.0", default-features = false }
 alloy-rlp = { version = "0.3.13", default-features = false, features = ["core-net"] }
 alloy-trie = { version = "0.9.5", default-features = false }
 
-alloy-hardforks = "0.4.7"
+alloy-hardforks = "0.4.8"
 
 alloy-consensus = { version = "2.0.5", default-features = false }
 alloy-contract = { version = "2.0.5", default-features = false }
@@ -532,12 +540,12 @@ alloy-rpc-client = { version = "2.0.5", default-features = false }
 alloy-rpc-types = { version = "2.0.5", features = ["eth"], default-features = false }
 alloy-rpc-types-admin = { version = "2.0.5", default-features = false }
 alloy-rpc-types-anvil = { version = "2.0.5", default-features = false }
-alloy-rpc-types-beacon = { version = "2.0.5", default-features = false }
+alloy-rpc-types-beacon = { version = "=2.1.0", default-features = false }
 alloy-rpc-types-debug = { version = "2.0.5", default-features = false }
-alloy-rpc-types-engine = { version = "2.0.5", default-features = false }
+alloy-rpc-types-engine = { version = "=2.1.0", default-features = false }
 alloy-rpc-types-eth = { version = "2.0.5", default-features = false }
 alloy-rpc-types-mev = { version = "2.0.5", default-features = false }
-alloy-rpc-types-trace = { version = "2.0.5", default-features = false }
+alloy-rpc-types-trace = { version = "2.4.1", default-features = false }
 alloy-rpc-types-txpool = { version = "2.0.5", default-features = false }
 alloy-serde = { version = "2.0.5", default-features = false }
 alloy-signer = { version = "2.0.5", default-features = false }
@@ -559,9 +567,9 @@ boyer-moore-magiclen = "0.2.16"
 bytes = { version = "1.11.1", default-features = false }
 blake3 = "1.8"
 brotli = "8"
-cfg-if = "1.0"
 clap = "4"
 color-eyre = "0.6"
+flate2 = "1"
 dashmap = "6.2"
 derive_more = { version = "2", default-features = false, features = ["full"] }
 dirs-next = "2.0.0"
@@ -569,6 +577,7 @@ dyn-clone = "1.0.17"
 eyre = "0.6"
 fdlimit = "0.3.0"
 fixed-map = { version = "0.9", default-features = false }
+hashbrown = { version = "0.17", default-features = false }
 humantime = "2.1"
 imbl = "7"
 humantime-serde = "1.1"
@@ -595,7 +604,7 @@ serde_with = { version = "3", default-features = false, features = ["macros"] }
 sha2 = { version = "0.10", default-features = false }
 shellexpand = "3.0.0"
 shlex = "1.3"
-slotmap = "1"
+similar = "2.7"
 smallvec = "1"
 strum = { version = "0.27", default-features = false }
 strum_macros = "0.27"
@@ -680,12 +689,12 @@ toml = "0.9"
 rocksdb = { version = "0.24" }
 
 # otlp obs
-opentelemetry_sdk = "0.31"
-opentelemetry = "0.31"
-opentelemetry-otlp = "0.31"
-opentelemetry-semantic-conventions = "0.31"
-opentelemetry-appender-tracing = "0.31"
-tracing-opentelemetry = "0.32"
+opentelemetry_sdk = "0.32"
+opentelemetry = "0.32"
+opentelemetry-otlp = "0.32"
+opentelemetry-semantic-conventions = "0.32"
+opentelemetry-appender-tracing = "0.32"
+tracing-opentelemetry = "0.33"
 
 # misc-testing
 arbitrary = "1.3"
@@ -716,7 +725,6 @@ aes = "0.8.1"
 ahash = "0.8"
 anyhow = "1.0"
 bindgen = { version = "0.72", default-features = false }
-block-padding = "0.3"
 cc = "1.2.62"
 cipher = "0.4.3"
 comfy-table = "7.0"
@@ -738,7 +746,7 @@ human_bytes = "0.4.1"
 indexmap = "2"
 interprocess = "2.4.2"
 lz4_flex = { version = "0.12", default-features = false }
-memmap2 = "0.9.4"
+memmap2 = "0.9.11"
 num-traits = "0.2.15"
 page_size = "0.6.0"
 plain_hasher = "0.2"
@@ -760,10 +768,9 @@ tracing-subscriber = { version = "0.3", default-features = false }
 tracing-tracy = "0.11"
 triehash = "0.8"
 typenum = "1.15.0"
-vergen = "9.1.0"
+smolgen = "0.1.1"
 visibility = "0.1.1"
 walkdir = "2.3.3"
-vergen-git2 = "9.1.0"
 
 # networking
 ipnet = "2.11"

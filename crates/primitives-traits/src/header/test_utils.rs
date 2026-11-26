@@ -49,7 +49,7 @@ prop_compose! {
     /// Generates a proptest strategy for constructing an instance of a header which is valid __with
     /// respect to past and future forks__.
     ///
-    /// See docs for [generate_valid_header] for more information.
+    /// See docs for [`generate_valid_header`] for more information.
     pub fn valid_header_strategy()(
         header in arb::<Header>(),
         eip_4844_active in any::<bool>(),

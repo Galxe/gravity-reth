@@ -39,7 +39,7 @@ pub struct SnapshotManifestCommand {
     /// Blocks per archive file for chunked components.
     ///
     /// If omitted, this is inferred from header static file ranges in the source datadir.
-    #[arg(long)]
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
     blocks_per_file: Option<u64>,
 }
 
@@ -125,7 +125,7 @@ fn infer_snapshot_block_from_db(source_datadir: &std::path::Path) -> Result<u64>
 
     eyre::bail!(
         "Could not infer --block from source DB (Finish checkpoint missing); pass --block manually"
-    )
+    );
 }
 
 /// Infers the snapshot block from the highest header static-file range.

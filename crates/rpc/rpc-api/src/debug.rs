@@ -5,7 +5,8 @@ use alloy_primitives::{Address, Bytes, B256, U64};
 use alloy_rpc_types_debug::ExecutionWitness;
 use alloy_rpc_types_eth::{Account, AccountInfo, Bundle, Index, StateContext};
 use alloy_rpc_types_trace::geth::{
-    BlockTraceResult, GethDebugTracingCallOptions, GethDebugTracingOptions, GethTrace, TraceResult,
+    BlockTraceResult, ChainBlockTraceResult, GethDebugTracingCallOptions, GethDebugTracingOptions,
+    GethTrace, TraceResult,
 };
 use jsonrpsee::{core::RpcResult, proc_macros::rpc};
 use reth_trie_common::{updates::TrieUpdates, HashedPostState};
@@ -21,6 +22,10 @@ pub trait DebugApi<TxReq: RpcObject> {
     /// Returns an RLP-encoded block.
     #[method(name = "getRawBlock")]
     async fn raw_block(&self, block_id: BlockId) -> RpcResult<Bytes>;
+
+    /// Returns the RLP-encoded EIP-7928 block access list.
+    #[method(name = "getRawBlockAccessList")]
+    async fn raw_block_access_list(&self, block_id: BlockId) -> RpcResult<Bytes>;
 
     /// Returns an EIP-2718 binary-encoded transaction.
     ///
@@ -39,6 +44,20 @@ pub trait DebugApi<TxReq: RpcObject> {
     /// Returns an array of recent bad blocks that the client has seen on the network.
     #[method(name = "getBadBlocks")]
     async fn bad_blocks(&self) -> RpcResult<Vec<serde_json::Value>>;
+
+    /// Clears all transactions from the transaction pool.
+    #[method(name = "clearTxpool")]
+    async fn debug_clear_txpool(&self) -> RpcResult<()>;
+
+    /// Subscribes to block traces, excluding the start and including the end block.
+    #[subscription(name = "subscribe" => "subscription", unsubscribe = "unsubscribe", item = ChainBlockTraceResult)]
+    async fn debug_subscribe(
+        &self,
+        subscription: String,
+        start_exclusive: BlockNumberOrTag,
+        end_inclusive: BlockNumberOrTag,
+        opts: Option<GethDebugTracingOptions>,
+    ) -> jsonrpsee::core::SubscriptionResult;
 
     /// Returns the structured logs created during the execution of EVM between two blocks
     /// (excluding start) as a JSON object.
@@ -139,10 +158,9 @@ pub trait DebugApi<TxReq: RpcObject> {
     /// to their preimages that were required during the execution of the block, including during
     /// state root recomputation.
     ///
-    /// The first argument is the block number or tag.
+    /// The first argument is the block identifier.
     #[method(name = "executionWitness")]
-    async fn debug_execution_witness(&self, block: BlockNumberOrTag)
-        -> RpcResult<ExecutionWitness>;
+    async fn debug_execution_witness(&self, block: BlockId) -> RpcResult<ExecutionWitness>;
 
     /// The `debug_executionWitnessByBlockHash` method allows for re-execution of a block with the
     /// purpose of generating an execution witness. The witness comprises of a map of all hashed
@@ -272,8 +290,8 @@ pub trait DebugApi<TxReq: RpcObject> {
         end_number: u64,
     ) -> RpcResult<()>;
 
-    /// Executes a block (bad- or canon- or side-), and returns a list of intermediate roots: the
-    /// stateroot after each transaction.
+    /// Executes a canonical or cached bad block, returning the state root after each transaction
+    /// up to the first invalid transaction.
     #[method(name = "intermediateRoots")]
     async fn debug_intermediate_roots(
         &self,

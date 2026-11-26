@@ -148,11 +148,7 @@ where
                 }
             };
 
-            let state = ForkchoiceState {
-                head_block_hash,
-                safe_block_hash: head_block_hash,
-                finalized_block_hash: head_block_hash,
-            };
+            let state = ForkchoiceState::same_hash(head_block_hash);
 
             match engine.fork_choice_updated(state, None).await {
                 Ok(response) => match response.payload_status.status {
@@ -413,11 +409,11 @@ mod tests {
         tokio::spawn(async move {
             while let Some(message) = from_engine.recv().await {
                 match message {
-                    BeaconEngineMessage::NewPayload { payload: _, tx } => {
+                    BeaconEngineMessage::NewPayload { tx, .. } => {
                         tx.send(Ok(PayloadStatus::new(responses.new_payload.clone(), None)))
                             .unwrap();
                     }
-                    BeaconEngineMessage::ForkchoiceUpdated { state: _, payload_attrs: _, tx } => {
+                    BeaconEngineMessage::ForkchoiceUpdated { tx, .. } => {
                         tx.send(Ok(OnForkChoiceUpdated::valid(PayloadStatus::new(
                             responses.fcu.clone(),
                             None,

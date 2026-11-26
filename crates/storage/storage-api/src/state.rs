@@ -11,7 +11,7 @@ use reth_execution_types::ExecutionOutcome;
 use reth_primitives_traits::Bytecode;
 use reth_storage_errors::provider::ProviderResult;
 use reth_trie_common::HashedPostState;
-use revm_database::BundleState;
+use revm::database::BundleState;
 
 /// This just receives state, or [`ExecutionOutcome`], from the provider
 #[auto_impl::auto_impl(&, Arc, Box)]
@@ -177,9 +177,9 @@ pub trait StateProviderFactory: BlockIdReader + Send + Sync {
     /// Note: this only looks at historical blocks, not pending blocks.
     fn history_by_block_hash(&self, block: BlockHash) -> ProviderResult<StateProviderBox>;
 
-    /// Returns _any_ [StateProvider] with matching block hash.
+    /// Returns _any_ [`StateProvider`] with matching block hash.
     ///
-    /// This will return a [StateProvider] for either a historical or pending block.
+    /// This will return a [`StateProvider`] for either a historical or pending block.
     fn state_by_block_hash(&self, block: BlockHash) -> ProviderResult<StateProviderBox>;
 
     /// Storage provider for pending state.

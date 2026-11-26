@@ -100,6 +100,115 @@ mod tests {
         Ok(())
     }
 
+    fn assert_cached_size_matches_disk(
+        sf_rw: &StaticFileProvider<EthPrimitives>,
+        segment: StaticFileSegment,
+        block: u64,
+    ) -> eyre::Result<()> {
+        let jar_provider = sf_rw.get_segment_provider_from_block(segment, block, None)?;
+        let disk_size = fs::metadata(jar_provider.data_path())?.len() +
+            fs::metadata(jar_provider.offsets_path())?.len();
+        let mapped = jar_provider.mmap_handle();
+        assert_eyre(
+            (mapped.size() + mapped.offsets_size()) as u64,
+            disk_size,
+            "cached size mismatch",
+        )
+    }
+
+    #[test]
+    fn pruning_waits_for_old_readers_before_truncating_mapped_files() {
+        use std::{
+            sync::mpsc,
+            time::{Duration, Instant},
+        };
+        let (static_dir, _) = create_test_static_files_dir();
+        let provider = StaticFileProvider::<EthPrimitives>::read_write(&static_dir).unwrap();
+        let mut headers = Vec::new();
+        {
+            let mut writer = provider.latest_writer(StaticFileSegment::Headers).unwrap();
+            for number in 0..128 {
+                let header = Header {
+                    number,
+                    extra_data: alloy_primitives::Bytes::from(vec![number as u8; 32]),
+                    logs_bloom: alloy_primitives::Bloom::repeat_byte(0xff),
+                    ..Default::default()
+                };
+                writer.append_header(&header, U256::ZERO, &BlockHash::default()).unwrap();
+                headers.push(header);
+            }
+            writer.commit().unwrap();
+        }
+        std::thread::scope(|scope| {
+            // Keep the mapped provider inside the scope so panic unwinding releases it before
+            // the scope joins a writer blocked on cache publication.
+            let old = provider
+                .get_segment_provider_from_block(StaticFileSegment::Headers, 127, None)
+                .unwrap();
+            let path = old.data_path().to_path_buf();
+            let old_size = fs::metadata(&path).unwrap().len();
+            let (done_tx, done_rx) = mpsc::channel();
+            let provider_ref = &provider;
+            let writer = scope.spawn(move || {
+                let mut writer = provider_ref.latest_writer(StaticFileSegment::Headers).unwrap();
+                writer.prune_headers(120).unwrap();
+                writer.commit().unwrap();
+                let _ = done_tx.send(());
+            });
+            // Observe the new persisted row count, not an assumed elapsed scheduling delay.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Ok(jar) = NippyJar::<SegmentHeader>::load(&path) &&
+                    jar.rows() == 8
+                {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "pruned config was not published");
+                std::thread::yield_now();
+            }
+            assert_eq!(fs::metadata(&path).unwrap().len(), old_size);
+            assert_eq!(old.header_by_number(127).unwrap(), Some(headers[127].clone()));
+            assert!(matches!(done_rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+            drop(old);
+            done_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            writer.join().unwrap();
+            assert!(fs::metadata(&path).unwrap().len() < old_size);
+        });
+        assert_eq!(provider.header_by_number(7).unwrap(), Some(headers[7].clone()));
+        assert_eq!(provider.get_highest_static_file_block(StaticFileSegment::Headers), Some(7));
+        assert_cached_size_matches_disk(&provider, StaticFileSegment::Headers, 7).unwrap();
+    }
+
+    #[test]
+    fn distance_derived_receipt_ranges_reopen_and_keep_existing_sizes() -> eyre::Result<()> {
+        use reth_static_file_types::blocks_per_file_for_prune_distance;
+        for (distance, expected_size) in
+            [(0, 1_000), (20_000, 5_000), (u64::MAX, DEFAULT_BLOCKS_PER_STATIC_FILE)]
+        {
+            let (dir, _) = create_test_static_files_dir();
+            let size = blocks_per_file_for_prune_distance(distance);
+            let receipt = Receipt { cumulative_gas_used: 123, ..Default::default() };
+            {
+                let provider = StaticFileProvider::<EthPrimitives>::read_write(&dir)?
+                    .with_blocks_per_file([(StaticFileSegment::Receipts, Some(size))])?;
+                let mut writer = provider.latest_writer(StaticFileSegment::Receipts)?;
+                writer.increment_block(0)?;
+                writer.append_receipt(0, &receipt)?;
+                writer.commit()?;
+            }
+            // Reopening with another profile must inherit the existing filename range.
+            let provider = StaticFileProvider::<EthPrimitives>::read_write(&dir)?
+                .with_blocks_per_file([(StaticFileSegment::Receipts, Some(expected_size + 1))])?;
+            let jar =
+                provider.get_segment_provider_from_block(StaticFileSegment::Receipts, 0, None)?;
+            assert_eq!(jar.user_header().expected_block_start(), 0);
+            assert_eq!(jar.user_header().expected_block_end(), expected_size - 1);
+            drop(jar);
+            assert_eq!(provider.receipt(0)?, Some(receipt));
+        }
+        Ok(())
+    }
+
     #[test]
     fn test_snap() {
         // Ranges
@@ -233,6 +342,7 @@ mod tests {
                     expected_tip,
                     "header mismatch",
                 )?;
+                assert_cached_size_matches_disk(sf_rw, StaticFileSegment::Headers, id)?;
             }
 
             // Validate the number of files remaining in the directory
@@ -462,6 +572,7 @@ mod tests {
                 "block mismatch",
             )?;
             assert_eyre(sf_rw.get_highest_static_file_tx(segment), expected_tx_tip, "tx mismatch")?;
+            assert_cached_size_matches_disk(sf_rw, segment, last_block)?;
 
             // Verify that transactions and receipts are returned correctly. Uses
             // cumulative_gas_used & nonce as ids.
@@ -589,12 +700,17 @@ mod tests {
 mod changeset_tests {
     use super::*;
     use crate::{test_utils::create_test_provider_factory, StaticFileProviderFactory};
+    use alloy_consensus::Header;
     use alloy_primitives::{Address, B256, U256};
+    use assert_matches::assert_matches;
     use reth_db::test_utils::create_test_static_files_dir;
     use reth_db_api::models::{AccountBeforeTx, StorageBeforeTx};
     use reth_ethereum_primitives::EthPrimitives;
+    use reth_nippy_jar::NippyJarError;
     use reth_primitives_traits::Account;
-    use reth_storage_api::{ChangeSetReader, StorageChangeSetReader};
+    use reth_storage_api::{
+        BlockHashReader, ChangeSetReader, HeaderProvider, StorageChangeSetReader,
+    };
 
     #[test]
     fn changeset_segments_roundtrip() -> eyre::Result<()> {
@@ -753,5 +869,109 @@ mod changeset_tests {
         assert_eq!(sf.account_block_changeset(12)?.len(), 1);
 
         Ok(())
+    }
+
+    #[test]
+    fn test_read_headers_while_appending() {
+        let (static_dir, _) = create_test_static_files_dir();
+        let sf_rw: StaticFileProvider<EthPrimitives> = StaticFileProvider::read_write(&static_dir)
+            .expect("Failed to build static file provider");
+        let hash = |num: u64| B256::with_last_byte(num as u8 + 1);
+
+        let mut header_writer = sf_rw.latest_writer(StaticFileSegment::Headers).unwrap();
+        let mut header = Header::default();
+        for num in 0..=2 {
+            header.number = num;
+            header_writer.append_header(&header, U256::ZERO, &hash(num)).unwrap();
+        }
+        header_writer.commit().unwrap();
+
+        // Writes the next header to disk without committing it, as persistence does before the
+        // database commit.
+        header.number = 3;
+        header_writer.append_header(&header, U256::ZERO, &hash(3)).unwrap();
+        header_writer.sync_all().unwrap();
+
+        // Reloads the jar from disk meanwhile, as every static file deletion by the pruner does.
+        sf_rw.initialize_index().unwrap();
+
+        assert_eq!(sf_rw.block_hash(2).unwrap(), Some(hash(2)));
+        assert!(matches!(
+            sf_rw.block_hash(3),
+            Err(ProviderError::MissingStaticFileBlock(StaticFileSegment::Headers, 3))
+        ));
+    }
+
+    #[test]
+    fn test_header_read_errors_are_not_missing_blocks() {
+        for corrupt_offsets in [true, false] {
+            let (static_dir, _) = create_test_static_files_dir();
+            let provider = StaticFileProvider::<EthPrimitives>::read_write(&static_dir).unwrap();
+            let header = Header::default();
+            let hash = header.hash_slow();
+            {
+                let mut writer = provider.latest_writer(StaticFileSegment::Headers).unwrap();
+                writer.append_header(&header, U256::ZERO, &hash).unwrap();
+                writer.commit().unwrap();
+            }
+
+            assert_eq!(provider.header_by_number(0).unwrap(), Some(header));
+            assert_eq!(provider.block_hash(0).unwrap(), Some(hash));
+            assert!(matches!(
+                provider.header_by_number(1),
+                Ok(None) |
+                    Err(ProviderError::MissingStaticFileBlock(StaticFileSegment::Headers, 1))
+            ));
+            assert!(matches!(
+                provider.block_hash(1),
+                Ok(None) |
+                    Err(ProviderError::MissingStaticFileBlock(StaticFileSegment::Headers, 1))
+            ));
+
+            let jar = provider
+                .get_segment_provider_from_block(StaticFileSegment::Headers, 0, None)
+                .unwrap();
+            let path =
+                if corrupt_offsets { jar.offsets_path() } else { jar.data_path().to_path_buf() };
+            drop(jar);
+            drop(provider);
+
+            // Corrupt the files before opening any readers, retaining the committed row count.
+            let mut bytes = reth_fs_util::read(&path).unwrap();
+            if corrupt_offsets {
+                // Retain the offset-size byte, but point every offset beyond the data file.
+                bytes[1..].fill(u8::MAX);
+            } else {
+                // An unterminated LZ4 literal-length sequence cannot be decompressed.
+                bytes.fill(u8::MAX);
+            }
+            reth_fs_util::write(&path, bytes).unwrap();
+
+            let provider =
+                StaticFileProvider::<EthPrimitives>::read_only(&static_dir, false).unwrap();
+            for error in [
+                provider.header_by_number(0).unwrap_err(),
+                provider.block_hash(0).unwrap_err(),
+                provider.sealed_header(0).unwrap_err(),
+                provider.headers_range(0..1).unwrap_err(),
+            ] {
+                let error = error.downcast_other_ref::<NippyJarError>().unwrap();
+                if corrupt_offsets {
+                    assert_matches!(error, NippyJarError::InconsistentState);
+                } else {
+                    assert_matches!(error, NippyJarError::OutputTooSmall);
+                }
+            }
+            assert!(matches!(
+                provider.header_by_number(1),
+                Ok(None) |
+                    Err(ProviderError::MissingStaticFileBlock(StaticFileSegment::Headers, 1))
+            ));
+            assert!(matches!(
+                provider.block_hash(1),
+                Ok(None) |
+                    Err(ProviderError::MissingStaticFileBlock(StaticFileSegment::Headers, 1))
+            ));
+        }
     }
 }

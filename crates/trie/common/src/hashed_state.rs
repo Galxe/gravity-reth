@@ -12,14 +12,12 @@ use alloy_primitives::{
     Address, B256, U256,
 };
 use itertools::Itertools;
-#[cfg(feature = "rayon")]
-pub use rayon::*;
 use reth_primitives_traits::Account;
 
 #[cfg(feature = "rayon")]
 use rayon::prelude::{IntoParallelIterator, ParallelIterator};
 
-use revm_database::{AccountStatus, BundleAccount};
+use revm::database::{AccountStatus, BundleAccount};
 
 /// Representation of in-memory hashed state.
 #[derive(PartialEq, Eq, Clone, Default, Debug)]
@@ -273,6 +271,10 @@ impl HashedPostState {
     /// Returns an iterator that yields chunks of the specified size.
     ///
     /// See [`ChunkedHashedPostState`] for more information.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the chunk size is zero.
     pub fn chunks(self, size: usize) -> ChunkedHashedPostState {
         ChunkedHashedPostState::new(self, size)
     }
@@ -484,6 +486,85 @@ impl HashedPostStateSorted {
     pub const fn account_storages(&self) -> &B256Map<HashedStorageSorted> {
         &self.storages
     }
+
+    /// Returns whether no account or storage changes are present.
+    pub fn is_empty(&self) -> bool {
+        self.accounts.accounts.is_empty() &&
+            self.accounts.destroyed_accounts.is_empty() &&
+            self.storages.is_empty()
+    }
+
+    /// Returns the number of changed accounts and storage slots.
+    pub fn total_len(&self) -> usize {
+        self.accounts.accounts.len() +
+            self.accounts.destroyed_accounts.len() +
+            self.storages.values().map(HashedStorageSorted::len).sum::<usize>()
+    }
+
+    /// Constructs dirty prefixes without changing the split live/deleted representation.
+    pub fn construct_prefix_sets(&self) -> TriePrefixSetsMut {
+        let mut account_prefix_set = PrefixSetMut::with_capacity(
+            self.accounts.accounts.len() + self.accounts.destroyed_accounts.len(),
+        );
+        for address in self
+            .accounts
+            .accounts
+            .iter()
+            .map(|(address, _)| address)
+            .chain(self.accounts.destroyed_accounts.iter())
+        {
+            account_prefix_set.insert(Nibbles::unpack(address));
+        }
+        let mut storage_prefix_sets =
+            HashMap::with_capacity_and_hasher(self.storages.len(), Default::default());
+        for (address, storage) in &self.storages {
+            account_prefix_set.insert(Nibbles::unpack(address));
+            storage_prefix_sets.insert(
+                *address,
+                if storage.wiped {
+                    PrefixSetMut::all()
+                } else {
+                    PrefixSetMut::from(
+                        storage
+                            .non_zero_valued_slots
+                            .iter()
+                            .map(|(slot, _)| Nibbles::unpack(slot))
+                            .chain(storage.zero_valued_slots.iter().map(Nibbles::unpack)),
+                    )
+                },
+            );
+        }
+        TriePrefixSetsMut {
+            account_prefix_set,
+            storage_prefix_sets,
+            destroyed_accounts: self.accounts.destroyed_accounts.clone(),
+        }
+    }
+
+    /// Merges another sorted state, whose live values, deletions and storage wipes take precedence.
+    pub fn extend_ref_and_sort(&mut self, other: &Self) {
+        crate::utils::extend_sorted_vec(&mut self.accounts.accounts, &other.accounts.accounts);
+        self.accounts
+            .accounts
+            .retain(|(address, _)| !other.accounts.destroyed_accounts.contains(address));
+        for (address, _) in &other.accounts.accounts {
+            self.accounts.destroyed_accounts.remove(address);
+        }
+        self.accounts.destroyed_accounts.extend(other.accounts.destroyed_accounts.iter().copied());
+        for (address, storage) in &other.storages {
+            self.storages
+                .entry(*address)
+                .and_modify(|existing| existing.extend_ref(storage))
+                .or_insert_with(|| storage.clone());
+        }
+    }
+
+    /// Clears all account and storage updates.
+    pub fn clear(&mut self) {
+        self.accounts.accounts.clear();
+        self.accounts.destroyed_accounts.clear();
+        self.storages.clear();
+    }
 }
 
 /// Sorted account state optimized for iterating during state trie calculation.
@@ -531,6 +612,33 @@ impl HashedStorageSorted {
             .chain(self.zero_valued_slots.iter().map(|hashed_slot| (*hashed_slot, U256::ZERO)))
             .sorted_by_key(|entry| *entry.0)
     }
+
+    /// Returns the number of nonzero values and explicit zero-valued slot deletions.
+    pub fn len(&self) -> usize {
+        self.non_zero_valued_slots.len() + self.zero_valued_slots.len()
+    }
+
+    /// Returns whether there are no slot changes. A wipe can still be present.
+    pub fn is_empty(&self) -> bool {
+        self.non_zero_valued_slots.is_empty() && self.zero_valued_slots.is_empty()
+    }
+
+    /// Extends storage with newer values. A newer wipe discards all preceding slot updates.
+    pub fn extend_ref(&mut self, other: &Self) {
+        if other.wiped {
+            self.clone_from(other);
+            return;
+        }
+        crate::utils::extend_sorted_vec(
+            &mut self.non_zero_valued_slots,
+            &other.non_zero_valued_slots,
+        );
+        self.non_zero_valued_slots.retain(|(slot, _)| !other.zero_valued_slots.contains(slot));
+        for (slot, _) in &other.non_zero_valued_slots {
+            self.zero_valued_slots.remove(slot);
+        }
+        self.zero_valued_slots.extend(other.zero_valued_slots.iter().copied());
+    }
 }
 
 /// An iterator that yields chunks of the state updates of at most `size` account and storage
@@ -555,13 +663,15 @@ enum FlattenedHashedPostStateItem {
 
 impl ChunkedHashedPostState {
     fn new(hashed_post_state: HashedPostState, size: usize) -> Self {
+        assert!(size > 0, "chunk size must be non-zero");
         let flattened = hashed_post_state
             .storages
             .into_iter()
             .flat_map(|(address, storage)| {
                 // Storage wipes should go first
-                Some((address, FlattenedHashedPostStateItem::StorageWipe))
-                    .filter(|_| storage.wiped)
+                storage
+                    .wiped
+                    .then_some((address, FlattenedHashedPostStateItem::StorageWipe))
                     .into_iter()
                     .chain(
                         storage.storage.into_iter().sorted_unstable_by_key(|(slot, _)| *slot).map(
@@ -622,11 +732,19 @@ impl Iterator for ChunkedHashedPostState {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[should_panic(expected = "chunk size must be non-zero")]
+    fn zero_chunk_size_is_rejected() {
+        let _ = super::HashedPostState::default().chunks(0);
+    }
+
     use super::*;
     use crate::KeccakKeyHasher;
     use alloy_primitives::Bytes;
-    use revm_database::{states::StorageSlot, StorageWithOriginalValues};
-    use revm_state::{AccountInfo, Bytecode};
+    use revm::{
+        database::{states::StorageSlot, StorageWithOriginalValues},
+        state::{AccountInfo, Bytecode},
+    };
 
     #[test]
     fn hashed_state_wiped_extension() {
@@ -1067,5 +1185,171 @@ mod tests {
             })
         );
         assert_eq!(chunks.next(), None);
+    }
+}
+
+#[cfg(test)]
+mod sorted_state_tests {
+    use super::*;
+    use alloc::vec;
+    fn sorted_state(accounts: Vec<(B256, Option<Account>)>) -> HashedPostStateSorted {
+        HashedPostState { accounts: accounts.into_iter().collect(), ..Default::default() }
+            .into_sorted()
+    }
+    #[test]
+    fn test_hashed_post_state_sorted_extend_ref() {
+        // Test extending accounts
+        let mut state1 = sorted_state(vec![
+            (B256::from([1; 32]), Some(Account::default())),
+            (B256::from([3; 32]), Some(Account::default())),
+            (B256::from([5; 32]), None),
+        ]);
+
+        let state2 = sorted_state(vec![
+            (B256::from([2; 32]), Some(Account::default())),
+            (B256::from([3; 32]), Some(Account { nonce: 1, ..Default::default() })), /* Override */
+            (B256::from([4; 32]), Some(Account::default())),
+            (B256::from([6; 32]), None),
+        ]);
+
+        state1.extend_ref_and_sort(&state2);
+        let accounts = state1.accounts.accounts_sorted().collect::<Vec<_>>();
+
+        // Check accounts are merged and sorted
+        assert_eq!(accounts.len(), 6);
+        assert_eq!(accounts[0].0, B256::from([1; 32]));
+        assert_eq!(accounts[1].0, B256::from([2; 32]));
+        assert_eq!(accounts[2].0, B256::from([3; 32]));
+        assert_eq!(accounts[2].1.unwrap().nonce, 1); // Should have state2's value
+        assert_eq!(accounts[3].0, B256::from([4; 32]));
+        assert_eq!(accounts[4].0, B256::from([5; 32]));
+        assert_eq!(accounts[4].1, None);
+        assert_eq!(accounts[5].0, B256::from([6; 32]));
+        assert_eq!(accounts[5].1, None);
+    }
+
+    #[test]
+    fn test_hashed_storage_sorted_extend_ref() {
+        // Test normal extension
+        let mut storage1 = HashedStorage::from_iter(
+            false,
+            vec![
+                (B256::from([1; 32]), U256::from(10)),
+                (B256::from([3; 32]), U256::from(30)),
+                (B256::from([5; 32]), U256::ZERO),
+            ],
+        )
+        .into_sorted();
+
+        let storage2 = HashedStorage::from_iter(
+            false,
+            vec![
+                (B256::from([2; 32]), U256::from(20)),
+                (B256::from([3; 32]), U256::from(300)), // Override
+                (B256::from([4; 32]), U256::from(40)),
+                (B256::from([6; 32]), U256::ZERO),
+            ],
+        )
+        .into_sorted();
+
+        storage1.extend_ref(&storage2);
+        let slots1 = storage1.storage_slots_sorted().collect::<Vec<_>>();
+
+        assert_eq!(slots1.len(), 6);
+        assert_eq!(slots1[0].0, B256::from([1; 32]));
+        assert_eq!(slots1[0].1, U256::from(10));
+        assert_eq!(slots1[1].0, B256::from([2; 32]));
+        assert_eq!(slots1[1].1, U256::from(20));
+        assert_eq!(slots1[2].0, B256::from([3; 32]));
+        assert_eq!(slots1[2].1, U256::from(300)); // Should have storage2's value
+        assert_eq!(slots1[3].0, B256::from([4; 32]));
+        assert_eq!(slots1[3].1, U256::from(40));
+        assert_eq!(slots1[4].0, B256::from([5; 32]));
+        assert_eq!(slots1[4].1, U256::ZERO);
+        assert_eq!(slots1[5].0, B256::from([6; 32]));
+        assert_eq!(slots1[5].1, U256::ZERO);
+        assert!(!storage1.wiped);
+
+        // Test wiped storage
+        let mut storage3 = HashedStorage::from_iter(
+            false,
+            vec![(B256::from([1; 32]), U256::from(10)), (B256::from([2; 32]), U256::ZERO)],
+        )
+        .into_sorted();
+
+        let storage4 = HashedStorage::from_iter(
+            true,
+            vec![(B256::from([3; 32]), U256::from(30)), (B256::from([4; 32]), U256::ZERO)],
+        )
+        .into_sorted();
+
+        storage3.extend_ref(&storage4);
+        let slots3 = storage3.storage_slots_sorted().collect::<Vec<_>>();
+
+        assert!(storage3.wiped);
+        // When wiped, should only have storage4's values
+        assert_eq!(slots3.len(), 2);
+        assert_eq!(slots3[0].0, B256::from([3; 32]));
+        assert_eq!(slots3[0].1, U256::from(30));
+        assert_eq!(slots3[1].0, B256::from([4; 32]));
+        assert_eq!(slots3[1].1, U256::ZERO);
+    }
+    #[test]
+    fn sorted_merge_matches_unsorted_state_oracle_with_recreation_zeroes_and_wipes() {
+        let mut expected = HashedPostState::default();
+        let mut actual = HashedPostStateSorted::default();
+        for index in 0u64..64 {
+            let address = B256::with_last_byte((index % 5) as u8);
+            let other = B256::with_last_byte(((index + 2) % 5) as u8);
+            let account =
+                (index % 3 != 0).then_some(Account { nonce: index, ..Default::default() });
+            let update = HashedPostState {
+                accounts: HashMap::from_iter([(address, account)]),
+                storages: B256Map::from_iter([(
+                    other,
+                    HashedStorage::from_iter(
+                        index % 7 == 0,
+                        [
+                            (
+                                B256::with_last_byte((index % 4) as u8),
+                                if index % 2 == 0 { U256::ZERO } else { U256::from(index + 1) },
+                            ),
+                            (B256::with_last_byte(((index + 1) % 4) as u8), U256::from(index + 2)),
+                        ],
+                    ),
+                )]),
+            };
+            expected.extend_ref(&update);
+            actual.extend_ref_and_sort(&update.into_sorted());
+            assert_eq!(actual, expected.clone().into_sorted(), "update {index}");
+            let mut actual_prefixes = actual.construct_prefix_sets().freeze();
+            let mut expected_prefixes = expected.construct_prefix_sets().freeze();
+            assert_eq!(actual_prefixes.destroyed_accounts, expected_prefixes.destroyed_accounts);
+            for key in 0..6 {
+                let address = B256::with_last_byte(key);
+                let path = Nibbles::unpack(address);
+                assert_eq!(
+                    actual_prefixes.account_prefix_set.contains(&path),
+                    expected_prefixes.account_prefix_set.contains(&path)
+                );
+                match (
+                    actual_prefixes.storage_prefix_sets.get_mut(&address),
+                    expected_prefixes.storage_prefix_sets.get_mut(&address),
+                ) {
+                    (Some(a), Some(b)) => {
+                        for slot in 0..6 {
+                            let path = Nibbles::unpack(B256::with_last_byte(slot));
+                            assert_eq!(a.contains(&path), b.contains(&path));
+                        }
+                    }
+                    (None, None) => {}
+                    _ => panic!("storage prefix maps differ"),
+                }
+            }
+        }
+        assert!(!actual.is_empty());
+        actual.clear();
+        assert!(actual.is_empty());
+        assert_eq!(actual.total_len(), 0);
     }
 }

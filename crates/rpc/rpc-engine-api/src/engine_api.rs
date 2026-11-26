@@ -5,6 +5,7 @@ use alloy_eips::{
     eip1898::BlockHashOrNumber,
     eip4844::{BlobAndProofV1, BlobAndProofV2, BlobCellsAndProofsV1},
     eip4895::Withdrawals,
+    eip7594::BlobCellMask,
     eip7685::RequestsOrHash,
 };
 use alloy_primitives::{BlockHash, BlockNumber, Sealable, B128, B256, U64};
@@ -25,9 +26,9 @@ use reth_payload_primitives::{
     validate_payload_timestamp, EngineApiMessageVersion, MessageValidationKind,
     PayloadOrAttributes, PayloadTypes,
 };
-use reth_primitives_traits::{Block, BlockBody};
+use reth_primitives_traits::{AlloyBlockHeader, Block, BlockBody};
 use reth_rpc_api::{EngineApiServer, IntoEngineApiRpcModule};
-use reth_storage_api::{BlockReader, HeaderProvider, StateProviderFactory};
+use reth_storage_api::{BalStoreHandle, BlockReader, HeaderProvider, StateProviderFactory};
 use reth_tasks::Runtime;
 use reth_transaction_pool::TransactionPool;
 use std::{
@@ -63,14 +64,36 @@ const MAX_BLOB_LIMIT: usize = 128;
 /// L1 implementation.
 pub struct EngineApi<Provider, PayloadT: PayloadTypes, Pool, Validator, ChainSpec> {
     inner: Arc<EngineApiInner<Provider, PayloadT, Pool, Validator, ChainSpec>>,
+    // Optional read backend for JSON V2 and Amsterdam SSZ bodies. SSZ requires explicit support.
+    payload_body_bal_store: Option<BalStoreHandle>,
 }
 
 impl<Provider, PayloadT: PayloadTypes, Pool, Validator, ChainSpec>
     EngineApi<Provider, PayloadT, Pool, Validator, ChainSpec>
 {
+    /// Configures a real read backend for JSON V2 and Amsterdam SSZ payload bodies.
+    ///
+    /// No store is installed by default. Configure this before sharing the API with transports;
+    /// clones retain this handle. JSON V2 body methods also return available BALs from this store;
+    /// V1 and unconfigured V2 methods keep their original behavior.
+    pub fn with_payload_body_bal_store(mut self, store: BalStoreHandle) -> Self {
+        self.payload_body_bal_store = Some(store);
+        self
+    }
+
+    /// Whether Amsterdam SSZ body reads have an explicitly configured BAL backend.
+    pub const fn has_payload_body_bal_store(&self) -> bool {
+        self.payload_body_bal_store.is_some()
+    }
+
     /// Returns the configured chainspec.
     pub fn chain_spec(&self) -> &Arc<ChainSpec> {
         &self.inner.chain_spec
+    }
+
+    /// Returns the configured client version.
+    pub fn client_version(&self) -> &ClientVersionV1 {
+        &self.inner.client
     }
 }
 
@@ -115,7 +138,7 @@ where
             cell_custody,
             is_syncing,
         });
-        Self { inner }
+        Self { inner, payload_body_bal_store: None }
     }
 
     /// Fetches the client version.
@@ -390,7 +413,7 @@ where
         custody_columns: Option<B128>,
     ) -> EngineApiResult<ForkchoiceUpdated> {
         if let Some(custody_columns) = custody_columns {
-            self.inner.cell_custody.set(custody_columns);
+            self.inner.cell_custody.set_from_engine_api(custody_columns);
         }
         self.validate_and_execute_forkchoice(EngineApiMessageVersion::V4, state, payload_attrs)
             .await
@@ -645,6 +668,10 @@ where
             // Check if the requested range starts before the earliest available block due to pruning/expiry
             let earliest_block = inner.provider.earliest_block_number().unwrap_or(0);
             for num in start..=end {
+                if tx.is_closed() {
+                    return;
+                }
+
                 if num < earliest_block {
                     result.push(None);
                     continue;
@@ -708,27 +735,14 @@ where
         start: BlockNumber,
         count: u64,
     ) -> EngineApiResult<ExecutionPayloadBodiesV2> {
-        let payload_bodies = self
-            .get_payload_bodies_by_range_with(start, count, |block| {
-                let block_hash = block.header().hash_slow();
-                (
-                    block_hash,
-                    ExecutionPayloadBodyV2 {
-                        transactions: block.body().encoded_2718_transactions(),
-                        withdrawals: block
-                            .body()
-                            .withdrawals()
-                            .cloned()
-                            .map(Withdrawals::into_inner),
-                        block_access_list: None,
-                    },
-                )
-            })
-            .await?;
-
-        Ok(payload_bodies
+        if !self.has_payload_body_bal_store() {
+            return self.get_payload_bodies_by_range_with(start, count, Self::payload_body).await
+        }
+        Ok(self
+            .get_payload_bodies_by_range_with_timestamps(start, count, true)
+            .await?
             .into_iter()
-            .map(|payload_body| payload_body.map(|(_, payload_body)| payload_body))
+            .map(|body| body.map(|(_, body)| body))
             .collect())
     }
 
@@ -742,6 +756,115 @@ where
         let res = Self::get_payload_bodies_by_range_v2(self, start, count).await;
         self.inner.metrics.latency.get_payload_bodies_by_range_v2.record(start_time.elapsed());
         res
+    }
+
+    /// Reads bodies and their fork-selection timestamps from the same block reads.
+    pub async fn get_payload_bodies_by_range_with_timestamps(
+        &self,
+        start: BlockNumber,
+        count: u64,
+        include_bal: bool,
+    ) -> EngineApiResult<Vec<Option<(u64, ExecutionPayloadBodyV2)>>> {
+        let bodies = self
+            .get_payload_bodies_by_range_with(start, count, Self::payload_body_with_timestamp)
+            .await?;
+        self.attach_payload_body_bals(bodies, include_bal).await
+    }
+
+    /// Reads bodies and their fork-selection timestamps from the same block reads.
+    pub async fn get_payload_bodies_by_range_with_timestamps_metered(
+        &self,
+        start: BlockNumber,
+        count: u64,
+        include_bal: bool,
+    ) -> EngineApiResult<Vec<Option<(u64, ExecutionPayloadBodyV2)>>> {
+        let start_time = Instant::now();
+        let result =
+            self.get_payload_bodies_by_range_with_timestamps(start, count, include_bal).await;
+        let latency = &self.inner.metrics.latency;
+        if include_bal {
+            latency.get_payload_bodies_by_range_v2.record(start_time.elapsed());
+        } else {
+            latency.get_payload_bodies_by_range_v1.record(start_time.elapsed());
+        }
+        result
+    }
+
+    /// Reads bodies and their fork-selection timestamps from the same block reads.
+    pub async fn get_payload_bodies_by_hash_with_timestamps(
+        &self,
+        hashes: Vec<BlockHash>,
+        include_bal: bool,
+    ) -> EngineApiResult<Vec<Option<(u64, ExecutionPayloadBodyV2)>>> {
+        let bodies =
+            self.get_payload_bodies_by_hash_with(hashes, Self::payload_body_with_timestamp).await?;
+        self.attach_payload_body_bals(bodies, include_bal).await
+    }
+
+    /// Reads bodies and their fork-selection timestamps from the same block reads.
+    pub async fn get_payload_bodies_by_hash_with_timestamps_metered(
+        &self,
+        hashes: Vec<BlockHash>,
+        include_bal: bool,
+    ) -> EngineApiResult<Vec<Option<(u64, ExecutionPayloadBodyV2)>>> {
+        let start = Instant::now();
+        let result = self.get_payload_bodies_by_hash_with_timestamps(hashes, include_bal).await;
+        let latency = &self.inner.metrics.latency;
+        if include_bal {
+            latency.get_payload_bodies_by_hash_v2.record(start.elapsed());
+        } else {
+            latency.get_payload_bodies_by_hash_v1.record(start.elapsed());
+        }
+        result
+    }
+
+    fn payload_body(block: Provider::Block) -> ExecutionPayloadBodyV2 {
+        ExecutionPayloadBodyV2 {
+            transactions: block.body().encoded_2718_transactions(),
+            withdrawals: block.body().withdrawals().cloned().map(Withdrawals::into_inner),
+            block_access_list: None,
+        }
+    }
+
+    fn payload_body_with_timestamp(
+        block: Provider::Block,
+    ) -> (BlockHash, u64, ExecutionPayloadBodyV2) {
+        (block.header().hash_slow(), block.header().timestamp(), Self::payload_body(block))
+    }
+
+    async fn attach_payload_body_bals(
+        &self,
+        mut bodies: Vec<Option<(BlockHash, u64, ExecutionPayloadBodyV2)>>,
+        include_bal: bool,
+    ) -> EngineApiResult<Vec<Option<(u64, ExecutionPayloadBodyV2)>>> {
+        if include_bal {
+            let hashes: Vec<_> = bodies.iter().flatten().map(|(hash, _, _)| *hash).collect();
+            let store = self.payload_body_bal_store.clone().ok_or(
+                EngineApiError::EngineObjectValidationError(
+                    reth_payload_primitives::EngineObjectValidationError::UnsupportedFork,
+                ),
+            )?;
+            let count = hashes.len();
+            let bals = self
+                .inner
+                .task_spawner
+                .spawn_blocking(move || store.get_by_hashes(&hashes))
+                .await
+                .map_err(|error| EngineApiError::Internal(Box::new(error)))?
+                .map_err(|error| EngineApiError::Internal(Box::new(error)))?;
+            if bals.len() != count {
+                return Err(EngineApiError::Internal(Box::new(std::io::Error::other(
+                    "BAL store response count does not match requested hashes",
+                ))))
+            }
+            for ((_, _, body), bal) in bodies.iter_mut().flatten().zip(bals) {
+                body.block_access_list = bal;
+            }
+        }
+        Ok(bodies
+            .into_iter()
+            .map(|body| body.map(|(_, timestamp, body)| (timestamp, body)))
+            .collect())
     }
 
     /// Called to retrieve execution payload bodies by hashes.
@@ -765,6 +888,10 @@ where
         self.inner.task_spawner.spawn_blocking_task(async move {
             let mut result = Vec::with_capacity(hashes.len());
             for hash in hashes {
+                if tx.is_closed() {
+                    return;
+                }
+
                 let block_result = inner.provider.block(BlockHashOrNumber::Hash(hash));
                 match block_result {
                     Ok(block) => {
@@ -812,15 +939,15 @@ where
         &self,
         hashes: Vec<BlockHash>,
     ) -> EngineApiResult<ExecutionPayloadBodiesV2> {
-        let payload_bodies = self
-            .get_payload_bodies_by_hash_with(hashes, |block| ExecutionPayloadBodyV2 {
-                transactions: block.body().encoded_2718_transactions(),
-                withdrawals: block.body().withdrawals().cloned().map(Withdrawals::into_inner),
-                block_access_list: None,
-            })
-            .await?;
-
-        Ok(payload_bodies)
+        if !self.has_payload_body_bal_store() {
+            return self.get_payload_bodies_by_hash_with(hashes, Self::payload_body).await
+        }
+        Ok(self
+            .get_payload_bodies_by_hash_with_timestamps(hashes, true)
+            .await?
+            .into_iter()
+            .map(|body| body.map(|(_, body)| body))
+            .collect())
     }
 
     /// Metrics version of `get_payload_bodies_by_hash_v2`
@@ -881,6 +1008,25 @@ where
     /// Returns reference to supported capabilities.
     pub fn capabilities(&self) -> &EngineCapabilities {
         &self.inner.capabilities
+    }
+
+    fn has_blobs(&self, versioned_hashes: Vec<B256>) -> EngineApiResult<Vec<bool>> {
+        if versioned_hashes.len() > MAX_BLOB_LIMIT {
+            return Err(EngineApiError::BlobRequestTooLarge { len: versioned_hashes.len() })
+        }
+
+        self.inner
+            .tx_pool
+            .has_blobs_for_versioned_hashes(&versioned_hashes)
+            .map_err(|err| EngineApiError::Internal(Box::new(err)))
+    }
+
+    /// Metered version of `has_blobs`.
+    pub fn has_blobs_metered(&self, versioned_hashes: Vec<B256>) -> EngineApiResult<Vec<bool>> {
+        let start = Instant::now();
+        let res = Self::has_blobs(self, versioned_hashes);
+        self.inner.metrics.latency.has_blobs.record(start.elapsed());
+        res
     }
 
     fn get_blobs_v1(
@@ -984,6 +1130,8 @@ where
         versioned_hashes: Vec<B256>,
         indices_bitarray: B128,
     ) -> EngineApiResult<Option<Vec<Option<BlobCellsAndProofsV1>>>> {
+        // Engine API bitvectors encode the lowest cell indices in the first byte.
+        let cell_mask = BlobCellMask::from_bits(u128::from_le_bytes(indices_bitarray.into()));
         let current_timestamp =
             SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs();
         if !self.inner.chain_spec.is_amsterdam_active_at_timestamp(current_timestamp) {
@@ -1003,7 +1151,7 @@ where
 
         self.inner
             .tx_pool
-            .get_blobs_for_versioned_hashes_v4(&versioned_hashes, indices_bitarray)
+            .get_blobs_for_versioned_hashes_v4(&versioned_hashes, cell_mask)
             .map(Some)
             .map_err(|err| EngineApiError::Internal(Box::new(err)))
     }
@@ -1432,6 +1580,11 @@ where
         Ok(el_caps.list())
     }
 
+    async fn has_blobs(&self, versioned_hashes: Vec<B256>) -> RpcResult<Vec<bool>> {
+        trace!(target: "rpc::engine", "Serving engine_hasBlobs");
+        Ok(self.has_blobs_metered(versioned_hashes)?)
+    }
+
     async fn get_blobs_v1(
         &self,
         versioned_hashes: Vec<B256>,
@@ -1493,7 +1646,10 @@ where
     PayloadT: PayloadTypes,
 {
     fn clone(&self) -> Self {
-        Self { inner: Arc::clone(&self.inner) }
+        Self {
+            inner: Arc::clone(&self.inner),
+            payload_body_bal_store: self.payload_body_bal_store.clone(),
+        }
     }
 }
 
@@ -1606,6 +1762,100 @@ mod tests {
         chain_spec: Arc<ChainSpec>,
         provider: Arc<MockEthProvider>,
         from_api: UnboundedReceiver<BeaconEngineMessage<EthEngineTypes>>,
+    }
+
+    #[tokio::test]
+    async fn payload_bodies_with_timestamps_preserve_missing_entries_and_head_truncation() {
+        use alloy_eips::{eip7928::bal::RawBal, NumHash};
+        let (handle, api) = setup_engine_api();
+        let mut block = Block::default();
+        block.header.number = 1;
+        block.header.timestamp = 123;
+        let hash = block.header.hash_slow();
+        handle.provider.add_block(hash, block);
+        let raw_bal = Bytes::from_static(&[alloy_rlp::EMPTY_LIST_CODE]);
+        let store = BalStoreHandle::new(reth_provider::InMemoryBalStore::default());
+        store.insert(NumHash::new(1, hash), RawBal::new(raw_bal.clone())).unwrap();
+        assert!(!api.has_payload_body_bal_store());
+        assert_matches!(
+            api.get_payload_bodies_by_hash_with_timestamps(vec![hash], true).await,
+            Err(EngineApiError::EngineObjectValidationError(
+                reth_payload_primitives::EngineObjectValidationError::UnsupportedFork
+            ))
+        );
+        assert_eq!(
+            api.get_payload_bodies_by_hash_v2(vec![hash]).await.unwrap()[0]
+                .as_ref()
+                .unwrap()
+                .block_access_list,
+            None
+        );
+        assert_eq!(
+            api.get_payload_bodies_by_range_v2(1, 3).await.unwrap()[0]
+                .as_ref()
+                .unwrap()
+                .block_access_list,
+            None
+        );
+        let api = api.with_payload_body_bal_store(store);
+        for include_bal in [false, true] {
+            let by_hash = api
+                .get_payload_bodies_by_hash_with_timestamps(
+                    vec![B256::ZERO, hash, hash],
+                    include_bal,
+                )
+                .await
+                .unwrap();
+            assert_eq!(by_hash.len(), 3);
+            assert!(by_hash[0].is_none());
+            assert_eq!(by_hash[1], by_hash[2]);
+            let (timestamp, body) = by_hash[1].as_ref().unwrap();
+            assert_eq!(*timestamp, 123);
+            assert_eq!(body.block_access_list, include_bal.then(|| raw_bal.clone()));
+            let by_range =
+                api.get_payload_bodies_by_range_with_timestamps(1, 3, include_bal).await.unwrap();
+            assert_eq!(by_range, vec![by_hash[1].clone()]);
+            assert!(api
+                .get_payload_bodies_by_range_with_timestamps(2, 3, include_bal)
+                .await
+                .unwrap()
+                .is_empty());
+        }
+        let expected = api
+            .get_payload_bodies_by_hash_with_timestamps(vec![B256::ZERO, hash, hash], true)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|body| body.map(|(_, body)| body))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            api.get_payload_bodies_by_hash_v2(vec![B256::ZERO, hash, hash]).await.unwrap(),
+            expected
+        );
+        assert_eq!(
+            api.get_payload_bodies_by_range_v2(1, 3).await.unwrap(),
+            vec![expected[1].clone()]
+        );
+        assert!(api.get_payload_bodies_by_range_v2(2, 3).await.unwrap().is_empty());
+        assert_eq!(
+            api.get_payload_bodies_by_hash_v1(vec![hash]).await.unwrap()[0]
+                .as_ref()
+                .unwrap()
+                .transactions,
+            expected[1].as_ref().unwrap().transactions
+        );
+        assert_eq!(
+            api.get_payload_bodies_by_hash_v2(vec![B256::ZERO; 1024]).await.unwrap().len(),
+            1024
+        );
+        assert_matches!(
+            api.get_payload_bodies_by_hash_v2(vec![B256::ZERO; 1025]).await,
+            Err(EngineApiError::PayloadRequestTooLarge { len: 1025 })
+        );
+        assert_eq!(
+            api.get_payload_bodies_by_hash_v1(vec![B256::ZERO; 1024]).await.unwrap().len(),
+            1024
+        );
     }
 
     #[tokio::test]
@@ -1783,8 +2033,17 @@ mod tests {
             TestNetworkInfo { syncing: true },
         );
 
-        let res = api.get_blobs_v4_metered(vec![B256::ZERO], B128::from(1u128));
+        let res = api.get_blobs_v4_metered(vec![B256::ZERO], B128::from(1u128.to_le_bytes()));
         assert_matches!(res, Ok(None));
+    }
+
+    #[test]
+    fn engine_bitvector_uses_little_endian_cell_indices() {
+        for index in [0, 7, 8, 63, 64, 127] {
+            let wire_mask = B128::from((1u128 << index).to_le_bytes());
+            let mask = BlobCellMask::from_bits(u128::from_le_bytes(wire_mask.into()));
+            assert_eq!(mask.selected_indices().collect::<Vec<_>>(), vec![index]);
+        }
     }
 
     #[tokio::test]
@@ -1821,7 +2080,8 @@ mod tests {
             safe_block_hash: B256::ZERO,
             finalized_block_hash: B256::ZERO,
         };
-        let custody_columns = B128::from(0b1010u128);
+        let custody_columns = B128::from(0b1010u128.to_le_bytes());
+        let expected_custody_columns = B128::from(0b1010u128);
 
         let api_task = tokio::spawn(async move {
             api.fork_choice_updated_v4(state, None, Some(custody_columns)).await
@@ -1838,7 +2098,7 @@ mod tests {
             }
             other => panic!("unexpected engine message: {other:?}"),
         };
-        assert_eq!(cell_custody.get(), custody_columns);
+        assert_eq!(cell_custody.get(), expected_custody_columns);
 
         response_tx
             .send(Ok(OnForkChoiceUpdated::valid(PayloadStatus::from_status(
@@ -1850,7 +2110,7 @@ mod tests {
             .await
             .expect("api task should not panic")
             .expect("forkchoiceUpdatedV4 should succeed");
-        assert_eq!(cell_custody.get(), custody_columns);
+        assert_eq!(cell_custody.get(), expected_custody_columns);
     }
 
     #[tokio::test]
@@ -1893,9 +2153,10 @@ mod tests {
             suggested_fee_recipient: Address::ZERO,
             withdrawals: Some(vec![]),
             parent_beacon_block_root: None,
-            slot_number: None,
+            ..Default::default()
         };
-        let custody_columns = B128::from(0b1010u128);
+        let custody_columns = B128::from(0b1010u128.to_le_bytes());
+        let expected_custody_columns = B128::from(0b1010u128);
 
         let api_task = tokio::spawn(async move {
             api.fork_choice_updated_v4(state, Some(payload_attributes), Some(custody_columns)).await
@@ -1915,7 +2176,7 @@ mod tests {
             }
             other => panic!("unexpected engine message: {other:?}"),
         };
-        assert_eq!(cell_custody.get(), custody_columns);
+        assert_eq!(cell_custody.get(), expected_custody_columns);
 
         response_tx
             .send(Ok(OnForkChoiceUpdated::valid(PayloadStatus::from_status(
@@ -1948,7 +2209,7 @@ mod tests {
             withdrawals: Some(vec![]),
             // Invalid for V3/Cancun, but should be ignored if forkchoice is SYNCING.
             parent_beacon_block_root: None,
-            slot_number: None,
+            ..Default::default()
         };
 
         let api_task = tokio::spawn(async move {
@@ -1996,7 +2257,7 @@ mod tests {
             suggested_fee_recipient: Address::ZERO,
             withdrawals: Some(vec![]),
             parent_beacon_block_root: None,
-            slot_number: None,
+            ..Default::default()
         };
 
         let api_task = tokio::spawn(async move {
@@ -2166,5 +2427,23 @@ mod tests {
             let res = api.get_payload_bodies_by_hash_v1(hashes).await.unwrap();
             assert_eq!(res, expected);
         }
+    }
+    #[tokio::test]
+    async fn has_blobs_returns_ordered_availability() {
+        let (_, api) = setup_engine_api();
+
+        let res = api.has_blobs_metered(vec![B256::ZERO, B256::with_last_byte(1)]).unwrap();
+        assert_eq!(res, vec![false, false]);
+    }
+
+    #[tokio::test]
+    async fn has_blobs_rejects_large_requests() {
+        let (_, api) = setup_engine_api();
+
+        let res = api.has_blobs_metered(vec![B256::ZERO; MAX_BLOB_LIMIT + 1]);
+        assert_matches!(
+            res,
+            Err(EngineApiError::BlobRequestTooLarge { len }) if len == MAX_BLOB_LIMIT + 1
+        );
     }
 }

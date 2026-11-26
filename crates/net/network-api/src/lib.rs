@@ -34,7 +34,7 @@ pub use downloaders::BlockDownloaderProvider;
 pub use error::NetworkError;
 pub use events::{
     DiscoveredEvent, DiscoveryEvent, NetworkEvent, NetworkEventListenerProvider, PeerRequest,
-    PeerRequestSender,
+    PeerRequestSender, RequestMessage,
 };
 
 use reth_eth_wire_types::{
@@ -59,7 +59,6 @@ pub trait FullNetwork:
     + PeersHandleProvider
     + Clone
     + Unpin
-    + 'static
 {
 }
 
@@ -73,7 +72,6 @@ impl<T> FullNetwork for T where
         + PeersHandleProvider
         + Clone
         + Unpin
-        + 'static
 {
 }
 
@@ -215,6 +213,12 @@ pub trait Peers: PeersInfo {
 
     /// Disconnect an existing connection to the given peer using the provided reason
     fn disconnect_peer_with_reason(&self, peer: PeerId, reason: DisconnectReason);
+
+    /// Bans the given peer and disconnects an active non-trusted session if one exists.
+    fn ban_peer(&self, peer: PeerId);
+
+    /// Unbans the given peer.
+    fn unban_peer(&self, peer: PeerId);
 
     /// Connect to the given peer. NOTE: if the maximum number of outbound sessions is reached,
     /// this won't do anything. See `reth_network::SessionManager::dial_outbound`.

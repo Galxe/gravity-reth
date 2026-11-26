@@ -1191,7 +1191,7 @@ mod tests {
     use reth_provider::{providers::ConsistentDbView, test_utils::create_test_provider_factory};
     use reth_trie::{MultiProof, TrieInput};
     use reth_trie_parallel::proof_task::{ProofTaskCtx, ProofTaskManager};
-    use revm_primitives::{B256, U256};
+    use revm::primitives::{B256, U256};
     use std::sync::Arc;
 
     fn create_state_root_config<F>(factory: F, input: TrieInput) -> MultiProofConfig<F>

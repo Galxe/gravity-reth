@@ -17,8 +17,10 @@ use reth_trie_common::{
     updates::TrieUpdatesV2,
     Nibbles,
 };
-use revm_bytecode::Bytecode;
-use revm_database::{BundleAccount, OriginalValuesKnown};
+use revm::{
+    bytecode::Bytecode,
+    database::{BundleAccount, OriginalValuesKnown},
+};
 use std::{
     sync::{Arc, Condvar, Mutex},
     thread::{self, JoinHandle},

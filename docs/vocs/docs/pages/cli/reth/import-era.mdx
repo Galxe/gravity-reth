@@ -69,7 +69,7 @@ Database:
           Maximum number of background jobs for compaction and flush. Higher values increase parallelism but use more CPU. Default: 14
 
       --db.max-open-files <MAX_OPEN_FILES>
-          Maximum number of open files. Lower values if you hit OS file descriptor limits. Default: 10000
+          Maximum number of open files. Overrides the automatic budget shared across `RocksDB` shards. Without an override, hosts with at least 128K descriptors per instance keep all SST files open; other hosts use a finite cache capped at 10000 files per instance, leaving descriptor headroom
 
       --db.max-write-buffer-number <MAX_WRITE_BUFFER_NUMBER>
           Maximum number of write buffers (memtables). More buffers allow absorbing write spikes but use more memory. Default: 6
@@ -99,6 +99,20 @@ Database:
 
           The ERA1 files are read from the remote host using HTTP GET requests parsing headers
           and bodies.
+
+      --to-block <TO_BLOCK>
+          Stop the import after this block height has been reached.
+
+          The file containing the block is imported up to and including this height, then the
+          import ends. By default all available blocks are imported.
+
+      --with-receipts
+          Backfill the `Receipts` static file segment from its tip up to the Execution checkpoint.
+
+          Only a missing tail is detected and repaired, never a gap inside the existing segment. The
+          backfill must reach the checkpoint exactly, so this cannot bootstrap a fresh database:
+          above the checkpoint receipts are pruned on the next node start, below it the node cannot
+          start. Byzantium onwards only, from `.era1` or `.ere` files that carry receipts.
 
 Logging:
       --log.stdout.format <FORMAT>

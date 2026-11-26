@@ -90,7 +90,7 @@ where
         } else if let Some(block) =
             self.provider.pending_block()?.filter(|block| block.hash() == block_hash)
         {
-            Some(Arc::new(block))
+            Some(block)
         } else {
             // we attempt to look up invalid block last
             self.pending_state.invalid_recovered_block(&block_hash)

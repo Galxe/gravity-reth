@@ -308,7 +308,7 @@ where
                 {
                     nested_state_root.read_hashed_state_from_changesets(
                         provider.account_changesets_range(chunk_range.clone())?,
-                        provider.storage_changesets_range(chunk_range.clone())?,
+                        provider.storage_changesets_range(chunk_range)?,
                     )?
                 } else {
                     nested_state_root.read_hashed_state(Some(chunk_range))?
@@ -339,11 +339,9 @@ where
 
         validate_state_root(trie_root, SealedHeader::seal_slow(target_block), to_block)?;
 
-        Ok(ExecOutput {
-            checkpoint: StageCheckpoint::new(to_block)
-                .with_entities_stage_checkpoint(entities_checkpoint),
-            done: true,
-        })
+        Ok(ExecOutput::done(
+            StageCheckpoint::new(to_block).with_entities_stage_checkpoint(entities_checkpoint),
+        ))
     }
 
     /// Unwind the stage.

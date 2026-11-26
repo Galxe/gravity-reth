@@ -2,6 +2,9 @@ use crate::{BranchNodeCompact, Nibbles};
 use alloy_primitives::B256;
 use reth_storage_errors::db::DatabaseError;
 
+/// Opt-in observers for trie cursor operations.
+pub mod metrics;
+
 /// In-memory implementations of trie cursors.
 mod in_memory;
 
@@ -15,7 +18,7 @@ pub mod noop;
 pub mod depth_first;
 
 /// Mock trie cursor implementations.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 pub mod mock;
 
 pub use self::{depth_first::DepthFirstTrieIterator, in_memory::*, subnode::CursorSubNode};

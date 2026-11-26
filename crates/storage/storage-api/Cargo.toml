@@ -12,6 +12,7 @@ description = "Reth storage provider traits and types"
 workspace = true
 
 [dependencies]
+revm.workspace = true
 # reth
 reth-db-models.workspace = true
 reth-chainspec.workspace = true
@@ -22,6 +23,7 @@ reth-prune-types.workspace = true
 reth-stages-types.workspace = true
 reth-storage-errors.workspace = true
 reth-trie-common.workspace = true
+reth-tokio-util = { workspace = true, optional = true }
 revm-bytecode.workspace = true
 gravity-primitives.workspace = true
 revm-database.workspace = true
@@ -41,10 +43,15 @@ metrics-derive.workspace = true
 once_cell.workspace = true
 rayon.workspace = true
 
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+tokio-stream.workspace = true
+
 [features]
 config-from-env = ["gravity-primitives/config-from-env"]
 default = ["std"]
 std = [
+    "dep:reth-tokio-util",
     "reth-chainspec/std",
     "alloy-consensus/std",
     "alloy-eips/std",
@@ -61,6 +68,7 @@ std = [
     "reth-trie-common/std",
     "revm-bytecode/std",
     "once_cell/std",
+    "revm/std",
 ]
 
 db-api = [
@@ -83,6 +91,7 @@ serde = [
     "alloy-rpc-types-engine/serde",
     "dashmap/serde",
     "revm-bytecode/serde",
+    "revm/serde",
 ]
 
 serde-bincode-compat = [

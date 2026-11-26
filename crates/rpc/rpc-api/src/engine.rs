@@ -16,7 +16,7 @@ use alloy_rpc_types_engine::{
     PayloadId, PayloadStatus,
 };
 use alloy_rpc_types_eth::{
-    state::StateOverride, BlockOverrides, EIP1186AccountProofResponse, Filter, Log, SyncStatus,
+    state::StateOverride, BlockOverrides, EIP1186AccountProofResponse, Filter, Index, SyncStatus,
 };
 use alloy_serde::JsonStorageKey;
 use jsonrpsee::{core::RpcResult, proc_macros::rpc, RpcModule};
@@ -305,6 +305,10 @@ pub trait EngineApi<Engine: EngineTypes> {
     #[method(name = "exchangeCapabilities")]
     async fn exchange_capabilities(&self, capabilities: Vec<String>) -> RpcResult<Vec<String>>;
 
+    /// Report blob availability for the requested blob versioned hashes.
+    #[method(name = "hasBlobs")]
+    async fn has_blobs(&self, versioned_hashes: Vec<B256>) -> RpcResult<Vec<bool>>;
+
     /// Fetch blobs for the consensus layer from the blob store.
     #[method(name = "getBlobsV1")]
     async fn get_blobs_v1(
@@ -356,7 +360,7 @@ pub trait EngineApi<Engine: EngineTypes> {
 /// Specifically for the engine auth server: <https://github.com/ethereum/execution-apis/blob/main/src/engine/common.md#underlying-protocol>
 #[cfg_attr(not(feature = "client"), rpc(server, namespace = "eth"))]
 #[cfg_attr(feature = "client", rpc(server, client, namespace = "eth"))]
-pub trait EngineEthApi<TxReq: RpcObject, B: RpcObject, R: RpcObject> {
+pub trait EngineEthApi<TxReq: RpcObject, B: RpcObject, R: RpcObject, L: RpcObject> {
     /// Returns an object with data about the sync status or false.
     #[method(name = "syncing")]
     fn syncing(&self) -> RpcResult<SyncStatus>;
@@ -395,6 +399,22 @@ pub trait EngineEthApi<TxReq: RpcObject, B: RpcObject, R: RpcObject> {
     #[method(name = "getBlockReceipts")]
     async fn block_receipts(&self, block_id: BlockId) -> RpcResult<Option<Vec<R>>>;
 
+    /// Returns the EIP-2718 encoded transaction by block hash and transaction index position.
+    #[method(name = "getRawTransactionByBlockHashAndIndex")]
+    async fn raw_transaction_by_block_hash_and_index(
+        &self,
+        hash: B256,
+        index: Index,
+    ) -> RpcResult<Option<Bytes>>;
+
+    /// Returns the EIP-2718 encoded transaction by block number and transaction index position.
+    #[method(name = "getRawTransactionByBlockNumberAndIndex")]
+    async fn raw_transaction_by_block_number_and_index(
+        &self,
+        number: BlockNumberOrTag,
+        index: Index,
+    ) -> RpcResult<Option<Bytes>>;
+
     /// Sends signed transaction, returning its hash.
     #[method(name = "sendRawTransaction")]
     async fn send_raw_transaction(&self, bytes: Bytes) -> RpcResult<B256>;
@@ -405,7 +425,7 @@ pub trait EngineEthApi<TxReq: RpcObject, B: RpcObject, R: RpcObject> {
 
     /// Returns logs matching given filter object.
     #[method(name = "getLogs")]
-    async fn logs(&self, filter: Filter) -> RpcResult<Vec<Log>>;
+    async fn logs(&self, filter: Filter) -> RpcResult<Vec<L>>;
 
     /// Returns the account and storage values of the specified account including the Merkle-proof.
     /// This call can be used to verify that the data you are pulling from is not tampered with.
@@ -416,4 +436,12 @@ pub trait EngineEthApi<TxReq: RpcObject, B: RpcObject, R: RpcObject> {
         keys: Vec<JsonStorageKey>,
         block_number: Option<BlockId>,
     ) -> RpcResult<EIP1186AccountProofResponse>;
+
+    /// Returns account and storage proofs for multiple targets in request order.
+    #[method(name = "getMultiProof")]
+    async fn get_multi_proof(
+        &self,
+        targets: Vec<(Address, Vec<B256>)>,
+        block_number: Option<BlockId>,
+    ) -> RpcResult<Vec<EIP1186AccountProofResponse>>;
 }

@@ -4,6 +4,7 @@
 //! This is a substitute for `spawn_blocking` that reuses the same OS thread for the same
 //! named task, like a 1-thread thread pool keyed by name.
 
+use crate::metrics::WorkerThreadMetrics;
 use dashmap::DashMap;
 use std::{
     panic::AssertUnwindSafe,
@@ -12,6 +13,7 @@ use std::{
         Arc,
     },
     thread,
+    time::Instant,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -21,6 +23,8 @@ type BoxedTask = Box<dyn FnOnce() + Send + 'static>;
 struct WorkerThread {
     /// Sender to submit work to this worker's thread.
     tx: mpsc::UnboundedSender<BoxedTask>,
+    /// Metrics labeled with this worker's name.
+    metrics: WorkerThreadMetrics,
     /// Number of tasks currently running or queued on this worker.
     pending: Arc<AtomicUsize>,
     /// The OS thread handle. Taken during shutdown to join.
@@ -40,7 +44,12 @@ impl WorkerThread {
             })
             .unwrap_or_else(|e| panic!("failed to spawn worker thread {name:?}: {e}"));
 
-        Self { tx, pending: Arc::new(AtomicUsize::new(0)), handle: Some(handle) }
+        Self {
+            tx,
+            metrics: WorkerThreadMetrics::new(name),
+            pending: Arc::new(AtomicUsize::new(0)),
+            handle: Some(handle),
+        }
     }
 
     /// Spawns a closure on this worker.
@@ -53,10 +62,18 @@ impl WorkerThread {
 
         let (result_tx, result_rx) = oneshot::channel();
         let pending = self.pending.clone();
+        let metrics = self.metrics.clone();
+        let queued_at = Instant::now();
 
         let task: BoxedTask = Box::new(move || {
-            let _decrement_pending = DecrementPendingOnDrop(pending);
-            let _ = result_tx.send(f());
+            let started_at = Instant::now();
+            metrics.record_queue_wait(started_at.saturating_duration_since(queued_at));
+            let result = {
+                let _decrement_pending = DecrementPendingOnDrop(pending);
+                let _record_task_duration = RecordTaskDurationOnDrop::new(metrics, started_at);
+                f()
+            };
+            let _ = result_tx.send(result);
         });
 
         if self.tx.send(task).is_err() {
@@ -76,10 +93,18 @@ impl WorkerThread {
 
         let (result_tx, result_rx) = oneshot::channel();
         let pending = self.pending.clone();
+        let metrics = self.metrics.clone();
+        let queued_at = Instant::now();
 
         let task: BoxedTask = Box::new(move || {
-            let _decrement_pending = DecrementPendingOnDrop(pending);
-            let _ = result_tx.send(f());
+            let started_at = Instant::now();
+            metrics.record_queue_wait(started_at.saturating_duration_since(queued_at));
+            let result = {
+                let _decrement_pending = DecrementPendingOnDrop(pending);
+                let _record_task_duration = RecordTaskDurationOnDrop::new(metrics, started_at);
+                f()
+            };
+            let _ = result_tx.send(result);
         });
 
         if self.tx.send(task).is_err() {
@@ -97,6 +122,24 @@ struct DecrementPendingOnDrop(Arc<AtomicUsize>);
 impl Drop for DecrementPendingOnDrop {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Records a worker task's run time when the task finishes or unwinds.
+struct RecordTaskDurationOnDrop {
+    metrics: WorkerThreadMetrics,
+    started_at: Instant,
+}
+
+impl RecordTaskDurationOnDrop {
+    const fn new(metrics: WorkerThreadMetrics, started_at: Instant) -> Self {
+        Self { metrics, started_at }
+    }
+}
+
+impl Drop for RecordTaskDurationOnDrop {
+    fn drop(&mut self) {
+        self.metrics.record_task_duration(self.started_at.elapsed());
     }
 }
 
@@ -156,7 +199,11 @@ impl Drop for WorkerMap {
         for (_, mut w) in std::mem::take(&mut self.workers) {
             // Drop sender so the thread's recv loop exits, then join.
             drop(w.tx);
-            if let Some(handle) = w.handle.take() {
+            // A task can own the last reference to this map and drop it on its own worker, which
+            // cannot join itself. That thread exits on its own once the task returns.
+            if let Some(handle) = w.handle.take() &&
+                handle.thread().id() != thread::current().id()
+            {
                 let _ = handle.join();
             }
         }
@@ -256,5 +303,22 @@ mod tests {
 
         let third = map.try_spawn_on("busy-worker", || 3).expect("worker should be idle");
         assert_eq!(third.await.unwrap(), 3);
+    }
+
+    #[test]
+    fn worker_map_last_owner_dropped_on_worker() {
+        let map = Arc::new(WorkerMap::new());
+        let owner = Arc::clone(&map);
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+
+        let done = map.spawn_on("last-owner", move || {
+            release_rx.recv().unwrap();
+            // Drops the last reference to the map on the worker it would join.
+            drop(owner);
+        });
+
+        drop(map);
+        release_tx.send(()).unwrap();
+        done.blocking_recv().expect("dropping the map on its own worker should not panic");
     }
 }

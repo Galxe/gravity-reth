@@ -1,5 +1,5 @@
 use crate::PruneLimiter;
-use alloy_primitives::BlockNumber;
+use alloy_primitives::{map::HashMap, BlockNumber};
 use itertools::Itertools;
 use reth_db_api::{
     cursor::{DbCursorRO, DbCursorRW},
@@ -10,7 +10,6 @@ use reth_db_api::{
 };
 use reth_provider::DBProvider;
 use reth_prune_types::{SegmentOutput, SegmentOutputCheckpoint};
-use rustc_hash::FxHashMap;
 
 enum PruneShardOutcome {
     Deleted,
@@ -28,7 +27,7 @@ pub(crate) struct PrunedIndices {
 /// Result of pruning history changesets, used to build the final segment output.
 pub(crate) struct HistoryPruneResult<K> {
     /// Map of the highest deleted changeset keys to their block numbers.
-    pub(crate) highest_deleted: FxHashMap<K, BlockNumber>,
+    pub(crate) highest_deleted: HashMap<K, BlockNumber>,
     /// The highest block number whose changesets are fully pruned, becoming the checkpoint.
     ///
     /// Checkpoints have block granularity, so a caller that can stop in the middle of a block
@@ -170,19 +169,17 @@ where
     // filter it. It is guaranteed that further shards for this sharded key will not
     // contain the target block number, as it's in this shard.
     else {
-        let blocks = raw_blocks.value()?;
-        let higher_blocks =
-            blocks.iter().skip_while(|block| *block <= to_block).collect::<Vec<_>>();
+        let mut blocks = raw_blocks.value()?;
 
         // If there were blocks less than or equal to the target one
         // (so the shard has changed), update the shard.
-        if blocks.len() as usize == higher_blocks.len() {
+        if blocks.0.remove_range(..=to_block) == 0 {
             return Ok(PruneShardOutcome::Unchanged);
         }
 
         // If there will be no more blocks in the shard after pruning blocks below target
         // block, we need to remove it, as empty shards are not allowed.
-        if higher_blocks.is_empty() {
+        if blocks.is_empty() {
             if key.as_ref().highest_block_number == u64::MAX {
                 let prev_row = cursor
                     .prev()?
@@ -222,10 +219,7 @@ where
                 Ok(PruneShardOutcome::Deleted)
             }
         } else {
-            cursor.upsert(
-                RawKey::new(key),
-                &RawValue::new(BlockNumberList::new_pre_sorted(higher_blocks)),
-            )?;
+            cursor.upsert(RawKey::new(key), &RawValue::new(blocks))?;
             Ok(PruneShardOutcome::Updated)
         }
     }

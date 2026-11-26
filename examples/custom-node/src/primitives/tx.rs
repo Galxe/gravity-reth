@@ -14,7 +14,7 @@ use reth_codecs::{
 };
 use reth_ethereum::primitives::{serde_bincode_compat::RlpBincode, InMemorySize};
 use reth_op::{primitives::SignedTransaction, OpTransaction};
-use revm_primitives::Address;
+use revm::primitives::Address;
 
 /// Either [`OpTxEnvelope`] or [`TxPayment`].
 #[derive(Debug, Clone, TransactionEnvelope)]

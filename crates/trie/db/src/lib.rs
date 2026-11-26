@@ -26,3 +26,12 @@ pub use trie_cursor::{
     DatabaseAccountTrieCursor, DatabaseStorageTrieCursor, DatabaseTrieCursorFactory,
 };
 pub use witness::DatabaseTrieWitness;
+
+/// Opt-in legacy trie verification over a shared immutable database snapshot.
+#[cfg(not(target_family = "wasm"))]
+pub mod verify;
+#[cfg(not(target_family = "wasm"))]
+pub use verify::LegacyDatabaseVerifier;
+
+/// Opt-in legacy on-demand trie revert computation and cache.
+pub mod changesets;

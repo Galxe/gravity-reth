@@ -1,7 +1,7 @@
+use crate::Runtime;
 use alloy_consensus::BlockHeader;
 use alloy_primitives::{keccak256, Address, Bytes, B256, U256};
 use alloy_rpc_types_debug::ExecutionWitness;
-use pretty_assertions::Comparison;
 use reth_engine_primitives::InvalidBlockHook;
 use reth_evm::{execute::Executor, ConfigureEvm};
 use reth_primitives_traits::{NodePrimitives, RecoveredBlock, SealedHeader};
@@ -11,16 +11,31 @@ use reth_revm::{
     db::{BundleState, State},
 };
 use reth_rpc_api::DebugApiClient;
-use reth_tracing::tracing::warn;
+use reth_tracing::tracing::{debug, error, warn};
 use reth_trie::{updates::TrieUpdates, HashedStorage};
-use revm::state::AccountInfo;
-use revm_bytecode::Bytecode;
-use revm_database::{
-    states::{reverts::AccountInfoRevert, StorageSlot},
-    AccountStatus, RevertToSlot,
+use revm::{
+    bytecode::Bytecode,
+    database::{
+        states::{reverts::AccountInfoRevert, StorageSlot},
+        AccountStatus, RevertToSlot,
+    },
+    state::AccountInfo,
 };
 use serde::Serialize;
-use std::{collections::BTreeMap, fmt::Debug, fs::File, io::Write, path::PathBuf};
+use similar::TextDiff;
+use std::{
+    collections::BTreeMap,
+    fmt::Debug,
+    fs::File,
+    io::{BufWriter, Write},
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
+use tokio::sync::Semaphore;
+
+const DIFF_TIMEOUT: Duration = Duration::from_secs(1);
+const MAX_RETAINED_BLOCKS: usize = 100;
 
 type CollectionResult =
     (BTreeMap<B256, Bytes>, BTreeMap<B256, Bytes>, reth_trie::HashedPostState, BundleState);
@@ -124,7 +139,7 @@ fn collect_execution_data(
     // Collect codes
     db.cache.contracts.values().chain(bundle_state.contracts.values()).for_each(|code| {
         let code_bytes = code.original_bytes();
-        codes.insert(keccak256(&code_bytes), code_bytes);
+        codes.insert(code.hash_slow(), code_bytes);
     });
 
     // Collect preimages
@@ -176,7 +191,7 @@ fn generate(
 #[derive(Debug)]
 pub struct InvalidBlockWitnessHook<P, E> {
     /// The provider to read the historical state and do the EVM execution.
-    provider: P,
+    provider: Arc<P>,
     /// The EVM configuration to use for the execution.
     evm_config: E,
     /// The directory to write the witness to. Additionally, diff files will be written to this
@@ -184,17 +199,54 @@ pub struct InvalidBlockWitnessHook<P, E> {
     output_directory: PathBuf,
     /// The healthy node client to compare the witness against.
     healthy_node_client: Option<jsonrpsee::http_client::HttpClient>,
+    /// Node runtime for shutdown-aware background diagnostics.
+    runtime: Option<Runtime>,
+    /// Clones share a single diagnostic slot.
+    task_permit: Arc<Semaphore>,
+}
+
+impl<P, E: Clone> Clone for InvalidBlockWitnessHook<P, E> {
+    fn clone(&self) -> Self {
+        Self {
+            provider: self.provider.clone(),
+            evm_config: self.evm_config.clone(),
+            output_directory: self.output_directory.clone(),
+            healthy_node_client: self.healthy_node_client.clone(),
+            runtime: self.runtime.clone(),
+            task_permit: self.task_permit.clone(),
+        }
+    }
 }
 
 impl<P, E> InvalidBlockWitnessHook<P, E> {
-    /// Creates a new witness hook.
-    pub const fn new(
+    /// Creates a synchronous witness hook.
+    /// Use [`Self::new_with_runtime`] for node-managed background diagnostics.
+    pub fn new(
         provider: P,
         evm_config: E,
         output_directory: PathBuf,
         healthy_node_client: Option<jsonrpsee::http_client::HttpClient>,
     ) -> Self {
-        Self { provider, evm_config, output_directory, healthy_node_client }
+        Self {
+            provider: Arc::new(provider),
+            evm_config,
+            output_directory,
+            healthy_node_client,
+            runtime: None,
+            task_permit: Arc::new(Semaphore::new(1)),
+        }
+    }
+    /// Creates a hook that offloads diagnostics and observes the node's shutdown.
+    pub fn new_with_runtime(
+        provider: P,
+        evm_config: E,
+        output_directory: PathBuf,
+        healthy_node_client: Option<jsonrpsee::http_client::HttpClient>,
+        runtime: Runtime,
+    ) -> Self {
+        let mut hook = Self::new(provider, evm_config, output_directory, healthy_node_client);
+        hook.runtime = Some(runtime);
+        hook
     }
 }
 
@@ -224,8 +276,22 @@ where
         Ok((witness, bundle_state))
     }
 
-    /// Handles witness generation, saving, and comparison with healthy node
+    #[cfg(test)]
     fn handle_witness_operations(
+        &self,
+        witness: &ExecutionWitness,
+        block_prefix: &str,
+        block_number: u64,
+    ) -> eyre::Result<()> {
+        futures::executor::block_on(self.handle_witness_operations_async(
+            witness,
+            block_prefix,
+            block_number,
+        ))
+    }
+
+    /// Handles witness generation, saving, and comparison with healthy node
+    async fn handle_witness_operations_async(
         &self,
         witness: &ExecutionWitness,
         block_prefix: &str,
@@ -235,13 +301,11 @@ where
         let re_executed_witness_path = self.save_file(filename, witness)?;
 
         if let Some(healthy_node_client) = &self.healthy_node_client {
-            let healthy_node_witness = futures::executor::block_on(async move {
-                DebugApiClient::<()>::debug_execution_witness(
-                    healthy_node_client,
-                    block_number.into(),
-                )
-                .await
-            })?;
+            let healthy_node_witness = DebugApiClient::<()>::debug_execution_witness(
+                healthy_node_client,
+                block_number.into(),
+            )
+            .await?;
 
             let filename = format!("{}.witness.healthy.json", block_prefix);
             let healthy_path = self.save_file(filename, &healthy_node_witness)?;
@@ -338,20 +402,24 @@ where
         Ok(())
     }
 
-    fn on_invalid_block(
+    async fn process_invalid_block(
         &self,
         parent_header: &SealedHeader<N::BlockHeader>,
         block: &RecoveredBlock<N::Block>,
-        output: &BlockExecutionOutput<N::Receipt>,
+        original_state: &BundleState,
         trie_updates: Option<(&TrieUpdates, B256)>,
     ) -> eyre::Result<()> {
+        if let Err(err) = prune_output(&self.output_directory) {
+            error!(target: "engine::invalid_block_hooks::witness", %err, "Failed to prune hook output");
+        }
+
         // TODO(alexey): unify with `DebugApi::debug_execution_witness`
         let (witness, bundle_state) = self.re_execute_block(parent_header, block)?;
 
         let block_prefix = format!("{}_{}", block.number(), block.hash());
-        self.handle_witness_operations(&witness, &block_prefix, block.number())?;
+        self.handle_witness_operations_async(&witness, &block_prefix, block.number()).await?;
 
-        self.validate_bundle_state(&bundle_state, &output.state, &block_prefix)?;
+        self.validate_bundle_state(&bundle_state, original_state, &block_prefix)?;
 
         self.validate_state_root_and_trie(
             parent_header,
@@ -364,24 +432,48 @@ where
         Ok(())
     }
 
+    fn on_invalid_block_sync(
+        &self,
+        parent_header: &SealedHeader<N::BlockHeader>,
+        block: &RecoveredBlock<N::Block>,
+        output: &BlockExecutionOutput<N::Receipt>,
+        trie_updates: Option<(&TrieUpdates, B256)>,
+    ) -> eyre::Result<()> {
+        futures::executor::block_on(self.process_invalid_block(
+            parent_header,
+            block,
+            &output.state,
+            trie_updates,
+        ))
+    }
+
     /// Serializes and saves a value to a JSON file in the output directory
     fn save_file<T: Serialize>(&self, filename: String, value: &T) -> eyre::Result<PathBuf> {
         let path = self.output_directory.join(filename);
-        File::create(&path)?.write_all(serde_json::to_string(value)?.as_bytes())?;
+        let mut writer = BufWriter::new(File::create(&path)?);
+        serde_json::to_writer(&mut writer, value)?;
+        writer.flush()?;
 
         Ok(path)
     }
 
-    /// Compares two values and saves their diff to a file in the output directory
-    fn save_diff<T: PartialEq + Debug>(
+    /// Compares the debug output of two values and saves their unified line diff to a file in the
+    /// output directory.
+    ///
+    /// Myers' algorithm keeps memory linear in the input size, and [`DIFF_TIMEOUT`] bounds its
+    /// running time.
+    fn save_diff<T: Debug>(
         &self,
         filename: String,
         original: &T,
         new: &T,
     ) -> eyre::Result<PathBuf> {
         let path = self.output_directory.join(filename);
-        let diff = Comparison::new(original, new);
-        File::create(&path)?.write_all(diff.to_string().as_bytes())?;
+        let original = format!("{original:#?}\n");
+        let new = format!("{new:#?}\n");
+        let diff = TextDiff::configure().timeout(DIFF_TIMEOUT).diff_lines(&original, &new);
+        File::create(&path)?
+            .write_all(diff.unified_diff().header("original", "new").to_string().as_bytes())?;
 
         Ok(path)
     }
@@ -399,28 +491,110 @@ where
         output: &BlockExecutionOutput<N::Receipt>,
         trie_updates: Option<(&TrieUpdates, B256)>,
     ) {
-        if let Err(err) = self.on_invalid_block(parent_header, block, output, trie_updates) {
-            warn!(target: "engine::invalid_block_hooks::witness", %err, "Failed to invoke hook");
+        // Reserve capacity before cloning potentially large diagnostic inputs.
+        let Ok(permit) = self.task_permit.clone().try_acquire_owned() else {
+            metrics::counter!("engine.invalid_block_hooks.witness.skipped_blocks_total")
+                .increment(1);
+            debug!(target: "engine::invalid_block_hooks::witness", block_hash = %block.hash(), "Skipping diagnostics while witness hook is busy");
+            return
+        };
+
+        let Some(runtime) = &self.runtime else {
+            let _permit = permit;
+            if let Err(err) = self.on_invalid_block_sync(parent_header, block, output, trie_updates)
+            {
+                warn!(target: "engine::invalid_block_hooks::witness", %err, "Failed to invoke hook");
+            }
+            return
+        };
+        let hook = self.clone();
+        let parent_header = parent_header.clone();
+        let block = block.clone();
+        let original_state = output.state.clone();
+        let trie_updates = trie_updates.map(|(updates, root)| (updates.clone(), root));
+        runtime.spawn_blocking_task(async move {
+            let _permit = permit;
+            debug!(target: "engine::invalid_block_hooks::witness", block_hash = %block.hash(), "Starting witness diagnostics");
+            if let Err(err) = hook
+                .process_invalid_block(
+                    &parent_header,
+                    &block,
+                    &original_state,
+                    trie_updates.as_ref().map(|(updates, root)| (updates, *root)),
+                )
+                .await
+            {
+                error!(target: "engine::invalid_block_hooks::witness", block_hash = %block.hash(), %err, "Failed to invoke hook");
+            }
+            debug!(target: "engine::invalid_block_hooks::witness", block_hash = %block.hash(), "Finished witness diagnostics");
+        });
+    }
+}
+
+/// Removes the output files of all but the highest blocks, so that the output of
+/// [`MAX_RETAINED_BLOCKS`] blocks remains once the next block is written.
+///
+/// Only regular files with a recognized diagnostic suffix and a valid block prefix are removed.
+fn prune_output(output_directory: &Path) -> eyre::Result<()> {
+    let mut blocks = BTreeMap::<(u64, String), Vec<PathBuf>>::new();
+    for entry in reth_fs_util::read_dir(output_directory)? {
+        let entry = entry?;
+        let file_name = entry.file_name();
+        if let Some((prefix, suffix)) = file_name.to_str().and_then(|name| name.split_once('.')) &&
+            let Some((number, hash)) = prefix.split_once('_') &&
+            let Ok(number) = number.parse::<u64>() &&
+            hash.parse::<B256>().is_ok() &&
+            matches!(
+                suffix,
+                "witness.re_executed.json" |
+                    "witness.healthy.json" |
+                    "witness.diff" |
+                    "bundle_state.original.json" |
+                    "bundle_state.re_executed.json" |
+                    "bundle_state.diff" |
+                    "state_root.diff" |
+                    "header_state_root.diff" |
+                    "trie_updates.original.json" |
+                    "trie_updates.re_executed.json"
+            ) &&
+            entry.file_type()?.is_file()
+        {
+            blocks.entry((number, prefix.to_string())).or_default().push(entry.path());
         }
     }
+
+    for path in blocks.into_values().rev().skip(MAX_RETAINED_BLOCKS - 1).flatten() {
+        reth_fs_util::remove_file(path)?;
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_consensus::Header;
     use alloy_eips::eip7685::Requests;
     use alloy_primitives::{map::HashMap, Address, Bytes, B256, U256};
+    use jsonrpsee::{
+        core::RpcResult,
+        http_client::{HttpClient, HttpClientBuilder},
+        server::{ServerBuilder, ServerHandle},
+        RpcModule,
+    };
     use reth_chainspec::ChainSpec;
-    use reth_ethereum_primitives::EthPrimitives;
+    use reth_ethereum_primitives::{Block, EthPrimitives};
     use reth_evm_ethereum::EthEvmConfig;
     use reth_provider::test_utils::MockEthProvider;
     use reth_revm::db::{BundleAccount, BundleState};
-    use revm_database::states::reverts::AccountRevert;
+    use revm::database::states::reverts::AccountRevert;
+    use std::collections::HashSet;
     use tempfile::TempDir;
+    use tokio::{sync::Notify, time::timeout};
 
     use reth_revm::test_utils::StateProviderTest;
     use reth_testing_utils::generators::{self, random_block, random_eoa_accounts, BlockParams};
-    use revm_bytecode::Bytecode;
+    use revm::bytecode::Bytecode;
 
     /// Creates a test `BundleState` with realistic accounts, contracts, and reverts
     fn create_bundle_state() -> BundleState {
@@ -851,7 +1025,7 @@ mod tests {
         // by checking that it doesn't panic and tries to create files
         let files_before = output_dir.read_dir().unwrap().count();
 
-        let _result = hook.on_invalid_block(
+        let _result = hook.on_invalid_block_sync(
             &parent_header,
             &recovered_block,
             &output,
@@ -1054,5 +1228,224 @@ mod tests {
         let validation_result =
             hook.validate_bundle_state(&bundle_state, &bundle_state, "integration_component_test");
         assert!(validation_result.is_ok(), "Component validation should succeed");
+    }
+    #[test]
+    fn test_save_diff_large_bundle_state() {
+        const ACCOUNTS: usize = 3_000;
+        let (hook, _output_dir, _temp_dir) = create_test_hook();
+        let original = sort_bundle_state_for_comparison(&create_transfer_bundle_state(ACCOUNTS, 0));
+        let new =
+            sort_bundle_state_for_comparison(&create_transfer_bundle_state(ACCOUNTS, ACCOUNTS));
+
+        // Every account differs, so the changed region spans the whole state. A quadratic line
+        // diff of it would allocate tens of gigabytes.
+        let path = hook.save_diff("large_diff_test".to_string(), &original, &new).unwrap();
+
+        let diff = std::fs::read_to_string(path).unwrap();
+        let added: HashSet<_> =
+            diff.lines().filter_map(|line| line.strip_prefix('+')).map(str::trim).collect();
+        for balance in ACCOUNTS..2 * ACCOUNTS {
+            assert!(added.contains(format!("balance: {balance},").as_str()));
+        }
+    }
+
+    /// Creates a `BundleState` of `accounts` funded accounts, offsetting every balance by
+    /// `balance_offset`.
+    fn create_transfer_bundle_state(accounts: usize, balance_offset: usize) -> BundleState {
+        let mut bundle_state = BundleState::default();
+        for i in 0..accounts {
+            bundle_state.state.insert(
+                Address::from_word(B256::from(U256::from(i))),
+                BundleAccount {
+                    info: Some(AccountInfo {
+                        balance: U256::from(i + balance_offset),
+                        ..Default::default()
+                    }),
+                    original_info: None,
+                    storage: HashMap::default(),
+                    status: AccountStatus::Changed,
+                },
+            );
+        }
+        bundle_state.state_size = accounts;
+        bundle_state
+    }
+
+    #[tokio::test]
+    async fn test_on_invalid_block_runs_in_background_and_skips_while_busy() {
+        let (mut hook, output_dir, _temp_dir) = create_test_hook();
+        hook.runtime = Some(Runtime::test());
+        let (client, server, requested, respond) = healthy_node_server().await;
+        hook.healthy_node_client = Some(client);
+        let (parent, block) = invalid_block_fixture(2);
+        let (skipped_parent, skipped_block) = invalid_block_fixture(3);
+        let output = BlockExecutionOutput::default();
+        let healthy_path = output_dir.join(format!("2_{}.witness.healthy.json", block.hash()));
+        let skipped_path =
+            output_dir.join(format!("3_{}.witness.re_executed.json", skipped_block.hash()));
+
+        hook.on_invalid_block(&parent, &block, &output, None);
+        timeout(Duration::from_secs(10), requested.notified()).await.unwrap();
+        assert!(!healthy_path.exists());
+
+        // Clones share the admission limit and must not queue another diagnostic job.
+        hook.clone().on_invalid_block(&skipped_parent, &skipped_block, &output, None);
+        respond.notify_one();
+        drop(timeout(Duration::from_secs(10), hook.task_permit.acquire()).await.unwrap().unwrap());
+        assert!(healthy_path.exists());
+        assert!(!skipped_path.exists());
+
+        hook.healthy_node_client = None;
+        hook.on_invalid_block(&skipped_parent, &skipped_block, &output, None);
+        drop(timeout(Duration::from_secs(10), hook.task_permit.acquire()).await.unwrap().unwrap());
+        assert!(skipped_path.exists());
+        server.stop().unwrap();
+        timeout(Duration::from_secs(10), server.stopped()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_on_invalid_block_releases_capacity_after_error() {
+        let (mut hook, output_dir, _temp_dir) = create_test_hook();
+        hook.runtime = Some(Runtime::test());
+        let (parent, block) = invalid_block_fixture(2);
+        let output = BlockExecutionOutput::default();
+        hook.output_directory = output_dir.join("missing");
+
+        hook.on_invalid_block(&parent, &block, &output, None);
+        drop(timeout(Duration::from_secs(10), hook.task_permit.acquire()).await.unwrap().unwrap());
+        assert!(!hook.output_directory.exists());
+
+        hook.output_directory = output_dir.clone();
+        hook.on_invalid_block(&parent, &block, &output, None);
+        drop(timeout(Duration::from_secs(10), hook.task_permit.acquire()).await.unwrap().unwrap());
+        assert!(output_dir
+            .join(format!("{}_{}.witness.re_executed.json", block.number(), block.hash()))
+            .exists());
+    }
+
+    #[tokio::test]
+    async fn test_on_invalid_block_cancels_rpc_on_shutdown() {
+        let (mut hook, output_dir, _temp_dir) = create_test_hook();
+        hook.runtime = Some(Runtime::test());
+        let (client, server, requested, respond) = healthy_node_server().await;
+        hook.healthy_node_client = Some(client);
+        let (parent, block) = invalid_block_fixture(2);
+
+        hook.on_invalid_block(&parent, &block, &BlockExecutionOutput::default(), None);
+        timeout(Duration::from_secs(10), requested.notified()).await.unwrap();
+        drop(hook.runtime.as_ref().unwrap().initiate_graceful_shutdown().unwrap());
+        drop(timeout(Duration::from_secs(10), hook.task_permit.acquire()).await.unwrap().unwrap());
+        assert!(!output_dir
+            .join(format!("{}_{}.witness.healthy.json", block.number(), block.hash()))
+            .exists());
+
+        respond.notify_one();
+        server.stop().unwrap();
+        timeout(Duration::from_secs(10), server.stopped()).await.unwrap();
+    }
+
+    fn invalid_block_fixture(number: u64) -> (SealedHeader<Header>, RecoveredBlock<Block>) {
+        let mut rng = generators::rng();
+        let parent = generators::random_header(&mut rng, number - 1, None);
+        let block = random_block(
+            &mut rng,
+            number,
+            BlockParams { parent: Some(parent.hash()), tx_count: Some(0), ..Default::default() },
+        )
+        .try_recover()
+        .unwrap();
+        (parent, block)
+    }
+
+    async fn healthy_node_server() -> (HttpClient, ServerHandle, Arc<Notify>, Arc<Notify>) {
+        let requested = Arc::new(Notify::new());
+        let respond = Arc::new(Notify::new());
+        let server = ServerBuilder::default().build("127.0.0.1:0").await.unwrap();
+        let client = HttpClientBuilder::default()
+            .build(format!("http://{}", server.local_addr().unwrap()))
+            .unwrap();
+        let mut module = RpcModule::new((requested.clone(), respond.clone()));
+        module
+            .register_async_method("debug_executionWitness", |_, context, _| async move {
+                context.0.notify_one();
+                context.1.notified().await;
+                RpcResult::Ok(ExecutionWitness {
+                    codes: vec![Bytes::from_static(b"healthy node code")],
+                    ..Default::default()
+                })
+            })
+            .unwrap();
+        (client, server.start(module), requested, respond)
+    }
+
+    #[test]
+    fn test_prune_output_keeps_highest_blocks() {
+        let temp_dir = TempDir::new().unwrap();
+        let output_dir = temp_dir.path();
+        let blocks = (0..MAX_RETAINED_BLOCKS as u64 + 2)
+            .map(|number| {
+                let prefix = format!("{number}_{}", B256::with_last_byte(number as u8));
+                let files = [
+                    output_dir.join(format!("{prefix}.witness.re_executed.json")),
+                    output_dir.join(format!("{prefix}.bundle_state.diff")),
+                ];
+                for path in &files {
+                    File::create(path).unwrap();
+                }
+                files
+            })
+            .collect::<Vec<_>>();
+        let unrelated = output_dir.join("notes.txt");
+        let prefixed_notes = output_dir.join(format!("0_{}.notes.txt", B256::ZERO));
+        let prefixed_dir =
+            output_dir.join(format!("0_{}.witness.healthy.json", B256::repeat_byte(9)));
+        File::create(&unrelated).unwrap();
+        File::create(&prefixed_notes).unwrap();
+        std::fs::create_dir(&prefixed_dir).unwrap();
+
+        prune_output(output_dir).unwrap();
+
+        // Room is left for one more block, so the three lowest blocks are removed.
+        for (number, files) in blocks.iter().enumerate() {
+            for path in files {
+                assert_eq!(path.exists(), number >= 3, "{}", path.display());
+            }
+        }
+        assert!(unrelated.exists());
+        assert!(prefixed_notes.exists());
+        assert!(prefixed_dir.is_dir());
+    }
+
+    #[tokio::test]
+    async fn test_on_invalid_block_prunes_old_output() {
+        let (mut hook, output_dir, _temp_dir) = create_test_hook();
+        hook.runtime = Some(Runtime::test());
+        let old_blocks = (0..MAX_RETAINED_BLOCKS as u64)
+            .map(|number| {
+                let path = output_dir.join(format!(
+                    "{number}_{}.witness.re_executed.json",
+                    B256::with_last_byte(number as u8)
+                ));
+                File::create(&path).unwrap();
+                path
+            })
+            .collect::<Vec<_>>();
+
+        let (parent_header, block) = invalid_block_fixture(100);
+        let output = BlockExecutionOutput::default();
+        let permit = hook.task_permit.try_acquire().unwrap();
+
+        // Busy hooks must skip pruning as well as writing.
+        hook.on_invalid_block(&parent_header, &block, &output, None);
+        assert!(old_blocks[0].exists());
+        drop(permit);
+
+        hook.on_invalid_block(&parent_header, &block, &output, None);
+        drop(timeout(Duration::from_secs(10), hook.task_permit.acquire()).await.unwrap().unwrap());
+        assert!(!old_blocks[0].exists());
+        assert!(old_blocks[1..].iter().all(|path| path.exists()));
+        assert!(output_dir
+            .join(format!("{}_{}.witness.re_executed.json", block.number(), block.hash()))
+            .exists());
     }
 }

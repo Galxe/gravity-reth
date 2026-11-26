@@ -42,6 +42,7 @@ arbitrary = [
     "alloy-trie/arbitrary",
     "alloy-rpc-types-eth?/arbitrary",
     "dashmap?/arbitrary",
+    "revm/arbitrary",
 ]
 dashmap = ["dep:dashmap"]
 default = [
@@ -70,6 +71,7 @@ serde-bincode-compat = [
 secp256k1 = [
     "alloy-consensus/secp256k1",
     "alloy-primitives/secp256k1",
+    "revm/secp256k1",
 ]
 serde = [
     "dep:serde",
@@ -88,6 +90,7 @@ serde = [
     "rand_08/serde",
     "alloy-rpc-types-eth?/serde",
     "dashmap?/serde",
+    "revm/serde",
 ]
 std = [
     "alloy-consensus/std",
@@ -109,6 +112,7 @@ std = [
     "alloy-rpc-types-eth?/std",
     "reth-codecs?/std",
     "serde_with?/std",
+    "revm/std",
 ]
 test-utils = [
     "arbitrary",
@@ -397,3 +401,6 @@ priority = -1
 
 [lints.rustdoc]
 all = "warn"
+
+[dependencies.revm]
+workspace = true

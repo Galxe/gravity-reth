@@ -29,6 +29,8 @@
 //!
 //! This ensures correct initialization order without runtime checks.
 
+use reth_evm::SenderRecoveryCache;
+
 use crate::{
     components::{NodeComponents, NodeComponentsBuilder},
     hooks::OnComponentInitializedHook,
@@ -72,21 +74,18 @@ use reth_provider::{
     BlockHashReader, BlockNumReader, ProviderError, ProviderFactory, ProviderResult,
     StageCheckpointReader, StaticFileProviderFactory, StorageSettingsCache,
 };
-use reth_prune::{PruneModes, PrunerBuilder};
+use reth_prune::{PruneMode, PruneModes, PrunerBuilder};
 use reth_rpc_builder::config::RethRpcServerConfig;
 use reth_rpc_layer::JwtSecret;
 use reth_stages::{
     sets::DefaultStages, stages::EraImportSource, MetricEvent, PipelineBuilder, PipelineTarget,
     StageId,
 };
-use reth_static_file::StaticFileProducer;
+use reth_static_file::{blocks_per_file_for_prune_distance, StaticFileProducer, StaticFileSegment};
 use reth_tasks::TaskExecutor;
-use reth_tracing::{
-    throttle,
-    tracing::{debug, error, info, warn},
-};
+use reth_tracing::tracing::{debug, error, info, warn};
 use reth_transaction_pool::TransactionPool;
-use std::{num::NonZeroUsize, sync::Arc, thread::available_parallelism, time::Duration};
+use std::{sync::Arc, time::Duration};
 use tokio::sync::{
     mpsc::{unbounded_channel, UnboundedSender},
     oneshot, watch,
@@ -238,7 +237,7 @@ impl LaunchContext {
         // TODO: reserved_cpu_cores is currently ignored because subtracting from thread pool
         // sizes doesn't actually reserve CPU cores for other processes.
         let _ = reserved_cpu_cores;
-        let num_threads = available_parallelism().map_or(1, NonZeroUsize::get);
+        let num_threads = self.task_executor.cpu_pool().current_num_threads();
         if let Err(err) = ThreadPoolBuilder::new()
             .num_threads(num_threads)
             .thread_name(|i| format!("rayon-{i:02}"))
@@ -481,9 +480,29 @@ where
         N: ProviderNodeTypes<DB = DB, ChainSpec = ChainSpec>,
         Evm: ConfigureEvm<Primitives = N::Primitives> + 'static,
     {
+        self.create_provider_factory_with_recovery::<N, Evm>(|_| Ok(())).await
+    }
+
+    /// Creates the provider after running an optional backfill recovery hook before consistency
+    /// checks.
+    pub async fn create_provider_factory_with_recovery<N, Evm>(
+        &self,
+        recover: impl FnOnce(&ProviderFactory<N>) -> eyre::Result<()>,
+    ) -> eyre::Result<ProviderFactory<N>>
+    where
+        N: ProviderNodeTypes<DB = DB, ChainSpec = ChainSpec>,
+        Evm: ConfigureEvm<Primitives = N::Primitives> + 'static,
+    {
         // `as_blocks_per_file_map` matches every segment exhaustively, so a new segment is a
         // compile error there instead of being silently missed here.
-        let blocks_per_file_map = self.toml_config().static_files.as_blocks_per_file_map();
+        let prune_modes = self.prune_modes();
+        let mut blocks_per_file_map = self.toml_config().static_files.as_blocks_per_file_map();
+        if blocks_per_file_map.get(StaticFileSegment::Receipts).is_none() &&
+            let Some(PruneMode::Distance(distance)) = prune_modes.receipts
+        {
+            blocks_per_file_map
+                .insert(StaticFileSegment::Receipts, blocks_per_file_for_prune_distance(distance));
+        }
         let blocks_per_file =
             blocks_per_file_map.iter().map(|(segment, &size)| (segment, Some(size)));
         let factory = ProviderFactory::new(
@@ -492,8 +511,10 @@ where
             StaticFileProvider::read_write(self.data_dir().static_files())?
                 .with_blocks_per_file(blocks_per_file)?,
         )
-        .with_prune_modes(self.prune_modes())
+        .with_prune_modes(prune_modes)
         .with_static_files_metrics();
+
+        recover(&factory)?;
 
         let has_receipt_pruning = self.toml_config().prune.has_receipts_pruning();
 
@@ -564,7 +585,19 @@ where
         N: ProviderNodeTypes<DB = DB, ChainSpec = ChainSpec>,
         Evm: ConfigureEvm<Primitives = N::Primitives> + 'static,
     {
-        let factory = self.create_provider_factory::<N, Evm>().await?;
+        self.with_provider_factory_and_recovery::<N, Evm>(|_| Ok(())).await
+    }
+
+    /// Attaches the provider after running a caller-supplied backfill recovery hook.
+    pub async fn with_provider_factory_and_recovery<N, Evm>(
+        self,
+        recover: impl FnOnce(&ProviderFactory<N>) -> eyre::Result<()>,
+    ) -> eyre::Result<LaunchContextWith<Attached<WithConfigs<ChainSpec>, ProviderFactory<N>>>>
+    where
+        N: ProviderNodeTypes<DB = DB, ChainSpec = ChainSpec>,
+        Evm: ConfigureEvm<Primitives = N::Primitives> + 'static,
+    {
+        let factory = self.create_provider_factory_with_recovery::<N, Evm>(recover).await?;
         let ctx = LaunchContextWith {
             inner: self.inner,
             attachment: self.attachment.map_right(|_| factory),
@@ -831,6 +864,7 @@ where
             },
             node_adapter,
             head,
+            sender_recovery_cache: builder_ctx.sender_recovery_cache().cloned(),
         };
 
         let ctx = LaunchContextWith {
@@ -891,6 +925,11 @@ where
     /// Returns mutable reference to the configured `NodeAdapter`.
     pub const fn node_adapter_mut(&mut self) -> &mut NodeAdapter<T, CB::Components> {
         &mut self.right_mut().node_adapter
+    }
+
+    /// Returns the cache of recovered transaction senders shared by node components, if enabled.
+    pub const fn sender_recovery_cache(&self) -> Option<&SenderRecoveryCache> {
+        self.right().sender_recovery_cache.as_ref()
     }
 
     /// Returns a reference to the blockchain provider.
@@ -1256,23 +1295,24 @@ where
     db_provider_container: WithMeteredProvider<NodeTypesWithDBAdapter<T::Types, T::DB>>,
     node_adapter: NodeAdapter<T, CB::Components>,
     head: Head,
+    /// Cache of recovered transaction senders shared by node components, if enabled.
+    sender_recovery_cache: Option<SenderRecoveryCache>,
 }
 
 /// Returns the metrics hooks for the node.
 pub fn metrics_hooks<N: NodeTypesWithDB>(provider_factory: &ProviderFactory<N>) -> Hooks {
     Hooks::builder()
-        .with_hook({
+        .with_background_interval(Duration::from_secs(5 * 60))
+        .with_background_hook({
             let db = provider_factory.db_ref().clone();
-            move || throttle!(Duration::from_secs(5 * 60), || db.report_metrics())
+            move || db.report_metrics()
         })
-        .with_hook({
+        .with_background_hook({
             let sfp = provider_factory.static_file_provider();
             move || {
-                throttle!(Duration::from_secs(5 * 60), || {
-                    if let Err(error) = sfp.report_metrics() {
-                        error!(%error, "Failed to report metrics from static file provider");
-                    }
-                })
+                if let Err(error) = sfp.report_metrics() {
+                    error!(%error, "Failed to report metrics from static file provider");
+                }
             }
         })
         .build()

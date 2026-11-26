@@ -97,7 +97,7 @@ jobs:
             allow_fail: false
             rustflags: "-C target-cpu=x86-64-v3 -C target-feature=+pclmulqdq"
           - target: aarch64-apple-darwin
-            os: macos-14
+            os: macos-15
             profile: maxperf
             allow_fail: false
             rustflags: ""
@@ -145,7 +145,6 @@ jobs:
           GPG_SIGNING_KEY: ${{ secrets.GPG_SIGNING_KEY }}
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: |
-          export GPG_TTY=$(tty)
           echo -n "$GPG_SIGNING_KEY" | base64 --decode | gpg --batch --import
           cd artifacts
           tar -czf ${{ matrix.build.binary }}-${{ needs.extract-version.outputs.VERSION }}-${{ matrix.configs.target }}.tar.gz ${{ matrix.build.binary }}*

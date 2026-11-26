@@ -44,20 +44,19 @@ use reth_rpc::{
 use reth_rpc_api::servers::*;
 use reth_rpc_engine_api::RethEngineApi;
 use reth_rpc_eth_api::{
-    helpers::{
-        pending_block::PendingEnvBuilder, Call, EthApiSpec, EthTransactions, LoadPendingBlock,
-        TraceExt,
-    },
+    helpers::{pending_block::PendingEnvBuilder, Call, EthApiSpec, EthTransactions, TraceExt},
     node::RpcNodeCoreAdapter,
     EthApiServer, EthApiTypes, FullEthApiServer, FullEthApiTypes, RpcBlock, RpcConvert,
     RpcConverter, RpcHeader, RpcNodeCore, RpcReceipt, RpcTransaction, RpcTxReq,
 };
 use reth_rpc_eth_types::{receipt::EthReceiptConverter, EthConfig, EthSubscriptionIdProvider};
-use reth_rpc_layer::{AuthLayer, Claims, CompressionLayer, JwtAuthValidator, JwtSecret};
+use reth_rpc_layer::{
+    AuthLayer, Claims, CompressionLayer, DecompressionLayer, JwtAuthValidator, JwtSecret,
+};
 pub use reth_rpc_server_types::RethRpcModule;
 use reth_storage_api::{
-    AccountReader, BlockReader, ChangeSetReader, FullRpcProvider, NodePrimitivesProvider,
-    ProviderReadView, StateProviderFactory,
+    BlockReader, ChangeSetReader, FullRpcProvider, NodePrimitivesProvider, ProviderReadView,
+    StateProviderFactory,
 };
 use reth_tasks::{pool::BlockingTaskGuard, Runtime};
 use reth_tokio_util::EventSender;
@@ -69,7 +68,7 @@ use std::{
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tower_http::cors::CorsLayer;
+use tower_http::{cors::CorsLayer, validate_request::ValidateRequestHeaderLayer};
 
 pub use cors::CorsDomainError;
 
@@ -296,7 +295,7 @@ impl<N, Provider, Pool, Network, EvmConfig, Consensus>
         Provider: Clone,
         Pool: Clone,
         Network: Clone,
-        EvmConfig: ConfigureEvmForRead + Clone,
+        EvmConfig: ConfigureEvmForRead,
         RpcNodeCoreAdapter<Provider, Pool, Network, EvmConfig>:
             RpcNodeCore<Provider: ChainSpecProvider<ChainSpec = ChainSpec>, Evm = EvmConfig>,
         RpcConverter<Ethereum, EvmConfig, EthReceiptConverter<ChainSpec>>: RpcConvert,
@@ -313,9 +312,8 @@ where
     Provider: FullRpcProvider<Block = N::Block, Receipt = N::Receipt, Header = N::BlockHeader>
         + CanonStateSubscriptions<Primitives = N>
         + ForkChoiceSubscriptions<Header = N::BlockHeader>
-        + AccountReader
         + ChangeSetReader,
-    Pool: TransactionPool + Clone + 'static,
+    Pool: TransactionPool + 'static,
     Network: NetworkInfo + Peers + Clone + 'static,
     EvmConfig: ConfigureEvmForRead<Primitives = N> + 'static,
     Consensus: FullConsensus<N> + Clone + 'static,
@@ -520,7 +518,7 @@ where
         + 'static,
     Pool: Send + Sync + Clone + 'static,
     Network: Clone + 'static,
-    EthApi: FullEthApiTypes + 'static,
+    EthApi: FullEthApiTypes,
     EvmConfig: ConfigureEvmForRead<Primitives = N>,
 {
     /// Creates a new, empty instance.
@@ -623,7 +621,7 @@ where
     pub fn admin_api(&self) -> AdminApi<Network, Provider::ChainSpec, Pool>
     where
         Network: Peers,
-        Pool: TransactionPool + Clone + 'static,
+        Pool: TransactionPool + 'static,
     {
         AdminApi::new(self.network.clone(), self.provider.chain_spec(), self.pool.clone())
     }
@@ -637,7 +635,7 @@ where
     pub fn register_admin(&mut self) -> &mut Self
     where
         Network: Peers,
-        Pool: TransactionPool + Clone + 'static,
+        Pool: TransactionPool + 'static,
     {
         let adminapi = self.admin_api();
         self.modules.insert(RethRpcModule::Admin, adminapi.into_rpc().into());
@@ -661,8 +659,7 @@ where
             Block = N::Block,
             Receipt = N::Receipt,
             Transaction = N::SignedTx,
-        > + AccountReader
-        + ChangeSetReader
+        > + ChangeSetReader
         + CanonStateSubscriptions<Primitives = N>
         + ForkChoiceSubscriptions<Header = N::BlockHeader>,
     Network: NetworkInfo + Peers + Clone + 'static,
@@ -738,7 +735,7 @@ where
     /// If called outside of the tokio runtime.
     pub fn register_net(&mut self) -> &mut Self
     where
-        EthApi: EthApiSpec + 'static,
+        EthApi: EthApiSpec,
     {
         let netapi = self.net_api();
         self.modules.insert(RethRpcModule::Net, netapi.into_rpc().into());
@@ -778,8 +775,7 @@ where
             Header = N::BlockHeader,
             Transaction = N::SignedTx,
             Receipt = N::Receipt,
-        > + AccountReader
-        + ChangeSetReader,
+        > + ChangeSetReader,
     Network: NetworkInfo + Peers + Clone + 'static,
     EthApi: EthApiTypes,
     EvmConfig: ConfigureEvmForRead<Primitives = N>,
@@ -804,7 +800,7 @@ where
     /// If called outside of the tokio runtime. See also [`Self::eth_api`]
     pub fn bundle_api(&self) -> EthBundle<EthApi>
     where
-        EthApi: EthTransactions + LoadPendingBlock + Call,
+        EthApi: EthTransactions + Call,
     {
         let eth_api = self.eth_api().clone();
         EthBundle::new(eth_api, self.blocking_pool_guard.clone())
@@ -834,7 +830,7 @@ where
     /// If called outside of the tokio runtime. See also [`Self::eth_api`]
     pub fn net_api(&self) -> NetApi<Network, EthApi>
     where
-        EthApi: EthApiSpec + 'static,
+        EthApi: EthApiSpec,
     {
         let eth_api = self.eth_api().clone();
         NetApi::new(self.network.clone(), eth_api)
@@ -858,9 +854,8 @@ where
     Provider: FullRpcProvider<Block = N::Block, Header = N::BlockHeader, Receipt = N::Receipt>
         + CanonStateSubscriptions<Primitives = N>
         + ForkChoiceSubscriptions<Header = N::BlockHeader>
-        + AccountReader
         + ChangeSetReader,
-    Pool: TransactionPool + Clone + 'static,
+    Pool: TransactionPool + 'static,
     Network: NetworkInfo + Peers + Clone + 'static,
     EthApi: FullEthApiServer,
     EvmConfig: ConfigureEvmForRead<Primitives = N> + 'static,
@@ -1088,6 +1083,16 @@ pub struct RpcServerConfig<RpcMiddleware = Identity> {
     http_addr: Option<SocketAddr>,
     /// Control whether http responses should be compressed
     http_disable_compression: bool,
+    /// Allowed compression algorithms for HTTP responses.
+    ///
+    /// If `None`, all supported algorithms are enabled.
+    http_compression_algorithms: Option<Vec<String>>,
+    /// Allowed decompression algorithms for HTTP requests.
+    ///
+    /// If `None`, request decompression is disabled.
+    http_decompression_algorithms: Option<Vec<String>>,
+    /// Maximum allowed HTTP request body size in bytes (decompressed).
+    http_max_request_body_size: Option<u32>,
     /// Configs for WS server
     ws_server_config: Option<ServerConfigBuilder>,
     /// Allowed CORS Domains for ws.
@@ -1116,6 +1121,9 @@ impl Default for RpcServerConfig<Identity> {
             http_cors_domains: None,
             http_addr: None,
             http_disable_compression: false,
+            http_compression_algorithms: None,
+            http_decompression_algorithms: None,
+            http_max_request_body_size: None,
             ws_server_config: None,
             ws_cors_domains: None,
             ws_addr: None,
@@ -1181,6 +1189,9 @@ impl<RpcMiddleware> RpcServerConfig<RpcMiddleware> {
             http_cors_domains: self.http_cors_domains,
             http_addr: self.http_addr,
             http_disable_compression: self.http_disable_compression,
+            http_compression_algorithms: self.http_compression_algorithms,
+            http_decompression_algorithms: self.http_decompression_algorithms,
+            http_max_request_body_size: self.http_max_request_body_size,
             ws_server_config: self.ws_server_config,
             ws_cors_domains: self.ws_cors_domains,
             ws_addr: self.ws_addr,
@@ -1209,15 +1220,33 @@ impl<RpcMiddleware> RpcServerConfig<RpcMiddleware> {
         self
     }
 
+    /// Configure the cors domains for HTTP
+    pub fn with_http_cors(mut self, cors_domain: Option<String>) -> Self {
+        self.http_cors_domains = cors_domain;
+        self
+    }
+
     /// Configure whether HTTP responses should be compressed
     pub const fn with_http_disable_compression(mut self, http_disable_compression: bool) -> Self {
         self.http_disable_compression = http_disable_compression;
         self
     }
 
-    /// Configure the cors domains for HTTP
-    pub fn with_http_cors(mut self, cors_domain: Option<String>) -> Self {
-        self.http_cors_domains = cors_domain;
+    /// Configure the allowed compression algorithms for HTTP responses.
+    ///
+    /// If `None`, all supported algorithms are enabled. See
+    /// [`CompressionLayer::with_algorithms`] for how the algorithms are applied.
+    pub fn with_http_compression_algorithms(mut self, algos: Option<Vec<String>>) -> Self {
+        self.http_compression_algorithms = algos;
+        self
+    }
+
+    /// Configure decompression for HTTP requests.
+    ///
+    /// If `algos` is `None`, request decompression is disabled.
+    pub fn with_http_decompression(mut self, algos: Option<Vec<String>>, max_size: u32) -> Self {
+        self.http_decompression_algorithms = algos;
+        self.http_max_request_body_size = Some(max_size);
         self
     }
 
@@ -1337,12 +1366,31 @@ impl<RpcMiddleware> RpcServerConfig<RpcMiddleware> {
     fn maybe_compression_layer(
         addr: SocketAddr,
         disable_compression: bool,
+        algorithms: Option<&[String]>,
     ) -> Option<CompressionLayer> {
         if disable_compression || addr.ip().to_canonical().is_loopback() {
             None
         } else {
-            Some(CompressionLayer::new())
+            Some(algorithms.map(CompressionLayer::with_algorithms).unwrap_or_default())
         }
+    }
+
+    /// Returns a [`DecompressionLayer`] that allows decompression of incoming requests
+    /// based on the `Content-Encoding` request header.
+    ///
+    /// Decompression is disabled by default, and only enabled when algorithms are explicitly
+    /// specified via the `algos` parameter.
+    fn maybe_decompression_layer(
+        max_request_body_size: Option<u32>,
+        algos: Option<&[String]>,
+    ) -> Option<DecompressionLayer> {
+        let algos = algos?;
+        if algos.is_empty() {
+            return None;
+        }
+
+        let max = max_request_body_size?;
+        Some(DecompressionLayer::new(algos, max as usize))
     }
 
     /// Builds and starts the configured server(s): http, ws, ipc.
@@ -1412,11 +1460,19 @@ impl<RpcMiddleware> RpcServerConfig<RpcMiddleware> {
                 let server = ServerBuilder::new()
                     .set_http_middleware(
                         tower::ServiceBuilder::new()
-                            .option_layer(Self::maybe_cors_layer(cors)?)
+                            .option_layer(Self::maybe_cors_layer(cors.clone())?)
                             .option_layer(Self::maybe_jwt_layer(self.jwt_secret))
                             .option_layer(Self::maybe_compression_layer(
                                 http_socket_addr,
                                 self.http_disable_compression,
+                                self.http_compression_algorithms.as_deref(),
+                            ))
+                            .option_layer(Self::maybe_decompression_layer(
+                                self.http_max_request_body_size,
+                                self.http_decompression_algorithms.as_deref(),
+                            ))
+                            .layer(ValidateRequestHeaderLayer::custom(
+                                cors::WsOriginValidator::new(cors.as_deref())?,
                             )),
                     )
                     .set_rpc_middleware(
@@ -1444,9 +1500,8 @@ impl<RpcMiddleware> RpcServerConfig<RpcMiddleware> {
                     RpcError::server_error(err, ServerKind::WsHttp(http_socket_addr))
                 })?;
                 if let Some(module) = modules.http.as_ref().or(modules.ws.as_ref()) {
-                    let handle = server.start(module.clone());
-                    http_handle = Some(handle.clone());
-                    ws_handle = Some(handle);
+                    // Both transports share one server, so only keep one shutdown handle.
+                    http_handle = Some(server.start(module.clone()));
                 }
                 return Ok(RpcServerHandle {
                     http_local_addr: Some(addr),
@@ -1471,7 +1526,10 @@ impl<RpcMiddleware> RpcServerConfig<RpcMiddleware> {
                 .set_http_middleware(
                     tower::ServiceBuilder::new()
                         .option_layer(Self::maybe_cors_layer(self.ws_cors_domains.clone())?)
-                        .option_layer(Self::maybe_jwt_layer(self.jwt_secret)),
+                        .option_layer(Self::maybe_jwt_layer(self.jwt_secret))
+                        .layer(ValidateRequestHeaderLayer::custom(cors::WsOriginValidator::new(
+                            self.ws_cors_domains.as_deref(),
+                        )?)),
                 )
                 .set_rpc_middleware(
                     RpcServiceBuilder::default()
@@ -1504,6 +1562,11 @@ impl<RpcMiddleware> RpcServerConfig<RpcMiddleware> {
                         .option_layer(Self::maybe_compression_layer(
                             http_socket_addr,
                             self.http_disable_compression,
+                            self.http_compression_algorithms.as_deref(),
+                        ))
+                        .option_layer(Self::maybe_decompression_layer(
+                            self.http_max_request_body_size,
+                            self.http_decompression_algorithms.as_deref(),
                         )),
                 )
                 .set_rpc_middleware(
@@ -1908,11 +1971,7 @@ impl TransportRpcModules {
     /// it's the caller responsibility to remove both `subscribe` and `unsubscribe` methods for
     /// subscriptions.
     pub fn remove_http_method(&mut self, method_name: &'static str) -> bool {
-        if let Some(http_module) = &mut self.http {
-            http_module.remove_method(method_name).is_some()
-        } else {
-            false
-        }
+        self.http.as_mut().is_some_and(|module| module.remove_method(method_name).is_some())
     }
 
     /// Removes the given methods from the configured http methods.
@@ -1930,11 +1989,7 @@ impl TransportRpcModules {
     /// it's the caller responsibility to remove both `subscribe` and `unsubscribe` methods for
     /// subscriptions.
     pub fn remove_ws_method(&mut self, method_name: &'static str) -> bool {
-        if let Some(ws_module) = &mut self.ws {
-            ws_module.remove_method(method_name).is_some()
-        } else {
-            false
-        }
+        self.ws.as_mut().is_some_and(|module| module.remove_method(method_name).is_some())
     }
 
     /// Removes the given methods from the configured ws methods.
@@ -1952,11 +2007,7 @@ impl TransportRpcModules {
     /// it's the caller responsibility to remove both `subscribe` and `unsubscribe` methods for
     /// subscriptions.
     pub fn remove_ipc_method(&mut self, method_name: &'static str) -> bool {
-        if let Some(ipc_module) = &mut self.ipc {
-            ipc_module.remove_method(method_name).is_some()
-        } else {
-            false
-        }
+        self.ipc.as_mut().is_some_and(|module| module.remove_method(method_name).is_some())
     }
 
     /// Removes the given methods from the configured ipc methods.
@@ -2749,5 +2800,29 @@ mod tests {
 
         assert!(result.is_ok());
         assert!(!closure_called, "Closure should NOT be called when module is not configured");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_stop_rpc_servers() {
+        let modules = TransportRpcModules::default()
+            .with_http(create_test_module())
+            .with_ws(create_test_module());
+        for config in [
+            RpcServerConfig::http(Default::default()),
+            RpcServerConfig::ws(Default::default()),
+            RpcServerConfig::http(Default::default()).with_ws(Default::default()),
+        ] {
+            let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
+            let handle =
+                config.with_http_address(addr).with_ws_address(addr).start(&modules).await.unwrap();
+            let servers = handle.http.iter().chain(handle.ws.iter()).cloned().collect::<Vec<_>>();
+            let cloned = handle.clone();
+
+            handle.stop().unwrap();
+            for server in servers {
+                tokio::time::timeout(Duration::from_secs(5), server.stopped()).await.unwrap();
+            }
+            assert!(matches!(cloned.stop(), Err(AlreadyStoppedError)));
+        }
     }
 }

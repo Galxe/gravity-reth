@@ -14,6 +14,7 @@ workspace = true
 [dependencies]
 # reth
 reth-primitives-traits.workspace = true
+reth-prune-types.workspace = true
 reth-execution-errors.workspace = true
 reth-db-api.workspace = true
 reth-storage-api = { workspace = true, features = ["std"] }
@@ -70,6 +71,7 @@ serde = [
     "reth-primitives-traits/serde",
     "revm-database/serde",
     "revm/serde",
+    "reth-prune-types/serde",
 ]
 test-utils = [
     "reth-trie-common/test-utils",
@@ -79,4 +81,5 @@ test-utils = [
     "reth-db-api/test-utils",
     "reth-provider/test-utils",
     "reth-trie/test-utils",
+    "reth-prune-types/test-utils",
 ]

@@ -21,7 +21,8 @@ use tokio::sync::oneshot;
 #[tokio::test(flavor = "multi_thread")]
 async fn testing_rpc_build_block_works() -> eyre::Result<()> {
     let runtime = Runtime::test();
-    let mut rpc_args = reth_node_core::args::RpcServerArgs::default().with_http();
+    let mut rpc_args =
+        reth_node_core::args::RpcServerArgs::default().with_http().with_unused_ports();
     rpc_args.http_api = Some(RpcModuleSelection::from_iter([RethRpcModule::Testing]));
     let tempdir = tempdir().expect("temp datadir");
     let datadir_args = DatadirArgs {
@@ -56,7 +57,7 @@ async fn testing_rpc_build_block_works() -> eyre::Result<()> {
                 suggested_fee_recipient: Address::ZERO,
                 withdrawals: None,
                 parent_beacon_block_root: None,
-                slot_number: None,
+                ..Default::default()
             };
 
             let request = TestingBuildBlockRequestV1 {
@@ -67,8 +68,13 @@ async fn testing_rpc_build_block_works() -> eyre::Result<()> {
             };
 
             tokio::spawn(async move {
-                let res: eyre::Result<ExecutionPayloadEnvelopeV4> =
-                    client.request("testing_buildBlockV1", [request]).await.map_err(Into::into);
+                let res: eyre::Result<ExecutionPayloadEnvelopeV4> = client
+                    .request(
+                        "testing_buildBlockV1",
+                        reth_rpc_api::testing_build_block_params(request),
+                    )
+                    .await
+                    .map_err(Into::into);
                 let _ = tx.send(res);
             });
 

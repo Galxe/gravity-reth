@@ -1,7 +1,11 @@
 //! Transactions management for the p2p network.
 
-use alloy_consensus::transaction::TxHashRef;
+use alloy_consensus::{constants::EIP4844_TX_TYPE_ID, transaction::TxHashRef};
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
+use smallvec::SmallVec;
+
+/// Normalized transaction announcements.
+pub mod announcement;
 
 /// Aggregation on configurable parameters for [`TransactionsManager`].
 pub mod config;
@@ -11,11 +15,14 @@ pub mod constants;
 pub mod fetcher;
 /// Defines the traits for transaction-related policies.
 pub mod policy;
+#[cfg(test)]
+mod test_harness;
 
 pub use self::constants::{
     tx_fetcher::DEFAULT_SOFT_LIMIT_BYTE_SIZE_POOLED_TRANSACTIONS_RESP_ON_PACK_GET_POOLED_TRANSACTIONS_REQ,
     SOFT_LIMIT_BYTE_SIZE_POOLED_TRANSACTIONS_RESPONSE,
 };
+use announcement::TransactionAnnouncement;
 use config::AnnouncementAcceptance;
 pub use config::{
     AnnouncementFilteringPolicy, TransactionFetcherConfig, TransactionIngressPolicy,
@@ -25,7 +32,10 @@ use policy::NetworkPolicies;
 
 pub(crate) use fetcher::{FetchEvent, TransactionFetcher};
 
-use self::constants::{tx_manager::*, DEFAULT_SOFT_LIMIT_BYTE_SIZE_TRANSACTIONS_BROADCAST_MESSAGE};
+use self::constants::{
+    tx_manager::*, DEFAULT_SOFT_LIMIT_BYTE_SIZE_TRANSACTIONS_BROADCAST_MESSAGE,
+    SOFT_LIMIT_COUNT_HASHES_IN_GET_POOLED_TRANSACTIONS_REQUEST,
+};
 use crate::{
     budget::{
         DEFAULT_BUDGET_TRY_DRAIN_NETWORK_TRANSACTION_EVENTS,
@@ -37,19 +47,23 @@ use crate::{
     transactions::config::{StrictEthAnnouncementFilter, TransactionPropagationKind},
     NetworkHandle, TxTypesCounter,
 };
+use alloy_eips::eip2718::Typed2718;
 use alloy_primitives::{
-    map::{B256Map, B256Set, FbBuildHasher},
+    bytes::BufMut,
+    map::{hash_map::Entry, B256Map, B256Set, FbBuildHasher, HashMap, HashSet},
     TxHash, B256,
 };
+use alloy_rlp::Encodable;
 use constants::SOFT_LIMIT_COUNT_HASHES_IN_NEW_POOLED_TRANSACTIONS_BROADCAST_MESSAGE;
 use futures::{stream::FuturesUnordered, Future, StreamExt};
 use reth_eth_wire::{
-    DedupPayload, EthNetworkPrimitives, EthVersion, GetPooledTransactions, HandleMempoolData,
-    HandleVersionedMempoolData, NetworkPrimitives, NewPooledTransactionHashes,
-    NewPooledTransactionHashes66, NewPooledTransactionHashes68, NewPooledTransactionHashes72,
-    PooledTransactions, RequestTxHashes, Transactions, ValidAnnouncementData,
+    BroadcastPoolTransactions, Cells, EthNetworkPrimitives, EthVersion, GetCells,
+    GetPooledTransactions, LazyEncoded, LazyEncodedTransaction, NetworkPrimitives,
+    NewPooledTransactionHashes, NewPooledTransactionHashes66, NewPooledTransactionHashes68,
+    NewPooledTransactionHashes72, PooledTransactions, Transactions,
 };
-use reth_ethereum_primitives::{TransactionSigned, TxType};
+use reth_ethereum_primitives::TxType;
+use reth_evm::SenderRecoveryCache;
 use reth_metrics::common::mpsc::MemoryBoundedReceiver;
 use reth_network_api::{
     events::{PeerEvent, SessionInfo},
@@ -69,7 +83,6 @@ use reth_transaction_pool::{
     PropagatedTransactions, TransactionPool, ValidPoolTransaction,
 };
 use std::{
-    collections::{hash_map::Entry, HashMap, HashSet},
     pin::Pin,
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -220,6 +233,33 @@ impl<N: NetworkPrimitives> TransactionsHandle<N> {
 
         rx.await?.map(|res| Some(res.0))
     }
+
+    /// Requests cells from a specific eth/72 peer.
+    ///
+    /// This is the transport-level client primitive for EIP-8070. The caller supplies the
+    /// transaction hashes and the common cell mask for the request. Announcement-driven batching,
+    /// retries, cell verification, and blob reconstruction are layered above this method.
+    ///
+    /// Returns `None` if the peer is no longer connected.
+    pub async fn get_cells_from(
+        &self,
+        peer_id: PeerId,
+        hashes: Vec<B256>,
+        cell_mask: alloy_primitives::B128,
+    ) -> Result<Option<Cells>, RequestError> {
+        if hashes.is_empty() {
+            return Ok(Some(Cells { cell_mask, ..Default::default() }))
+        }
+
+        let Some(peer) = self.peer_handle(peer_id).await? else { return Ok(None) };
+
+        let (tx, rx) = oneshot::channel();
+        let request =
+            PeerRequest::GetCells { request: GetCells { hashes, cell_mask }, response: tx };
+        peer.try_send(request).map_err(|_| RequestError::ChannelClosed)?;
+
+        rx.await?.map(Some)
+    }
 }
 
 /// Manages transactions on top of the p2p network.
@@ -281,6 +321,8 @@ impl<N: NetworkPrimitives> TransactionsHandle<N> {
 pub struct TransactionsManager<Pool, N: NetworkPrimitives = EthNetworkPrimitives> {
     /// Access to the transaction pool.
     pool: Pool,
+    /// Cache of recovered transaction senders shared with payload execution, if enabled.
+    sender_recovery_cache: Option<SenderRecoveryCache>,
     /// Network access.
     network: NetworkHandle<N>,
     /// Subscriptions to all network related events.
@@ -293,7 +335,9 @@ pub struct TransactionsManager<Pool, N: NetworkPrimitives = EthNetworkPrimitives
     ///
     /// This way we can track incoming transactions and prevent multiple pool imports for the same
     /// transaction
-    transactions_by_peers: B256Map<HashSet<PeerId>>,
+    transactions_by_peers: B256Map<SmallVec<[PeerId; 1]>>,
+    /// Scratch hashes reused when deduplicating announcements.
+    announcement_hashes: B256Set,
     /// Transactions that are currently imported into the `Pool`.
     ///
     /// The import process includes:
@@ -311,7 +355,7 @@ pub struct TransactionsManager<Pool, N: NetworkPrimitives = EthNetworkPrimitives
     /// Bad imports.
     bad_imports: LruCache<TxHash, FbBuildHasher<32>>,
     /// All the connected peers.
-    peers: HashMap<PeerId, PeerMetadata<N>>,
+    peers: HashMap<PeerId, PeerMetadata<N>, FbBuildHasher<64>>,
     /// Send half for the command channel.
     ///
     /// This is kept so that a new [`TransactionsHandle`] can be created at any time.
@@ -380,15 +424,14 @@ impl<Pool: TransactionPool, N: NetworkPrimitives> TransactionsManager<Pool, N> {
 
         let (command_tx, command_rx) = mpsc::unbounded_channel();
 
-        let transaction_fetcher = TransactionFetcher::with_transaction_fetcher_config(
-            &transactions_manager_config.transaction_fetcher_config,
-        );
+        let transaction_fetcher =
+            TransactionFetcher::new(transactions_manager_config.transaction_fetcher_config.clone());
 
         // install a listener for new __pending__ transactions that are allowed to be propagated
         // over the network
         let pending = pool.pending_transactions_listener();
         let pending_pool_imports_info =
-            PendingPoolImportsInfo::new(DEFAULT_MAX_COUNT_PENDING_POOL_IMPORTS);
+            PendingPoolImportsInfo::new(transactions_manager_config.max_pending_pool_imports);
         let metrics = TransactionsManagerMetrics::default();
         metrics
             .capacity_pending_pool_imports
@@ -396,10 +439,12 @@ impl<Pool: TransactionPool, N: NetworkPrimitives> TransactionsManager<Pool, N> {
 
         Self {
             pool,
+            sender_recovery_cache: None,
             network,
             network_events,
             transaction_fetcher,
             transactions_by_peers: Default::default(),
+            announcement_hashes: B256Set::default(),
             pool_imports: Default::default(),
             pending_pool_imports_info,
             bad_imports: LruCache::with_hasher(DEFAULT_MAX_COUNT_BAD_IMPORTS, Default::default()),
@@ -420,23 +465,48 @@ impl<Pool: TransactionPool, N: NetworkPrimitives> TransactionsManager<Pool, N> {
         TransactionsHandle { manager_tx: self.command_tx.clone() }
     }
 
-    /// Returns `true` if [`TransactionsManager`] has capacity to request pending hashes. Returns
-    /// `false` if [`TransactionsManager`] is operating close to full capacity.
-    fn has_capacity_for_fetching_pending_hashes(&self) -> bool {
-        self.has_capacity_for_pending_pool_imports() &&
-            self.transaction_fetcher.has_capacity_for_fetching_pending_hashes()
+    /// Uses the provided sender recovery cache.
+    pub fn with_sender_recovery_cache(mut self, cache: SenderRecoveryCache) -> Self {
+        self.sender_recovery_cache = Some(cache);
+        self
     }
 
-    /// Returns `true` if [`TransactionsManager`] has capacity for more pending pool imports.
+    /// Returns whether pending pool imports are below the soft limit.
+    ///
+    /// Fetch responses are admitted in full when capacity remains, so one response can exceed
+    /// the limit by at most 255 transactions (the 256-hash request cap minus one free slot).
+    /// Further responses and requests wait until imports fall below the limit again.
     fn has_capacity_for_pending_pool_imports(&self) -> bool {
         self.remaining_pool_import_capacity() > 0
     }
 
-    /// Returns the remaining capacity for pending pool imports.
+    /// Returns the remaining capacity below the soft limit for pending pool imports.
+    ///
+    /// Outstanding requests do not reserve capacity. A fetched response is admitted in full
+    /// if any capacity remains; while imports exceed the limit, this returns zero.
     fn remaining_pool_import_capacity(&self) -> usize {
         self.pending_pool_imports_info.max_pending_pool_imports.saturating_sub(
             self.pending_pool_imports_info.pending_pool_imports.load(Ordering::Relaxed),
         )
+    }
+
+    /// Returns import capacity available to broadcasts after reserving space for fetched hashes.
+    fn remaining_broadcast_import_capacity(&self) -> usize {
+        let capacity = self.remaining_pool_import_capacity();
+        // A single-slot budget cannot reserve space without blocking all broadcasts.
+        if self.pending_pool_imports_info.max_pending_pool_imports <= 1 ||
+            self.transaction_fetcher.num_hashes() == 0
+        {
+            return capacity
+        }
+        // Reserve one batch (or half a small import budget) for fetched transactions.
+        // Broadcasts are processed first and must not consume every newly freed slot.
+        let reserved = self
+            .pending_pool_imports_info
+            .max_pending_pool_imports
+            .div_ceil(2)
+            .min(SOFT_LIMIT_COUNT_HASHES_IN_GET_POOLED_TRANSACTIONS_REQUEST);
+        capacity.saturating_sub(reserved)
     }
 
     fn report_peer_bad_transactions(&self, peer_id: PeerId) {
@@ -459,7 +529,7 @@ impl<Pool: TransactionPool, N: NetworkPrimitives> TransactionsManager<Pool, N> {
         if let Some(mut peer) = self.peers.remove(peer_id) {
             self.policies.propagation_policy_mut().on_session_closed(&mut peer);
         }
-        self.transaction_fetcher.remove_peer(peer_id);
+        self.transaction_fetcher.on_peer_disconnected(peer_id);
     }
 
     /// Clear the transaction
@@ -482,7 +552,6 @@ impl<Pool: TransactionPool, N: NetworkPrimitives> TransactionsManager<Pool, N> {
     /// - exceeds gas limit
     /// - gas uint overflow
     /// - exceeds max init code size
-    /// - oversized data
     /// - signer account has bytecode
     /// - chain id mismatch
     /// - old legacy chain id
@@ -503,6 +572,10 @@ impl<Pool: TransactionPool, N: NetworkPrimitives> TransactionsManager<Pool, N> {
             // Blob sidecar errors: penalize but do NOT cache the hash as bad.
             // The transaction may be valid — only the sidecar from this peer was wrong.
             // Using regular penalties means repeated offenders still get disconnected.
+            //
+            // Eth/72 peers cannot reach this path with an elided sidecar: their blob
+            // transactions are dropped before import in `import_transactions`, so any sidecar
+            // failure here means actual blob data failed validation.
             if let Some(peers) = peers {
                 for peer_id in peers {
                     self.report_peer_bad_transactions(peer_id);
@@ -524,20 +597,6 @@ impl<Pool: TransactionPool, N: NetworkPrimitives> TransactionsManager<Pool, N> {
         }
         self.metrics.bad_imports.increment(1);
         self.bad_imports.insert(err.hash);
-    }
-
-    /// Runs an operation to fetch hashes that are cached in [`TransactionFetcher`].
-    ///
-    /// Returns `true` if a request was sent.
-    fn on_fetch_hashes_pending_fetch(&mut self) -> bool {
-        // try drain transaction hashes pending fetch
-        let info = &self.pending_pool_imports_info;
-        let max_pending_pool_imports = info.max_pending_pool_imports;
-        let has_capacity_wrt_pending_pool_imports =
-            |divisor| info.has_capacity(max_pending_pool_imports / divisor);
-
-        self.transaction_fetcher
-            .on_fetch_pending_hashes(&self.peers, has_capacity_wrt_pending_pool_imports)
     }
 
     fn on_request_error(&self, peer_id: PeerId, req_err: RequestError) {
@@ -621,13 +680,23 @@ impl<Pool: TransactionPool, N: NetworkPrimitives> TransactionsManager<Pool, N> {
         };
         let client = peer.client_version.clone();
 
-        // keep track of the transactions the peer knows
-        let mut count_txns_already_seen_by_peer = 0;
-        for tx in msg.iter_hashes().copied() {
-            if !peer.seen_transactions.insert(tx) {
-                count_txns_already_seen_by_peer += 1;
-            }
+        if msg.is_empty() {
+            self.report_peer(peer_id, ReputationChangeKind::BadAnnouncement);
+            return
         }
+
+        let Ok(mut announcement) =
+            TransactionAnnouncement::from_message(&msg, &mut self.announcement_hashes)
+        else {
+            self.report_peer(peer_id, ReputationChangeKind::BadAnnouncement);
+            return
+        };
+        let has_duplicates = announcement.len() != msg.len();
+
+        // keep track of the transactions the peer knows
+        let count_txns_already_seen_by_peer =
+            msg.iter_hashes().filter(|hash| !peer.seen_transactions.insert(**hash)).count();
+        drop(msg);
         if count_txns_already_seen_by_peer > 0 {
             // this may occur if transactions are sent or announced to a peer, at the same time as
             // the peer sends/announces those hashes to us. this is because, marking
@@ -636,7 +705,7 @@ impl<Pool: TransactionPool, N: NetworkPrimitives> TransactionsManager<Pool, N> {
             self.metrics.messages_with_hashes_already_seen_by_peer.increment(1);
             self.metrics
                 .occurrences_hash_already_seen_by_peer
-                .increment(count_txns_already_seen_by_peer);
+                .increment(count_txns_already_seen_by_peer as u64);
 
             trace!(target: "net::tx",
                 %count_txns_already_seen_by_peer,
@@ -648,64 +717,34 @@ impl<Pool: TransactionPool, N: NetworkPrimitives> TransactionsManager<Pool, N> {
             self.report_already_seen(peer_id);
         }
 
-        // 1. filter out spam
-        if msg.is_empty() {
-            self.report_peer(peer_id, ReputationChangeKind::BadAnnouncement);
-            return;
-        }
-
-        let original_len = msg.len();
-        let mut partially_valid_msg = msg.dedup();
-
-        if partially_valid_msg.len() != original_len {
+        if has_duplicates {
             self.report_peer(peer_id, ReputationChangeKind::BadAnnouncement);
         }
 
-        // 2. filter out transactions pending import to pool
-        partially_valid_msg.retain_by_hash(|hash| !self.transactions_by_peers.contains_key(hash));
-
-        // 3. filter out invalid entries (spam)
-        //
-        // validates messages with respect to the given network, e.g. allowed tx types.
-        // done before the pool lookup since these are cheap in-memory checks that shrink
-        // the set before acquiring the pool lock.
-        //
+        // Exclude pending imports and known bad transactions before counting types and applying
+        // policy. These cheap checks shrink the batch before acquiring the pool lock.
         let mut should_report_peer = false;
         let mut tx_types_counter = TxTypesCounter::default();
+        let has_eth68_metadata = announcement.version().has_eth68_metadata();
 
-        let has_eth68_metadata = partially_valid_msg
-            .msg_version()
-            .expect("partially valid announcement should have a version")
-            .has_eth68_metadata();
-
-        partially_valid_msg.retain(|tx_hash, metadata_ref_mut| {
-            let (ty_byte, size_val) = match *metadata_ref_mut {
-                Some((ty, size)) => {
-                    if !has_eth68_metadata {
-                        should_report_peer = true;
-                    }
-                    (ty, size)
-                }
-                None => {
-                    if has_eth68_metadata {
-                        should_report_peer = true;
-                        return false;
-                    }
-                    (0u8, 0)
-                }
-            };
-
-            if has_eth68_metadata && let Some((actual_ty_byte, _)) = *metadata_ref_mut {
-                match TxType::try_from(actual_ty_byte) {
-                    Ok(parsed_tx_type) => tx_types_counter.increase_by_tx_type(parsed_tx_type),
+        announcement.retain(|tx| {
+            if self.transactions_by_peers.contains_key(&tx.hash) ||
+                self.bad_imports.contains(&tx.hash)
+            {
+                return false
+            }
+            let (ty_byte, size_val) = tx.metadata.map_or((0, 0), |metadata| {
+                match TxType::try_from(metadata.tx_type) {
+                    Ok(tx_type) => tx_types_counter.increase_by_tx_type(tx_type),
                     Err(_) => tx_types_counter.increase_other(),
                 }
-            }
+                (metadata.tx_type, metadata.size)
+            });
 
             let decision = self
                 .policies
                 .announcement_filter()
-                .decide_on_announcement(ty_byte, tx_hash, size_val);
+                .decide_on_announcement(ty_byte, &tx.hash, size_val);
 
             match decision {
                 AnnouncementAcceptance::Accept => true,
@@ -727,125 +766,37 @@ impl<Pool: TransactionPool, N: NetworkPrimitives> TransactionsManager<Pool, N> {
             self.report_peer(peer_id, ReputationChangeKind::BadAnnouncement);
         }
 
-        // 4. filter out known hashes
+        // Filter out hashes already in the pool.
         //
         // known txns have already been successfully fetched or received over gossip.
         //
         // most hashes will be filtered out here since the mempool protocol is a gossip
         // protocol, healthy peers will send many of the same hashes.
         //
-        let hashes_count_pre_pool_filter = partially_valid_msg.len();
-        self.pool.retain_unknown(&mut partially_valid_msg);
-        if hashes_count_pre_pool_filter > partially_valid_msg.len() {
-            let already_known_hashes_count =
-                hashes_count_pre_pool_filter - partially_valid_msg.len();
+        let hashes_count_pre_pool_filter = announcement.len();
+        self.pool.retain_unknown(&mut announcement);
+        if hashes_count_pre_pool_filter > announcement.len() {
+            let already_known_hashes_count = hashes_count_pre_pool_filter - announcement.len();
             self.metrics
                 .occurrences_hashes_already_in_pool
                 .increment(already_known_hashes_count as u64);
         }
 
-        if partially_valid_msg.is_empty() {
-            // nothing to request
-            return
-        }
-
-        let mut valid_announcement_data =
-            ValidAnnouncementData::from_partially_valid_data(partially_valid_msg);
-
-        if valid_announcement_data.is_empty() {
-            // no valid announcement data
-            return
-        }
-
-        // 5. filter out already seen unknown hashes
-        //
-        // seen hashes are already in the tx fetcher, pending fetch.
-        //
-        // for any seen hashes add the peer as fallback. unseen hashes are loaded into the tx
-        // fetcher, hence they should be valid at this point.
-        let bad_imports = &self.bad_imports;
-        self.transaction_fetcher.filter_unseen_and_pending_hashes(
-            &mut valid_announcement_data,
-            |hash| bad_imports.contains(hash),
-            &peer_id,
-            &client,
-        );
-
-        if valid_announcement_data.is_empty() {
+        if announcement.is_empty() {
             // nothing to request
             return
         }
 
         trace!(target: "net::tx::propagation",
             peer_id=format!("{peer_id:#}"),
-            hashes_len=valid_announcement_data.len(),
-            hashes=?valid_announcement_data.keys(),
-            msg_version=%valid_announcement_data.msg_version(),
+            hashes_len=announcement.len(),
+            msg_version=%announcement.version(),
             client_version=%client,
-            "received previously unseen and pending hashes in announcement from peer"
+            "received unknown hashes in announcement from peer"
         );
 
-        // only send request for hashes to idle peer, otherwise buffer hashes storing peer as
-        // fallback
-        if !self.transaction_fetcher.is_idle(&peer_id) {
-            // load message version before announcement data is destructed in packing
-            let msg_version = valid_announcement_data.msg_version();
-            let (hashes, _version) = valid_announcement_data.into_request_hashes();
-
-            trace!(target: "net::tx",
-                peer_id=format!("{peer_id:#}"),
-                hashes=?*hashes,
-                %msg_version,
-                %client,
-                "buffering hashes announced by busy peer"
-            );
-
-            self.transaction_fetcher.buffer_hashes(hashes, Some(peer_id));
-
-            return
-        }
-
-        let mut hashes_to_request =
-            RequestTxHashes::with_capacity(valid_announcement_data.len() / 4);
-        let surplus_hashes =
-            self.transaction_fetcher.pack_request(&mut hashes_to_request, valid_announcement_data);
-
-        if !surplus_hashes.is_empty() {
-            trace!(target: "net::tx",
-                peer_id=format!("{peer_id:#}"),
-                surplus_hashes=?*surplus_hashes,
-                %client,
-                "some hashes in announcement from peer didn't fit in `GetPooledTransactions` request, buffering surplus hashes"
-            );
-
-            self.transaction_fetcher.buffer_hashes(surplus_hashes, Some(peer_id));
-        }
-
-        trace!(target: "net::tx",
-            peer_id=format!("{peer_id:#}"),
-            hashes=?*hashes_to_request,
-            %client,
-            "sending hashes in `GetPooledTransactions` request to peer's session"
-        );
-
-        // request the missing transactions
-        //
-        // get handle to peer's session again, at this point we know it exists
-        let Some(peer) = self.peers.get_mut(&peer_id) else { return };
-        if let Some(failed_to_request_hashes) =
-            self.transaction_fetcher.request_transactions_from_peer(hashes_to_request, peer)
-        {
-            let conn_eth_version = peer.version;
-
-            trace!(target: "net::tx",
-                peer_id=format!("{peer_id:#}"),
-                failed_to_request_hashes=?*failed_to_request_hashes,
-                %conn_eth_version,
-                %client,
-                "sending `GetPooledTransactions` request to peer's session failed, buffering hashes"
-            );
-            self.transaction_fetcher.buffer_hashes(failed_to_request_hashes, Some(peer_id));
-        }
+        // Queue hashes for fetching; requests are sent when the manager is polled.
+        self.transaction_fetcher.on_announcement(peer_id, announcement);
     }
 }
 
@@ -853,9 +804,9 @@ impl<Pool, N> TransactionsManager<Pool, N>
 where
     Pool: TransactionPool + Unpin + 'static,
     N: NetworkPrimitives<
-            BroadcastedTransaction: SignedTransaction,
-            PooledTransaction: SignedTransaction,
-        > + Unpin,
+        BroadcastedTransaction: SignedTransaction,
+        PooledTransaction: SignedTransaction,
+    >,
     Pool::Transaction:
         PoolTransaction<Consensus = N::BroadcastedTransaction, Pooled = N::PooledTransaction>,
 {
@@ -936,14 +887,14 @@ where
 
         // send full transactions, if any
         if let Some(new_full_transactions) = full {
-            for tx in &new_full_transactions {
-                propagated.record(*tx.tx_hash(), PropagateKind::Full(peer_id));
+            for hash in new_full_transactions.iter_hashes() {
+                propagated.record(*hash, PropagateKind::Full(peer_id));
                 // mark transaction as seen by peer
-                peer.seen_transactions.insert(*tx.tx_hash());
+                peer.seen_transactions.insert(*hash);
             }
 
             // send full transactions
-            self.network.send_transactions(peer_id, new_full_transactions);
+            self.network.send_broadcast_pool_transactions(peer_id, new_full_transactions);
         }
 
         // Update propagated transactions metrics
@@ -997,11 +948,9 @@ where
                 return
             }
 
-            if let Some(peer) = self.peers.get_mut(&peer_id) {
-                for hash in new_pooled_hashes.iter_hashes().copied() {
-                    propagated.record(hash, PropagateKind::Hash(peer_id));
-                    peer.seen_transactions.insert(hash);
-                }
+            for hash in new_pooled_hashes.iter_hashes().copied() {
+                propagated.record(hash, PropagateKind::Hash(peer_id));
+                peer.seen_transactions.insert(hash);
             }
 
             trace!(target: "net::tx::propagation", ?peer_id, ?new_pooled_hashes, "Propagating transactions to peer");
@@ -1027,7 +976,7 @@ where
     /// Note: EIP-4844 are disallowed from being broadcast in full and are only ever sent as hashes, see also <https://eips.ethereum.org/EIPS/eip-4844#networking>.
     fn propagate_transactions(
         &mut self,
-        to_propagate: Vec<PropagateTransaction<N::BroadcastedTransaction>>,
+        to_propagate: Vec<PropagateTransaction>,
         propagation_mode: PropagationMode,
     ) -> PropagatedTransactions {
         let mut propagated = PropagatedTransactions::default();
@@ -1039,28 +988,35 @@ where
         let max_num_full = self.config.propagation_mode.full_peer_count(self.peers.len());
 
         // Note: Assuming ~random~ order due to random state of the peers map hasher
-        for (peer_idx, (peer_id, peer)) in self.peers.iter_mut().enumerate() {
+        let mut num_full_peers = 0;
+        for (peer_id, peer) in &mut self.peers {
             if !self.policies.propagation_policy().can_propagate(peer) {
                 // skip peers we should not propagate to
                 continue
             }
+
             // determine whether to send full tx objects or hashes.
-            let mut builder = if peer_idx > max_num_full {
-                PropagateTransactionsBuilder::pooled(peer.version)
+            let mut builder = if num_full_peers < max_num_full {
+                num_full_peers += 1;
+                PropagateTransactionsBuilder::full(peer.version, to_propagate.len())
             } else {
-                PropagateTransactionsBuilder::full(peer.version)
+                PropagateTransactionsBuilder::pooled(peer.version, to_propagate.len())
             };
 
+            // Transactions are optimistically marked as seen by the peer when included in the
+            // message, see `PeerMetadata::seen_transactions`.
             if propagation_mode.is_forced() {
-                builder.extend(to_propagate.iter());
+                for tx in &to_propagate {
+                    peer.seen_transactions.insert(*tx.tx_hash());
+                    builder.push(tx);
+                }
             } else {
                 // Iterate through the transactions to propagate and fill the hashes and full
                 // transaction lists, before deciding whether or not to send full transactions to
                 // the peer.
                 for tx in &to_propagate {
-                    // Only proceed if the transaction is not in the peer's list of seen
-                    // transactions
-                    if !peer.seen_transactions.contains(tx.tx_hash()) {
+                    // Only include the transaction if the peer hasn't seen it yet
+                    if peer.seen_transactions.insert(*tx.tx_hash()) {
                         builder.push(tx);
                     }
                 }
@@ -1075,15 +1031,27 @@ where
 
             // send hashes if any
             if let Some(mut new_pooled_hashes) = pooled {
-                // enforce tx soft limit per message for the (unlikely) event the number of
-                // hashes exceeds it
-                new_pooled_hashes
-                    .truncate(SOFT_LIMIT_COUNT_HASHES_IN_NEW_POOLED_TRANSACTIONS_BROADCAST_MESSAGE);
+                // Unhappy path: too many hashes for a single message. This should not happen
+                // during regular propagation, which is capped at the soft limit per batch, and
+                // is only reachable via manual propagation commands with oversized batches.
+                if new_pooled_hashes.len() >
+                    SOFT_LIMIT_COUNT_HASHES_IN_NEW_POOLED_TRANSACTIONS_BROADCAST_MESSAGE
+                {
+                    // hashes that exceed the limit are not sent, so they must not be tracked as
+                    // seen by the peer
+                    for hash in new_pooled_hashes
+                        .iter_hashes()
+                        .skip(SOFT_LIMIT_COUNT_HASHES_IN_NEW_POOLED_TRANSACTIONS_BROADCAST_MESSAGE)
+                    {
+                        peer.seen_transactions.remove(hash);
+                    }
+                    new_pooled_hashes.truncate(
+                        SOFT_LIMIT_COUNT_HASHES_IN_NEW_POOLED_TRANSACTIONS_BROADCAST_MESSAGE,
+                    );
+                }
 
                 for hash in new_pooled_hashes.iter_hashes().copied() {
                     propagated.record(hash, PropagateKind::Hash(*peer_id));
-                    // mark transaction as seen by peer
-                    peer.seen_transactions.insert(hash);
                 }
 
                 trace!(target: "net::tx", ?peer_id, num_txs=?new_pooled_hashes.len(), "Propagating tx hashes to peer");
@@ -1094,16 +1062,14 @@ where
 
             // send full transactions, if any
             if let Some(new_full_transactions) = full {
-                for tx in &new_full_transactions {
-                    propagated.record(*tx.tx_hash(), PropagateKind::Full(*peer_id));
-                    // mark transaction as seen by peer
-                    peer.seen_transactions.insert(*tx.tx_hash());
+                for hash in new_full_transactions.iter_hashes() {
+                    propagated.record(*hash, PropagateKind::Full(*peer_id));
                 }
 
                 trace!(target: "net::tx", ?peer_id, num_txs=?new_full_transactions.len(), "Propagating full transactions to peer");
 
                 // send full transactions
-                self.network.send_transactions(*peer_id, new_full_transactions);
+                self.network.send_broadcast_pool_transactions(*peer_id, new_full_transactions);
             }
         }
 
@@ -1144,10 +1110,18 @@ where
             return
         }
         if let Some(peer) = self.peers.get_mut(&peer_id) {
+            // don't serve pending transactions to peers the policy doesn't propagate to
+            if !self.policies.propagation_policy().can_propagate(peer) {
+                let _ = response.send(Ok(PooledTransactions::default()));
+                return
+            }
+
             let transactions = self.pool.get_pooled_transaction_elements(
                 request.0,
                 GetPooledTransactionLimit::ResponseSizeSoftLimit(
-                    self.transaction_fetcher.info.soft_limit_byte_size_pooled_transactions_response,
+                    self.config
+                        .transaction_fetcher_config
+                        .soft_limit_byte_size_pooled_transactions_response,
                 ),
             );
             trace!(target: "net::tx::propagation", sent_txs=?transactions.iter().map(|tx| tx.tx_hash()), "Sending requested transactions to peer");
@@ -1187,7 +1161,7 @@ where
                 self.pool.on_propagated(propagated);
             }
             TransactionsCommand::GetTransactionHashes { peers, tx } => {
-                let mut res = HashMap::with_capacity(peers.len());
+                let mut res = HashMap::with_capacity_and_hasher(peers.len(), Default::default());
                 for peer_id in peers {
                     let hashes = self
                         .peers
@@ -1238,6 +1212,11 @@ where
         // transactions in the pool.
         if self.network.is_initially_syncing() || self.network.tx_gossip_disabled() {
             trace!(target: "net::tx", ?peer_id, "Skipping transaction broadcast: node syncing or gossip disabled");
+            return
+        }
+
+        // skip peers we should not propagate to
+        if !self.policies.propagation_policy().can_propagate(peer) {
             return
         }
 
@@ -1343,12 +1322,22 @@ where
     }
 
     /// Starts the import process for the given transactions.
+    ///
+    /// Callers must check import capacity before consuming a fetch response. Responses are
+    /// admitted in full and may overshoot the soft limit by one bounded response; broadcasts
+    /// are truncated to their available capacity.
     fn import_transactions(
         &mut self,
         peer_id: PeerId,
         transactions: PooledTransactions<N::PooledTransaction>,
         source: TransactionSource,
     ) {
+        // Responses can outlive their session, so recheck the current ingress policy before
+        // importing them. Restricted policies must not rely on admission at announcement time.
+        if !self.accepts_incoming_from(&peer_id) {
+            return
+        }
+
         // If the node is pipeline syncing, ignore transactions
         if self.network.is_initially_syncing() {
             return
@@ -1357,43 +1346,67 @@ where
             return
         }
 
-        // Early return if we don't have capacity for any imports
-        if !self.has_capacity_for_pending_pool_imports() {
+        let (version, client_version) = match &source {
+            TransactionSource::Broadcast => {
+                let Some(peer) = self.peers.get(&peer_id) else { return };
+                (peer.version(), peer.client_version.clone())
+            }
+            TransactionSource::Response { version, client_version } => {
+                (*version, client_version.clone())
+            }
+        };
+        let is_broadcast = source.is_broadcast();
+        let mut transactions = transactions.0;
+
+        // Fetched batches may exceed the soft limit: their request size is bounded, and the
+        // caller stops consuming responses until capacity becomes available again.
+        if is_broadcast {
+            let capacity = self.remaining_broadcast_import_capacity();
+            if transactions.len() > capacity {
+                self.metrics
+                    .skipped_transactions_pending_pool_imports_at_capacity
+                    .increment((transactions.len() - capacity) as u64);
+                transactions.truncate(capacity);
+            }
+        }
+
+        if transactions.is_empty() {
             return
         }
 
-        let mut transactions = transactions.0;
-
-        // Truncate to remaining capacity early to bound work on all subsequent processing.
-        // Well-behaved peers follow the 4096 soft limit, so oversized payloads are likely
-        // malicious and we avoid wasting CPU on them.
-        let capacity = self.remaining_pool_import_capacity();
-        if transactions.len() > capacity {
-            let skipped = transactions.len() - capacity;
-            transactions.truncate(capacity);
-            self.metrics
-                .skipped_transactions_pending_pool_imports_at_capacity
-                .increment(skipped as u64);
-            trace!(target: "net::tx", skipped, capacity, "Truncated transactions batch to capacity");
-        }
-
-        let Some(peer) = self.peers.get_mut(&peer_id) else { return };
-        let client_version = peer.client_version.clone();
-
         let start = Instant::now();
 
-        // mark the transactions as received
+        // Stop fetching transactions received through either broadcasts or responses.
         self.transaction_fetcher
-            .remove_hashes_from_transaction_fetcher(transactions.iter().map(|tx| tx.tx_hash()));
+            .on_transactions_received(transactions.iter().map(|tx| tx.tx_hash()));
 
         // track that the peer knows these transaction, but only if this is a new broadcast.
         // If we received the transactions as the response to our `GetPooledTransactions``
         // requests (based on received `NewPooledTransactionHashes`) then we already
         // recorded the hashes as seen by this peer in `Self::on_new_pooled_transaction_hashes`.
         let mut num_already_seen_by_peer = 0;
-        for tx in &transactions {
-            if source.is_broadcast() && !peer.seen_transactions.insert(*tx.tx_hash()) {
-                num_already_seen_by_peer += 1;
+        if is_broadcast && let Some(peer) = self.peers.get_mut(&peer_id) {
+            for tx in &transactions {
+                if !peer.seen_transactions.insert(*tx.tx_hash()) {
+                    num_already_seen_by_peer += 1;
+                }
+            }
+        }
+
+        // Eth/72 `PooledTransactions` responses elide blob payloads from type 3 transactions per
+        // EIP-8070, so their sidecars can never validate. Drop them before touching the pool;
+        // geth equivalently diverts these bodies into a buffer that is completed with cells
+        // fetched via `GetCells`, which is not implemented yet.
+        if version.is_eth72() {
+            let len_before = transactions.len();
+            transactions.retain(|tx| !tx.is_eip4844());
+            let dropped = len_before - transactions.len();
+            if dropped > 0 {
+                trace!(target: "net::tx",
+                    peer_id=format!("{peer_id:#}"),
+                    dropped,
+                    "dropped blob transactions from eth72 response, cell fetching not implemented"
+                );
             }
         }
 
@@ -1404,7 +1417,10 @@ where
         // cheap in-memory checks against local maps
         transactions.retain(|tx| {
             if let Entry::Occupied(mut entry) = self.transactions_by_peers.entry(*tx.tx_hash()) {
-                entry.get_mut().insert(peer_id);
+                let peers = entry.get_mut();
+                if !peers.contains(&peer_id) {
+                    peers.push(peer_id);
+                }
                 return false
             }
             if self.bad_imports.contains(tx.tx_hash()) {
@@ -1432,27 +1448,25 @@ where
 
         let txs_len = transactions.len();
 
-        let new_txs = transactions
-            .into_par_iter()
-            .filter_map(|tx| match tx.try_into_recovered() {
-                Ok(tx) => Some(Pool::Transaction::from_pooled(tx)),
+        let sender_recovery_cache = self.sender_recovery_cache.as_ref();
+        let recover = |tx: <Pool::Transaction as PoolTransaction>::Pooled| {
+            match Pool::Transaction::try_recover_with_cache_opt(tx, sender_recovery_cache) {
+                Ok(tx) => Some(tx),
                 Err(badtx) => {
-                    trace!(target: "net::tx",
-                        peer_id=format!("{peer_id:#}"),
-                        hash=%badtx.tx_hash(),
-                        client_version=%client_version,
-                        "failed ecrecovery for transaction"
-                    );
+                    trace!(target: "net::tx", peer_id=format!("{peer_id:#}"), hash=%badtx.tx_hash(),
+                        client_version=%client_version, "failed ecrecovery for transaction");
                     None
                 }
-            })
-            .collect::<Vec<_>>();
+            }
+        };
+
+        let new_txs = transactions.into_par_iter().filter_map(recover).collect::<Vec<_>>();
 
         has_bad_transactions |= new_txs.len() != txs_len;
 
         // Record the transactions as seen by the peer
         for tx in &new_txs {
-            self.transactions_by_peers.insert(*tx.hash(), HashSet::from([peer_id]));
+            self.transactions_by_peers.insert(*tx.hash(), smallvec::smallvec![peer_id]);
         }
 
         // 3. import new transactions as a batch to minimize lock contention on the underlying
@@ -1509,8 +1523,18 @@ where
     /// Processes a [`FetchEvent`].
     fn on_fetch_event(&mut self, fetch_event: FetchEvent<N::PooledTransaction>) {
         match fetch_event {
-            FetchEvent::TransactionsFetched { peer_id, transactions, report_peer } => {
-                self.import_transactions(peer_id, transactions, TransactionSource::Response);
+            FetchEvent::TransactionsFetched {
+                peer_id,
+                transactions,
+                report_peer,
+                version,
+                client_version,
+            } => {
+                self.import_transactions(
+                    peer_id,
+                    transactions,
+                    TransactionSource::Response { version, client_version },
+                );
                 if report_peer {
                     self.report_peer(peer_id, ReputationChangeKind::BadTransactions);
                 }
@@ -1536,9 +1560,9 @@ where
 impl<
         Pool: TransactionPool + Unpin + 'static,
         N: NetworkPrimitives<
-                BroadcastedTransaction: SignedTransaction,
-                PooledTransaction: SignedTransaction,
-            > + Unpin,
+            BroadcastedTransaction: SignedTransaction,
+            PooledTransaction: SignedTransaction,
+        >,
     > Future for TransactionsManager<Pool, N>
 where
     Pool::Transaction:
@@ -1566,9 +1590,65 @@ where
             |event| this.on_network_event(event)
         );
 
+        // Advance incoming transaction events (stream new txns/announcements from
+        // network manager and queue for import to pool/fetch txns).
+        //
+        // Announcements are queued in the transaction fetcher, requests for them are sent
+        // further below.
+        //
+        // Decoded broadcasts may exceed the available import capacity. Admission truncates
+        // them before filtering and sender recovery, reserving capacity for fetched transactions.
+        let maybe_more_tx_events = metered_poll_nested_stream_with_budget!(
+            poll_durations.acc_tx_events,
+            "net::tx",
+            "Network transaction events stream",
+            DEFAULT_BUDGET_TRY_DRAIN_NETWORK_TRANSACTION_EVENTS,
+            this.transaction_events.poll_next_unpin(cx),
+            |event: NetworkTransactionEvent<N>| this.on_network_tx_event(event),
+        );
+
+        // Advance inflight fetch requests (flush transaction fetcher and queue for
+        // import to pool).
+        //
+        // Pace response consumption with the soft import limit. Dispatch checks capacity but
+        // does not reserve it for outstanding requests, so concurrent responses can exceed it.
+        // Admit one complete response while capacity remains (at most 256 transactions), then
+        // pause here if it fills or overshoots the limit. Existing requests continue in flight;
+        // completed responses wait in their channels until pool imports free capacity.
+        let mut maybe_more_tx_fetch_events = metered_poll_nested_stream_with_budget!(
+            poll_durations.acc_fetch_events,
+            "net::tx",
+            "Transaction fetch events stream",
+            DEFAULT_BUDGET_TRY_DRAIN_STREAM,
+            if this.has_capacity_for_pending_pool_imports() {
+                this.transaction_fetcher.poll_next_unpin(cx)
+            } else {
+                Poll::Pending
+            },
+            |event| this.on_fetch_event(event),
+        );
+
+        // Remember whether response polling stopped at capacity so imports completing below
+        // can trigger another poll even if the waiting response has not registered a waker yet.
+        let fetcher_paused_at_capacity = !this.has_capacity_for_pending_pool_imports();
+
+        // Advance admitted batches and free capacity for more responses.
+        let maybe_more_pool_imports = metered_poll_nested_stream_with_budget!(
+            poll_durations.acc_pending_imports,
+            "net::tx",
+            "Batched pool imports stream",
+            DEFAULT_BUDGET_TRY_DRAIN_PENDING_POOL_IMPORTS,
+            this.pool_imports.poll_next_unpin(cx),
+            |batch_results| this.on_batch_import_result(batch_results)
+        );
+
         // Advances new __pending__ transactions, transactions that were successfully inserted into
         // pending set in pool (are valid), and propagates them (inform peers which
         // transactions we have seen).
+        //
+        // This is polled after pool imports so transactions that became pending in this poll
+        // iteration are propagated immediately, instead of waiting for the task to be woken
+        // again.
         //
         // We try to drain this to batch the transactions in a single message.
         //
@@ -1601,80 +1681,15 @@ where
             this.on_new_pending_transactions(new_txs);
         }
 
-        // Advance incoming transaction events (stream new txns/announcements from
-        // network manager and queue for import to pool/fetch txns).
-        //
-        // This will potentially remove hashes from hashes pending fetch, it the event
-        // is an announcement (if same hashes are announced that didn't fit into a
-        // previous request).
-        //
-        // The smallest decodable transaction is an empty legacy transaction, 10 bytes
-        // (128 KiB / 10 bytes > 13k transactions).
-        //
-        // If this is an event with `Transactions` message, since transactions aren't
-        // validated until they are inserted into the pool, this can potentially queue
-        // >13k transactions for insertion to pool. More if the message size is bigger
-        // than the soft limit on a `Transactions` broadcast message, which is 128 KiB.
-        let maybe_more_tx_events = metered_poll_nested_stream_with_budget!(
-            poll_durations.acc_tx_events,
-            "net::tx",
-            "Network transaction events stream",
-            DEFAULT_BUDGET_TRY_DRAIN_NETWORK_TRANSACTION_EVENTS,
-            this.transaction_events.poll_next_unpin(cx),
-            |event: NetworkTransactionEvent<N>| this.on_network_tx_event(event),
-        );
-
-        // Advance inflight fetch requests (flush transaction fetcher and queue for
-        // import to pool).
-        //
-        // The smallest decodable transaction is an empty legacy transaction, 10 bytes
-        // (2 MiB / 10 bytes > 200k transactions).
-        //
-        // Since transactions aren't validated until they are inserted into the pool,
-        // this can potentially queue >200k transactions for insertion to pool. More
-        // if the message size is bigger than the soft limit on a `PooledTransactions`
-        // response which is 2 MiB.
-        let mut maybe_more_tx_fetch_events = metered_poll_nested_stream_with_budget!(
-            poll_durations.acc_fetch_events,
-            "net::tx",
-            "Transaction fetch events stream",
-            DEFAULT_BUDGET_TRY_DRAIN_STREAM,
-            this.transaction_fetcher.poll_next_unpin(cx),
-            |event| this.on_fetch_event(event),
-        );
-
-        // Advance pool imports (flush txns to pool).
-        //
-        // Note, this is done in batches. A batch is filled from one `Transactions`
-        // broadcast messages or one `PooledTransactions` response at a time. The
-        // minimum batch size is 1 transaction (and might often be the case with blob
-        // transactions).
-        //
-        // The smallest decodable transaction is an empty legacy transaction, 10 bytes
-        // (2 MiB / 10 bytes > 200k transactions).
-        //
-        // Since transactions aren't validated until they are inserted into the pool,
-        // this can potentially validate >200k transactions. More if the message size
-        // is bigger than the soft limit on a `PooledTransactions` response which is
-        // 2 MiB (`Transactions` broadcast messages is smaller, 128 KiB).
-        let maybe_more_pool_imports = metered_poll_nested_stream_with_budget!(
-            poll_durations.acc_pending_imports,
-            "net::tx",
-            "Batched pool imports stream",
-            DEFAULT_BUDGET_TRY_DRAIN_PENDING_POOL_IMPORTS,
-            this.pool_imports.poll_next_unpin(cx),
-            |batch_results| this.on_batch_import_result(batch_results)
-        );
-
-        // Tries to drain hashes pending fetch cache if the tx manager currently has
-        // capacity for this (fetch txns).
-        //
-        // Sends at most one request.
+        // Dispatch only below the soft import limit. Each request is capped independently;
+        // outstanding requests do not reserve capacity against other peers.
         duration_metered_exec!(
             {
-                if this.has_capacity_for_fetching_pending_hashes() &&
-                    this.on_fetch_hashes_pending_fetch()
-                {
+                // Peers whose session channel was full are retried on the next poll, which any
+                // other event triggers.
+                let budget = this.remaining_pool_import_capacity();
+                if budget > 0 && this.transaction_fetcher.dispatch(&this.peers, budget) > 0 {
+                    // poll the fetcher again so the new inflight requests register their wakers
                     maybe_more_tx_fetch_events = true;
                 }
             },
@@ -1693,13 +1708,18 @@ where
 
         this.transaction_fetcher.update_metrics();
 
+        // Revisit the fetcher if imports freed capacity after response polling was paused.
+        let resume_fetcher =
+            fetcher_paused_at_capacity && this.has_capacity_for_pending_pool_imports();
+
         // all channels are fully drained and import futures pending
         if maybe_more_network_events ||
             maybe_more_commands ||
             maybe_more_tx_events ||
             maybe_more_tx_fetch_events ||
             maybe_more_pool_imports ||
-            maybe_more_pending_txns
+            maybe_more_pending_txns ||
+            resume_fetcher
         {
             // make sure we're woken up again
             cx.waker().wake_by_ref();
@@ -1737,51 +1757,129 @@ impl PropagationMode {
 
 /// A transaction that's about to be propagated to multiple peers.
 #[derive(Debug, Clone)]
-struct PropagateTransaction<T = TransactionSigned> {
-    size: usize,
-    transaction: Arc<T>,
+struct PropagateTransaction {
+    is_broadcastable_in_full: bool,
+    /// Size advertised in `NewPooledTransactionHashes` metadata and used for full broadcast
+    /// soft-limit accounting.
+    ///
+    /// This is the network encoded transaction size. For pool-backed blob transactions, this is
+    /// the pool's cached encoded length, which includes the sidecar returned by
+    /// `PooledTransactions`.
+    propagation_size: usize,
+    transaction: LazyEncodedTransaction,
 }
 
-impl<T: SignedTransaction> PropagateTransaction<T> {
-    /// Create a new instance from a transaction.
-    pub fn new(transaction: T) -> Self {
-        let size = transaction.length();
-        Self { size, transaction: Arc::new(transaction) }
+impl PropagateTransaction {
+    /// Create a new instance from a transaction supplied directly for propagation.
+    ///
+    /// Direct transactions use their EIP-2718 encoded length so eth/68+ hash announcements carry
+    /// the same size metadata as [`NewPooledTransactionHashes68::push`] and
+    /// [`NewPooledTransactionHashes72::push`].
+    fn new<T: SignedTransaction>(transaction: T) -> Self {
+        let is_broadcastable_in_full = transaction.is_broadcastable_in_full();
+        let propagation_size = transaction.encode_2718_len();
+
+        Self {
+            is_broadcastable_in_full,
+            propagation_size,
+            transaction: LazyEncoded::new(transaction),
+        }
     }
 
-    /// Create a new instance from a pooled transaction
-    fn pool_tx<P>(tx: Arc<ValidPoolTransaction<P>>) -> Self
-    where
-        P: PoolTransaction<Consensus = T>,
-    {
-        let size = tx.encoded_length();
-        let transaction = tx.transaction.clone_into_consensus();
-        let transaction = Arc::new(transaction.into_inner());
-        Self { size, transaction }
+    /// Create a new instance from a pooled transaction.
+    ///
+    /// Pool transactions already cache the network encoded size used by txpool admission and
+    /// pooled hash announcements. For blob transactions, this includes the sidecar size expected in
+    /// a `PooledTransactions` response.
+    fn pool_tx<P: PoolTransaction>(tx: Arc<ValidPoolTransaction<P>>) -> Self {
+        let is_broadcastable_in_full = tx.transaction.consensus_ref().is_broadcastable_in_full();
+        let propagation_size = tx.encoded_length();
+        Self {
+            is_broadcastable_in_full,
+            propagation_size,
+            transaction: LazyEncoded::new(PropagatePooledTransactionEncoder::new(tx)),
+        }
     }
 
     fn tx_hash(&self) -> &TxHash {
         self.transaction.tx_hash()
+    }
+
+    /// Returns the network encoded size used for propagation limits and hash metadata.
+    const fn propagation_size(&self) -> usize {
+        self.propagation_size
+    }
+
+    fn tx_type(&self) -> u8 {
+        self.transaction.ty()
+    }
+
+    const fn is_broadcastable_in_full(&self) -> bool {
+        self.is_broadcastable_in_full
+    }
+
+    fn shared(&self) -> LazyEncodedTransaction {
+        self.transaction.clone()
+    }
+}
+
+/// A pooled transaction encoder that avoids cloning into the consensus transaction for propagation.
+#[derive(Debug)]
+struct PropagatePooledTransactionEncoder<P: PoolTransaction> {
+    transaction: Arc<ValidPoolTransaction<P>>,
+}
+
+impl<P: PoolTransaction> PropagatePooledTransactionEncoder<P> {
+    const fn new(transaction: Arc<ValidPoolTransaction<P>>) -> Self {
+        Self { transaction }
+    }
+
+    fn encode_uncached(&self, out: &mut dyn BufMut) {
+        (*self.transaction.transaction.consensus_ref().inner()).encode(out);
+    }
+}
+
+impl<P: PoolTransaction> Encodable for PropagatePooledTransactionEncoder<P> {
+    fn encode(&self, out: &mut dyn BufMut) {
+        self.encode_uncached(out);
+    }
+
+    fn length(&self) -> usize {
+        (*self.transaction.transaction.consensus_ref().inner()).length()
+    }
+}
+
+impl<P: PoolTransaction> TxHashRef for PropagatePooledTransactionEncoder<P> {
+    fn tx_hash(&self) -> &TxHash {
+        self.transaction.hash()
+    }
+}
+
+impl<P: PoolTransaction> Typed2718 for PropagatePooledTransactionEncoder<P> {
+    fn ty(&self) -> u8 {
+        self.transaction.transaction.ty()
     }
 }
 
 /// Helper type to construct the appropriate message to send to the peer based on whether the peer
 /// should receive them in full or as pooled
 #[derive(Debug, Clone)]
-enum PropagateTransactionsBuilder<T> {
+enum PropagateTransactionsBuilder {
     Pooled(PooledTransactionsHashesBuilder),
-    Full(FullTransactionsBuilder<T>),
+    Full(FullTransactionsBuilder),
 }
 
-impl<T> PropagateTransactionsBuilder<T> {
-    /// Create a builder for pooled transactions
-    fn pooled(version: EthVersion) -> Self {
-        Self::Pooled(PooledTransactionsHashesBuilder::new(version))
+impl PropagateTransactionsBuilder {
+    /// Create a builder for pooled transactions with capacity for the expected number of
+    /// transactions.
+    fn pooled(version: EthVersion, capacity: usize) -> Self {
+        Self::Pooled(PooledTransactionsHashesBuilder::with_capacity(version, capacity))
     }
 
-    /// Create a builder that sends transactions in full and records transactions that don't fit.
-    fn full(version: EthVersion) -> Self {
-        Self::Full(FullTransactionsBuilder::new(version))
+    /// Create a builder that sends transactions in full and records transactions that don't fit,
+    /// with capacity for the expected number of transactions.
+    fn full(version: EthVersion, capacity: usize) -> Self {
+        Self::Full(FullTransactionsBuilder::with_capacity(version, capacity))
     }
 
     /// Returns true if no transactions are recorded.
@@ -1793,7 +1891,7 @@ impl<T> PropagateTransactionsBuilder<T> {
     }
 
     /// Consumes the type and returns the built messages that should be sent to the peer.
-    fn build(self) -> PropagateTransactions<T> {
+    fn build(self) -> PropagateTransactions {
         match self {
             Self::Pooled(pooled) => {
                 PropagateTransactions { pooled: Some(pooled.build()), full: None }
@@ -1803,16 +1901,9 @@ impl<T> PropagateTransactionsBuilder<T> {
     }
 }
 
-impl<T: SignedTransaction> PropagateTransactionsBuilder<T> {
-    /// Appends all transactions
-    fn extend<'a>(&mut self, txs: impl IntoIterator<Item = &'a PropagateTransaction<T>>) {
-        for tx in txs {
-            self.push(tx);
-        }
-    }
-
+impl PropagateTransactionsBuilder {
     /// Appends a transaction to the list.
-    fn push(&mut self, transaction: &PropagateTransaction<T>) {
+    fn push(&mut self, transaction: &PropagateTransaction) {
         match self {
             Self::Pooled(builder) => builder.push(transaction),
             Self::Full(builder) => builder.push(transaction),
@@ -1821,11 +1912,11 @@ impl<T: SignedTransaction> PropagateTransactionsBuilder<T> {
 }
 
 /// Represents how the transactions should be sent to a peer if any.
-struct PropagateTransactions<T> {
+struct PropagateTransactions {
     /// The pooled transaction hashes to send.
     pooled: Option<NewPooledTransactionHashes>,
     /// The transactions to send in full.
-    full: Option<Vec<Arc<T>>>,
+    full: Option<BroadcastPoolTransactions>,
 }
 
 /// Helper type for constructing the full transaction message that enforces the
@@ -1833,16 +1924,16 @@ struct PropagateTransactions<T> {
 /// and enforces other propagation rules for EIP-4844 and tracks those transactions that can't be
 /// broadcasted in full.
 #[derive(Debug, Clone)]
-struct FullTransactionsBuilder<T> {
+struct FullTransactionsBuilder {
     /// The soft limit to enforce for a single broadcast message of full transactions.
     total_size: usize,
     /// All transactions to be broadcasted.
-    transactions: Vec<Arc<T>>,
+    transactions: Vec<LazyEncodedTransaction>,
     /// Transactions that didn't fit into the broadcast message
     pooled: PooledTransactionsHashesBuilder,
 }
 
-impl<T> FullTransactionsBuilder<T> {
+impl FullTransactionsBuilder {
     /// Create a builder for the negotiated version of the peer's session
     fn new(version: EthVersion) -> Self {
         Self {
@@ -1852,22 +1943,33 @@ impl<T> FullTransactionsBuilder<T> {
         }
     }
 
+    /// Create a builder with capacity for the expected number of full transactions.
+    ///
+    /// The overflow hashes builder remains lazily allocated since most transactions are expected
+    /// to be broadcast in full.
+    fn with_capacity(version: EthVersion, capacity: usize) -> Self {
+        Self {
+            total_size: 0,
+            pooled: PooledTransactionsHashesBuilder::new(version),
+            transactions: Vec::with_capacity(capacity),
+        }
+    }
+
     /// Returns whether or not any transactions are in the [`FullTransactionsBuilder`].
     fn is_empty(&self) -> bool {
         self.transactions.is_empty() && self.pooled.is_empty()
     }
 
     /// Returns the messages that should be propagated to the peer.
-    fn build(self) -> PropagateTransactions<T> {
+    fn build(self) -> PropagateTransactions {
         let pooled = Some(self.pooled.build()).filter(|pooled| !pooled.is_empty());
-        let full = Some(self.transactions).filter(|full| !full.is_empty());
+        let full =
+            (!self.transactions.is_empty()).then_some(BroadcastPoolTransactions(self.transactions));
         PropagateTransactions { pooled, full }
     }
-}
 
-impl<T: SignedTransaction> FullTransactionsBuilder<T> {
     /// Appends all transactions.
-    fn extend(&mut self, txs: impl IntoIterator<Item = PropagateTransaction<T>>) {
+    fn extend(&mut self, txs: impl IntoIterator<Item = PropagateTransaction>) {
         for tx in txs {
             self.push(&tx)
         }
@@ -1877,12 +1979,12 @@ impl<T: SignedTransaction> FullTransactionsBuilder<T> {
     /// exceed the soft maximum target byte size. The limit is soft, meaning if one single
     /// transaction goes over the limit, it will be broadcasted in its own [`Transactions`]
     /// message. The same pattern is followed in filling a [`GetPooledTransactions`] request in
-    /// [`TransactionFetcher::fill_request_from_hashes_pending_fetch`].
+    /// [`TransactionFetcher::dispatch`].
     ///
     /// If the transaction is unsuitable for broadcast or would exceed the softlimit, it is appended
     /// to list of pooled transactions, (e.g. 4844 transactions).
     /// See also [`SignedTransaction::is_broadcastable_in_full`].
-    fn push(&mut self, transaction: &PropagateTransaction<T>) {
+    fn push(&mut self, transaction: &PropagateTransaction) {
         // Do not send full 4844 transaction hashes to peers.
         //
         //  Nodes MUST NOT automatically broadcast blob transactions to their peers.
@@ -1891,12 +1993,12 @@ impl<T: SignedTransaction> FullTransactionsBuilder<T> {
         //  via `GetPooledTransactions`.
         //
         // From: <https://eips.ethereum.org/EIPS/eip-4844#networking>
-        if !transaction.transaction.is_broadcastable_in_full() {
+        if !transaction.is_broadcastable_in_full() {
             self.pooled.push(transaction);
             return
         }
 
-        let new_size = self.total_size + transaction.size;
+        let new_size = self.total_size + transaction.propagation_size();
         if new_size > DEFAULT_SOFT_LIMIT_BYTE_SIZE_TRANSACTIONS_BROADCAST_MESSAGE &&
             self.total_size > 0
         {
@@ -1906,7 +2008,7 @@ impl<T: SignedTransaction> FullTransactionsBuilder<T> {
         }
 
         self.total_size = new_size;
-        self.transactions.push(Arc::clone(&transaction.transaction));
+        self.transactions.push(transaction.shared());
     }
 }
 
@@ -1934,7 +2036,12 @@ impl PooledTransactionsHashesBuilder {
             Self::Eth72(msg) => {
                 msg.hashes.push(*pooled_tx.hash());
                 msg.sizes.push(pooled_tx.encoded_length());
-                msg.types.push(pooled_tx.transaction.ty());
+                let ty = pooled_tx.transaction.ty();
+                msg.types.push(ty);
+                if ty == EIP4844_TX_TYPE_ID {
+                    // The pool holds the full sidecar, so every cell can be served.
+                    msg.cell_mask = Some(NewPooledTransactionHashes72::ALL_CELLS_MASK);
+                }
             }
         }
     }
@@ -1958,27 +2065,29 @@ impl PooledTransactionsHashesBuilder {
     }
 
     /// Appends all hashes
-    fn extend<T: SignedTransaction>(
-        &mut self,
-        txs: impl IntoIterator<Item = PropagateTransaction<T>>,
-    ) {
+    fn extend(&mut self, txs: impl IntoIterator<Item = PropagateTransaction>) {
         for tx in txs {
             self.push(&tx);
         }
     }
 
-    fn push<T: SignedTransaction>(&mut self, tx: &PropagateTransaction<T>) {
+    fn push(&mut self, tx: &PropagateTransaction) {
         match self {
             Self::Eth66(msg) => msg.push(*tx.tx_hash()),
             Self::Eth68(msg) => {
                 msg.hashes.push(*tx.tx_hash());
-                msg.sizes.push(tx.size);
-                msg.types.push(tx.transaction.ty());
+                msg.sizes.push(tx.propagation_size());
+                msg.types.push(tx.tx_type());
             }
             Self::Eth72(msg) => {
                 msg.hashes.push(*tx.tx_hash());
-                msg.sizes.push(tx.size);
-                msg.types.push(tx.transaction.ty());
+                msg.sizes.push(tx.propagation_size());
+                let ty = tx.tx_type();
+                msg.types.push(ty);
+                if ty == EIP4844_TX_TYPE_ID {
+                    // The pool holds the full sidecar, so every cell can be served.
+                    msg.cell_mask = Some(NewPooledTransactionHashes72::ALL_CELLS_MASK);
+                }
             }
         }
     }
@@ -1991,6 +2100,20 @@ impl PooledTransactionsHashesBuilder {
                 Self::Eth68(Default::default())
             }
             EthVersion::Eth72 => Self::Eth72(Default::default()),
+        }
+    }
+
+    /// Create a builder for the negotiated version of the peer's session with capacity for the
+    /// expected number of hashes.
+    fn with_capacity(version: EthVersion, capacity: usize) -> Self {
+        match version {
+            EthVersion::Eth66 | EthVersion::Eth67 => {
+                Self::Eth66(NewPooledTransactionHashes66::with_capacity(capacity))
+            }
+            EthVersion::Eth68 | EthVersion::Eth69 | EthVersion::Eth70 | EthVersion::Eth71 => {
+                Self::Eth68(NewPooledTransactionHashes68::with_capacity(capacity))
+            }
+            EthVersion::Eth72 => Self::Eth72(NewPooledTransactionHashes72::with_capacity(capacity)),
         }
     }
 
@@ -2013,11 +2136,16 @@ impl PooledTransactionsHashesBuilder {
 }
 
 /// How we received the transactions.
+#[derive(Debug)]
 enum TransactionSource {
     /// Transactions were broadcast to us via [`Transactions`] message.
     Broadcast,
-    /// Transactions were sent as the response of [`fetcher::GetPooledTxRequest`] issued by us.
-    Response,
+    /// Transactions were sent as the response to a `GetPooledTransactions` request issued by us.
+    Response {
+        /// Session metadata remains available after the responding peer disconnects.
+        version: EthVersion,
+        client_version: Arc<str>,
+    },
 }
 
 // === impl TransactionSource ===
@@ -2107,7 +2235,7 @@ enum TransactionsCommand<N: NetworkPrimitives = EthNetworkPrimitives> {
     /// Propagate a collection of hashes to all peers.
     PropagateTransactions(Vec<TxHash>),
     /// Propagate a collection of broadcastable transactions in full to all peers.
-    BroadcastTransactions(Vec<PropagateTransaction<N::BroadcastedTransaction>>),
+    BroadcastTransactions(Vec<PropagateTransaction>),
     /// Request transaction hashes known by specific peers from the [`TransactionsManager`].
     GetTransactionHashes { peers: Vec<PeerId>, tx: oneshot::Sender<HashMap<PeerId, B256Set>> },
     /// Requests a clone of the sender channel to the peer.
@@ -2220,8 +2348,8 @@ mod tests {
         transactions::config::RelaxedEthAnnouncementFilter,
         NetworkConfigBuilder, NetworkManager,
     };
-    use alloy_consensus::{TxEip1559, TxLegacy};
-    use alloy_eips::eip4844::BlobTransactionValidationError;
+    use alloy_consensus::{Transaction as _, TxEip1559, TxLegacy};
+    use alloy_eips::{eip2718::Encodable2718, eip4844::BlobTransactionValidationError};
     use alloy_primitives::{hex, Signature, TxKind, B256, U256};
     use alloy_rlp::Decodable;
     use futures::FutureExt;
@@ -2235,32 +2363,189 @@ mod tests {
     use reth_storage_api::noop::NoopProvider;
     use reth_tasks::Runtime;
     use reth_transaction_pool::{
+        blobstore::InMemoryBlobStore,
         error::{Eip4844PoolTransactionError, InvalidPoolTransactionError, PoolError},
-        test_utils::{testing_pool, MockTransaction, MockTransactionFactory, TestPool},
+        identifier::SenderIdentifiers,
+        test_utils::{
+            testing_pool, MockTransaction, MockTransactionFactory, OkValidator, TestPool,
+            TransactionGenerator,
+        },
+        CoinbaseTipOrdering, EthPooledTransaction, Pool, TransactionOrigin, ValidPoolTransaction,
     };
     use secp256k1::SecretKey;
     use std::{
-        collections::HashSet,
         future::poll_fn,
         net::{IpAddr, Ipv4Addr, SocketAddr},
         str::FromStr,
+        time::Instant,
     };
     use tracing::error;
+
+    type EthTestPool = Pool<
+        OkValidator<EthPooledTransaction>,
+        CoinbaseTipOrdering<EthPooledTransaction>,
+        InMemoryBlobStore,
+    >;
+
+    #[tokio::test]
+    async fn announcement_policy_preserves_order_and_skips_pending_and_bad_imports() {
+        #[derive(Debug, Clone, Default)]
+        struct RecordingPolicy(Arc<parking_lot::Mutex<Vec<(u8, TxHash, usize)>>>);
+
+        impl AnnouncementFilteringPolicy<EthNetworkPrimitives> for RecordingPolicy {
+            fn decide_on_announcement(
+                &self,
+                tx_type: u8,
+                hash: &TxHash,
+                size: usize,
+            ) -> AnnouncementAcceptance {
+                self.0.lock().push((tx_type, *hash, size));
+                match tx_type {
+                    0xff => AnnouncementAcceptance::Reject { penalize_peer: true },
+                    1 => AnnouncementAcceptance::Ignore,
+                    _ => AnnouncementAcceptance::Accept,
+                }
+            }
+        }
+
+        let (mut manager, _network) = new_tx_manager().await;
+        let policy = RecordingPolicy::default();
+        manager.policies =
+            NetworkPolicies::new(TransactionPropagationKind::default(), policy.clone());
+        let peer_id = PeerId::new([1; 64]);
+        let (peer, mut rx) = new_mock_session(peer_id, EthVersion::Eth68);
+        manager.peers.insert(peer_id, peer);
+        let [pending, accepted, ignored, rejected, later, bad] =
+            [1, 2, 3, 4, 5, 6].map(B256::repeat_byte);
+        manager.transactions_by_peers.insert(pending, Default::default());
+        manager.bad_imports.insert(bad);
+        manager.on_new_pooled_transaction_hashes(
+            peer_id,
+            NewPooledTransactionHashes68 {
+                hashes: vec![pending, accepted, accepted, ignored, rejected, later, bad],
+                types: vec![0xff, 2, 0xff, 1, 0xff, 2, 0xff],
+                sizes: vec![100, 200, 300, 400, 500, 600, 700],
+            }
+            .into(),
+        );
+
+        assert_eq!(
+            *policy.0.lock(),
+            [(2, accepted, 200), (1, ignored, 400), (0xff, rejected, 500), (2, later, 600)]
+        );
+        poll_fn(|cx| {
+            let _ = manager.poll_unpin(cx);
+            Poll::Ready(())
+        })
+        .await;
+        let PeerRequest::GetPooledTransactions { request, .. } = rx.try_recv().unwrap() else {
+            panic!("expected transaction request")
+        };
+        assert_eq!(request.0, [accepted, later]);
+    }
+
+    async fn new_eth_tx_manager() -> (
+        TransactionsManager<EthTestPool, EthNetworkPrimitives>,
+        NetworkManager<EthNetworkPrimitives>,
+    ) {
+        let secret_key = SecretKey::new(&mut rand_08::thread_rng());
+        let client = NoopProvider::default();
+
+        let config = NetworkConfigBuilder::new(secret_key, Runtime::test())
+            .listener_port(0)
+            .disable_discovery()
+            .build(client);
+
+        let pool = Pool::new(
+            OkValidator::default(),
+            CoinbaseTipOrdering::default(),
+            InMemoryBlobStore::default(),
+            Default::default(),
+        );
+
+        let transactions_manager_config = config.transactions_manager_config.clone();
+        let (_network_handle, network, transactions, _) = NetworkManager::new(config)
+            .await
+            .unwrap()
+            .into_builder()
+            .transactions(pool.clone(), transactions_manager_config)
+            .split_with_handle();
+
+        (transactions, network)
+    }
+
+    #[tokio::test]
+    async fn fetched_responses_recheck_current_ingress_policy() {
+        let (mut manager, network) = new_eth_tx_manager().await;
+        network.handle().update_sync_state(SyncState::Idle);
+        let peer_id = PeerId::random();
+        let mut tx_gen = TransactionGenerator::new(rand::rng());
+        let cases = [
+            (TransactionIngressPolicy::Trusted, Some(PeerKind::Trusted), true),
+            (TransactionIngressPolicy::Trusted, Some(PeerKind::Basic), false),
+            (TransactionIngressPolicy::Trusted, None, false),
+            (TransactionIngressPolicy::None, Some(PeerKind::Trusted), false),
+            (TransactionIngressPolicy::All, None, true),
+        ];
+        for (nonce, (policy, peer_kind, admitted)) in cases.into_iter().enumerate() {
+            manager.config.ingress_policy = policy;
+            manager.peers.remove(&peer_id);
+            let (mut peer, _rx) = new_mock_session(peer_id, EthVersion::Eth69);
+            if let Some(kind) = peer_kind {
+                peer.peer_kind = kind;
+                manager.peers.insert(peer_id, peer);
+            }
+            let tx = PooledTransactionVariant::try_from(
+                tx_gen.transaction().nonce(nonce as u64).into_eip1559(),
+            )
+            .unwrap();
+            let previous_imports = manager.pool_imports.len();
+            manager.on_fetch_event(FetchEvent::TransactionsFetched {
+                peer_id,
+                transactions: PooledTransactions(vec![tx]),
+                report_peer: false,
+                version: EthVersion::Eth69,
+                client_version: Arc::from(""),
+            });
+            assert_eq!(manager.pool_imports.len(), previous_imports + usize::from(admitted));
+        }
+    }
+
+    fn valid_eth_pool_transaction(
+        transaction: EthPooledTransaction,
+    ) -> Arc<ValidPoolTransaction<EthPooledTransaction>> {
+        let mut ids = SenderIdentifiers::default();
+        let transaction_id =
+            ids.sender_id_or_create(transaction.sender()).into_transaction_id(transaction.nonce());
+
+        Arc::new(ValidPoolTransaction {
+            propagate: false,
+            transaction_id,
+            transaction,
+            timestamp: Instant::now(),
+            origin: TransactionOrigin::External,
+            authority_ids: None,
+        })
+    }
+
+    fn gen_eip1559_pooled_with_nonce<R: rand::RngCore>(
+        tx_gen: &mut TransactionGenerator<R>,
+        nonce: u64,
+    ) -> EthPooledTransaction {
+        EthPooledTransaction::try_from_consensus(
+            tx_gen.transaction().nonce(nonce).into_eip1559().try_into_recovered().unwrap(),
+        )
+        .unwrap()
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_ignored_tx_broadcasts_while_initially_syncing() {
         reth_tracing::init_test_tracing();
-        let net = Testnet::create(3).await;
+        let net = Testnet::create(3).await.spawn();
+        let [peer0, peer1, _] = net.peers_array();
 
-        let mut handles = net.handles();
-        let handle0 = handles.next().unwrap();
-        let handle1 = handles.next().unwrap();
-
-        drop(handles);
-        let handle = net.spawn();
-
-        let listener0 = handle0.event_listener();
-        handle0.add_peer(*handle1.peer_id(), handle1.local_addr());
+        let listener0 = peer0.event_listener();
+        peer0.add_peer(peer1);
         let secret_key = SecretKey::new(&mut rand_08::thread_rng());
 
         let client = NoopProvider::default();
@@ -2305,7 +2590,7 @@ mod tests {
         );
         let signed_tx = TransactionSigned::decode(&mut &input[..]).unwrap();
         transactions.on_network_tx_event(NetworkTransactionEvent::IncomingTransactions {
-            peer_id: *handle1.peer_id(),
+            peer_id: *peer1.peer_id(),
             msg: Transactions(vec![signed_tx.clone()]),
         });
         poll_fn(|cx| {
@@ -2314,23 +2599,16 @@ mod tests {
         })
         .await;
         assert!(pool.is_empty());
-        handle.terminate().await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_tx_broadcasts_through_two_syncs() {
         reth_tracing::init_test_tracing();
-        let net = Testnet::create(3).await;
+        let net = Testnet::create(3).await.spawn();
+        let [peer0, peer1, _] = net.peers_array();
 
-        let mut handles = net.handles();
-        let handle0 = handles.next().unwrap();
-        let handle1 = handles.next().unwrap();
-
-        drop(handles);
-        let handle = net.spawn();
-
-        let listener0 = handle0.event_listener();
-        handle0.add_peer(*handle1.peer_id(), handle1.local_addr());
+        let listener0 = peer0.event_listener();
+        peer0.add_peer(peer1);
         let secret_key = SecretKey::new(&mut rand_08::thread_rng());
 
         let client = NoopProvider::default();
@@ -2378,7 +2656,7 @@ mod tests {
         );
         let signed_tx = TransactionSigned::decode(&mut &input[..]).unwrap();
         transactions.on_network_tx_event(NetworkTransactionEvent::IncomingTransactions {
-            peer_id: *handle1.peer_id(),
+            peer_id: *peer1.peer_id(),
             msg: Transactions(vec![signed_tx.clone()]),
         });
         poll_fn(|cx| {
@@ -2389,7 +2667,6 @@ mod tests {
         assert!(!NetworkInfo::is_initially_syncing(&network_handle));
         assert!(NetworkInfo::is_syncing(&network_handle));
         assert!(!pool.is_empty());
-        handle.terminate().await;
     }
 
     // Ensure that the transaction manager correctly handles the `IncomingPooledTransactionHashes`
@@ -2457,6 +2734,13 @@ mod tests {
             )),
         });
 
+        // advance the transaction manager future to send the request
+        poll_fn(|cx| {
+            let _ = tx_manager.poll_unpin(cx);
+            Poll::Ready(())
+        })
+        .await;
+
         // mock session of peer_1 receives request
         let req = to_mock_session_rx
             .recv()
@@ -2493,18 +2777,12 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_handle_incoming_transactions() {
         reth_tracing::init_test_tracing();
-        let net = Testnet::create(3).await;
+        let net = Testnet::create(3).await.spawn();
+        let [peer0, peer1, _] = net.peers_array();
 
-        let mut handles = net.handles();
-        let handle0 = handles.next().unwrap();
-        let handle1 = handles.next().unwrap();
+        let listener0 = peer0.event_listener();
 
-        drop(handles);
-        let handle = net.spawn();
-
-        let listener0 = handle0.event_listener();
-
-        handle0.add_peer(*handle1.peer_id(), handle1.local_addr());
+        peer0.add_peer(peer1);
         let secret_key = SecretKey::new(&mut rand_08::thread_rng());
 
         let client = NoopProvider::default();
@@ -2547,14 +2825,14 @@ mod tests {
         );
         let signed_tx = TransactionSigned::decode(&mut &input[..]).unwrap();
         transactions.on_network_tx_event(NetworkTransactionEvent::IncomingTransactions {
-            peer_id: *handle1.peer_id(),
+            peer_id: *peer1.peer_id(),
             msg: Transactions(vec![signed_tx.clone()]),
         });
         assert!(transactions
             .transactions_by_peers
             .get(signed_tx.tx_hash())
             .unwrap()
-            .contains(handle1.peer_id()));
+            .contains(peer1.peer_id()));
 
         // advance the transaction manager future
         poll_fn(|cx| {
@@ -2565,7 +2843,23 @@ mod tests {
 
         assert!(!pool.is_empty());
         assert!(pool.get(signed_tx.tx_hash()).is_some());
-        handle.terminate().await;
+    }
+
+    #[tokio::test]
+    async fn single_import_slot_accepts_broadcast_with_pending_fetch() {
+        let (mut manager, _network) = new_tx_manager().await;
+        manager.pending_pool_imports_info.max_pending_pool_imports = 1;
+        let peer_id = PeerId::new([1; 64]);
+        buffer_hash_to_tx_fetcher(
+            &mut manager.transaction_fetcher,
+            B256::repeat_byte(1),
+            peer_id,
+            None,
+        );
+        assert_eq!(manager.transaction_fetcher.num_hashes(), 1);
+        assert_eq!(manager.remaining_broadcast_import_capacity(), 1);
+        manager.pending_pool_imports_info.pending_pool_imports.store(1, Ordering::Relaxed);
+        assert_eq!(manager.remaining_broadcast_import_capacity(), 0);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2574,37 +2868,35 @@ mod tests {
         let peer_id = PeerId::new([1; 64]);
         let fallback_peer = PeerId::new([2; 64]);
         let (peer, _) = new_mock_session(peer_id, EthVersion::Eth66);
+        let (fallback, _) = new_mock_session(fallback_peer, EthVersion::Eth66);
         let hash_shared = B256::from_slice(&[1; 32]);
 
         tx_manager.peers.insert(peer_id, peer);
-        buffer_hash_to_tx_fetcher(
-            &mut tx_manager.transaction_fetcher,
-            hash_shared,
-            peer_id,
-            0,
-            None,
-        );
+        tx_manager.peers.insert(fallback_peer, fallback);
+        buffer_hash_to_tx_fetcher(&mut tx_manager.transaction_fetcher, hash_shared, peer_id, None);
         buffer_hash_to_tx_fetcher(
             &mut tx_manager.transaction_fetcher,
             hash_shared,
             fallback_peer,
-            0,
             None,
         );
-        tx_manager.transaction_fetcher.active_peers.insert(peer_id, 1);
+        assert_eq!(
+            tx_manager.transaction_fetcher.candidate_peers(&hash_shared),
+            vec![peer_id, fallback_peer]
+        );
 
         tx_manager.on_network_event(NetworkEvent::Peer(PeerEvent::SessionClosed {
             peer_id,
             reason: None,
         }));
 
-        // peer removed from peers map and active_peers
+        // peer removed from peers map and from the fetcher
         assert!(!tx_manager.peers.contains_key(&peer_id));
-        assert!(tx_manager.transaction_fetcher.active_peers.peek(&peer_id).is_none());
+        assert!(tx_manager.transaction_fetcher.queued_hashes(&peer_id).is_empty());
         // fallback peer is still available for the hash
         assert_eq!(
-            tx_manager.transaction_fetcher.get_idle_peer_for(hash_shared),
-            Some(&fallback_peer)
+            tx_manager.transaction_fetcher.candidate_peers(&hash_shared),
+            vec![fallback_peer]
         );
     }
 
@@ -2615,7 +2907,7 @@ mod tests {
         let hash = B256::from_slice(&[1; 32]);
 
         tx_manager.network.update_sync_state(SyncState::Idle);
-        tx_manager.transactions_by_peers.insert(hash, HashSet::from([peer_id]));
+        tx_manager.transactions_by_peers.insert(hash, smallvec::smallvec![peer_id]);
 
         let err = PoolError::new(
             hash,
@@ -2636,7 +2928,7 @@ mod tests {
         let hash = B256::from_slice(&[3; 32]);
 
         tx_manager.network.update_sync_state(SyncState::Idle);
-        tx_manager.transactions_by_peers.insert(hash, HashSet::from([peer_id]));
+        tx_manager.transactions_by_peers.insert(hash, smallvec::smallvec![peer_id]);
 
         let err = PoolError::new(
             hash,
@@ -2657,7 +2949,7 @@ mod tests {
         let hash = B256::from_slice(&[2; 32]);
 
         tx_manager.network.update_sync_state(SyncState::Idle);
-        tx_manager.transactions_by_peers.insert(hash, HashSet::from([peer_id]));
+        tx_manager.transactions_by_peers.insert(hash, smallvec::smallvec![peer_id]);
 
         let err = PoolError::new(
             hash,
@@ -2672,18 +2964,12 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_on_get_pooled_transactions_network() {
         reth_tracing::init_test_tracing();
-        let net = Testnet::create(2).await;
+        let net = Testnet::create(2).await.spawn();
+        let [peer0, peer1] = net.peers_array();
 
-        let mut handles = net.handles();
-        let handle0 = handles.next().unwrap();
-        let handle1 = handles.next().unwrap();
+        let listener0 = peer0.event_listener();
 
-        drop(handles);
-        let handle = net.spawn();
-
-        let listener0 = handle0.event_listener();
-
-        handle0.add_peer(*handle1.peer_id(), handle1.local_addr());
+        peer0.add_peer(peer1);
         let secret_key = SecretKey::new(&mut rand_08::thread_rng());
 
         let client = NoopProvider::default();
@@ -2719,7 +3005,6 @@ mod tests {
                 }
             }
         }
-        handle.terminate().await;
 
         let tx = MockTransaction::eip1559();
         let _ = transactions
@@ -2733,7 +3018,7 @@ mod tests {
             oneshot::channel::<RequestResult<PooledTransactions<PooledTransactionVariant>>>();
 
         transactions.on_network_tx_event(NetworkTransactionEvent::GetPooledTransactions {
-            peer_id: *handle1.peer_id(),
+            peer_id: *peer1.peer_id(),
             request,
             response: send,
         });
@@ -2819,20 +3104,20 @@ mod tests {
         peer_1.seen_transactions.insert(txs_hashes[1]);
         tx_manager.peers.insert(peer_id_1, peer_1);
 
-        buffer_hash_to_tx_fetcher(tx_fetcher, txs_hashes[0], peer_id_1, 0, None);
-        buffer_hash_to_tx_fetcher(tx_fetcher, txs_hashes[1], peer_id_1, 0, None);
+        buffer_hash_to_tx_fetcher(tx_fetcher, txs_hashes[0], peer_id_1, None);
+        buffer_hash_to_tx_fetcher(tx_fetcher, txs_hashes[1], peer_id_1, None);
 
         // peer_1 is idle
         assert!(tx_fetcher.is_idle(&peer_id_1));
-        assert_eq!(tx_fetcher.active_peers.len(), 0);
+        assert_eq!(tx_fetcher.num_inflight_requests(), 0);
 
         // sends requests for buffered hashes to peer_1
-        tx_fetcher.on_fetch_pending_hashes(&tx_manager.peers, |_| true);
+        assert_eq!(tx_fetcher.dispatch(&tx_manager.peers, usize::MAX), 1);
 
         assert_eq!(tx_fetcher.num_pending_hashes(), 0);
         // as long as request is in flight peer_1 is not idle
         assert!(!tx_fetcher.is_idle(&peer_id_1));
-        assert_eq!(tx_fetcher.active_peers.len(), 1);
+        assert_eq!(tx_fetcher.num_inflight_requests(), 1);
 
         // mock session of peer_1 receives request
         let req = to_mock_session_rx
@@ -2859,13 +3144,16 @@ mod tests {
 
         // request has resolved, peer_1 is idle again
         assert!(tx_fetcher.is_idle(&peer_id));
-        assert_eq!(tx_fetcher.active_peers.len(), 0);
-        // failing peer_1's request buffers requested hashes for retry.
+        assert_eq!(tx_fetcher.num_inflight_requests(), 0);
+        // the undelivered hash at the end of the request is retried with peer_1
         assert_eq!(tx_fetcher.num_pending_hashes(), 1);
+        assert_eq!(tx_fetcher.candidate_peers(&txs_hashes[1]), vec![peer_id_1]);
     }
 
+    /// Tests that hashes of a failed request are retried with the alternate peer that announced
+    /// them, and are given up on when no peer is left to fetch them from.
     #[tokio::test]
-    async fn test_max_retries_tx_request() {
+    async fn test_failed_request_retries_on_alternate_peer() {
         reth_tracing::init_test_tracing();
 
         let mut tx_manager = new_tx_manager().await.0;
@@ -2876,44 +3164,35 @@ mod tests {
         let eth_version = EthVersion::Eth66;
         let seen_hashes = [B256::from_slice(&[1; 32]), B256::from_slice(&[2; 32])];
 
-        let (mut peer_1, mut to_mock_session_rx) = new_mock_session(peer_id_1, eth_version);
-        // mark hashes as seen by peer so it can fish them out from the cache for hashes pending
-        // fetch
-        peer_1.seen_transactions.insert(seen_hashes[0]);
-        peer_1.seen_transactions.insert(seen_hashes[1]);
+        let (peer_1, mut to_mock_session_rx_1) = new_mock_session(peer_id_1, eth_version);
+        let (peer_2, mut to_mock_session_rx_2) = new_mock_session(peer_id_2, eth_version);
         tx_manager.peers.insert(peer_id_1, peer_1);
+        tx_manager.peers.insert(peer_id_2, peer_2);
 
-        // hashes are seen and currently not inflight, with one fallback peer, and are buffered
-        // for first retry in reverse order to make index 0 lru
-        let retries = 1;
-        buffer_hash_to_tx_fetcher(tx_fetcher, seen_hashes[1], peer_id_1, retries, None);
-        buffer_hash_to_tx_fetcher(tx_fetcher, seen_hashes[0], peer_id_1, retries, None);
-
-        // peer_1 is idle
+        // both peers announce the hashes, peer_1 first
+        for hash in seen_hashes {
+            buffer_hash_to_tx_fetcher(tx_fetcher, hash, peer_id_1, None);
+            buffer_hash_to_tx_fetcher(tx_fetcher, hash, peer_id_2, None);
+        }
         assert!(tx_fetcher.is_idle(&peer_id_1));
-        assert_eq!(tx_fetcher.active_peers.len(), 0);
+        assert!(tx_fetcher.is_idle(&peer_id_2));
 
-        // sends request for buffered hashes to peer_1
-        tx_fetcher.on_fetch_pending_hashes(&tx_manager.peers, |_| true);
-
-        let tx_fetcher = &mut tx_manager.transaction_fetcher;
-
+        // the hashes are requested from peer_1 only
+        assert_eq!(tx_fetcher.dispatch(&tx_manager.peers, usize::MAX), 1);
         assert_eq!(tx_fetcher.num_pending_hashes(), 0);
-        // as long as request is in inflight peer_1 is not idle
         assert!(!tx_fetcher.is_idle(&peer_id_1));
-        assert_eq!(tx_fetcher.active_peers.len(), 1);
+        assert!(tx_fetcher.is_idle(&peer_id_2));
 
-        // mock session of peer_1 receives request
-        let req = to_mock_session_rx
+        let req = to_mock_session_rx_1
             .recv()
             .await
             .expect("peer_1 session should receive request with buffered hashes");
         let PeerRequest::GetPooledTransactions { request, response } = req else { unreachable!() };
         let GetPooledTransactions(hashes) = request;
-
-        let hashes = hashes.into_iter().collect::<B256Set>();
-
-        assert_eq!(hashes, seen_hashes.into_iter().collect::<B256Set>());
+        assert_eq!(
+            hashes.into_iter().collect::<B256Set>(),
+            seen_hashes.into_iter().collect::<B256Set>()
+        );
 
         // fail request to peer_1
         response
@@ -2922,58 +3201,53 @@ mod tests {
         let Some(FetchEvent::FetchError { peer_id, .. }) = tx_fetcher.next().await else {
             unreachable!()
         };
+        assert_eq!(peer_id, peer_id_1);
 
-        // request has resolved, peer_1 is idle again
-        assert!(tx_fetcher.is_idle(&peer_id));
-        assert_eq!(tx_fetcher.active_peers.len(), 0);
-        // failing peer_1's request buffers requested hashes for retry
+        // request has resolved, peer_1 is idle again and the hashes are pending for peer_2 only
+        assert!(tx_fetcher.is_idle(&peer_id_1));
+        assert_eq!(tx_fetcher.num_inflight_requests(), 0);
         assert_eq!(tx_fetcher.num_pending_hashes(), 2);
+        assert_eq!(tx_fetcher.candidate_peers(&seen_hashes[0]), vec![peer_id_2]);
 
-        let (peer_2, mut to_mock_session_rx) = new_mock_session(peer_id_2, eth_version);
-        tx_manager.peers.insert(peer_id_2, peer_2);
-
-        // peer_2 announces same hashes as peer_1
-        let msg =
-            NewPooledTransactionHashes::Eth66(NewPooledTransactionHashes66(seen_hashes.to_vec()));
-        tx_manager.on_new_pooled_transaction_hashes(peer_id_2, msg);
-
-        let tx_fetcher = &mut tx_manager.transaction_fetcher;
-
-        // peer_2 should be in active_peers.
-        assert_eq!(tx_fetcher.active_peers.len(), 1);
-
-        // since hashes are already seen, no changes to length of unknown hashes
-        assert_eq!(tx_fetcher.num_all_hashes(), 2);
-        // but hashes are taken out of buffer and packed into request to peer_2
+        // the hashes are retried with peer_2
+        assert_eq!(tx_fetcher.dispatch(&tx_manager.peers, usize::MAX), 1);
         assert_eq!(tx_fetcher.num_pending_hashes(), 0);
-
-        // mock session of peer_2 receives request
-        let req = to_mock_session_rx
+        let req = to_mock_session_rx_2
             .recv()
             .await
             .expect("peer_2 session should receive request with buffered hashes");
         let PeerRequest::GetPooledTransactions { response, .. } = req else { unreachable!() };
 
-        // report failed request to tx manager
+        // fail request to peer_2 as well
         response
             .send(Err(RequestError::BadResponse))
             .expect("should send peer_2 response to tx manager");
         let Some(FetchEvent::FetchError { .. }) = tx_fetcher.next().await else { unreachable!() };
 
-        // `MAX_REQUEST_RETRIES_PER_TX_HASH`, 2, for hashes reached so this time won't be buffered
-        // for retry
-        assert_eq!(tx_fetcher.num_pending_hashes(), 0);
-        assert_eq!(tx_fetcher.active_peers.len(), 0);
+        // no peer is left to fetch the hashes from, they are dropped
+        assert_eq!(tx_fetcher.num_hashes(), 0);
+        assert_eq!(tx_fetcher.num_inflight_requests(), 0);
+    }
+
+    #[test]
+    fn test_direct_propagation_transaction_uses_2718_size() {
+        let mut tx_gen = TransactionGenerator::new(rand::rng());
+        let tx = tx_gen.gen_eip1559();
+        let expected_size = tx.encode_2718_len();
+
+        let tx = PropagateTransaction::new(tx);
+
+        assert_eq!(tx.propagation_size(), expected_size);
     }
 
     #[test]
     fn test_transaction_builder_empty() {
-        let mut builder =
-            PropagateTransactionsBuilder::<TransactionSigned>::pooled(EthVersion::Eth68);
+        let mut builder = PropagateTransactionsBuilder::pooled(EthVersion::Eth68, 0);
         assert!(builder.is_empty());
 
-        let mut factory = MockTransactionFactory::default();
-        let tx = PropagateTransaction::pool_tx(Arc::new(factory.create_eip1559()));
+        let mut tx_gen = TransactionGenerator::new(rand::rng());
+        let tx =
+            PropagateTransaction::pool_tx(valid_eth_pool_transaction(tx_gen.gen_eip1559_pooled()));
         builder.push(&tx);
         assert!(!builder.is_empty());
 
@@ -2984,17 +3258,38 @@ mod tests {
     }
 
     #[test]
+    fn test_pooled_propagation_transaction_encoder_length_matches_network_encoding() {
+        let mut tx_gen = TransactionGenerator::new(rand::rng());
+        let tx = valid_eth_pool_transaction(tx_gen.gen_eip1559_pooled());
+        let pooled = PropagatePooledTransactionEncoder::new(tx);
+
+        let mut pooled_encoded = Vec::new();
+        pooled.encode(&mut pooled_encoded);
+        assert_eq!(pooled.length(), pooled_encoded.len());
+
+        let broadcast = BroadcastPoolTransactions(vec![LazyEncoded::new(pooled)]);
+        let mut first_encoded = Vec::new();
+        broadcast.encode(&mut first_encoded);
+        let mut second_encoded = Vec::new();
+        broadcast.encode(&mut second_encoded);
+        assert_eq!(first_encoded, second_encoded);
+
+        let mut encoded = first_encoded.as_slice();
+        let decoded = Transactions::<TransactionSigned>::decode(&mut encoded).unwrap();
+        assert_eq!(decoded.len(), 1);
+        assert!(encoded.is_empty());
+    }
+
+    #[test]
     fn test_transaction_builder_large() {
-        let mut builder =
-            PropagateTransactionsBuilder::<TransactionSigned>::full(EthVersion::Eth68);
+        let mut builder = PropagateTransactionsBuilder::full(EthVersion::Eth68, 0);
         assert!(builder.is_empty());
 
-        let mut factory = MockTransactionFactory::default();
-        let mut tx = factory.create_eip1559();
+        let mut tx_gen = TransactionGenerator::new(rand::rng());
+        let mut tx = tx_gen.gen_eip1559_pooled();
         // create a transaction that still fits
-        tx.transaction.set_size(DEFAULT_SOFT_LIMIT_BYTE_SIZE_TRANSACTIONS_BROADCAST_MESSAGE + 1);
-        let tx = Arc::new(tx);
-        let tx = PropagateTransaction::pool_tx(tx);
+        tx.encoded_length = DEFAULT_SOFT_LIMIT_BYTE_SIZE_TRANSACTIONS_BROADCAST_MESSAGE + 1;
+        let tx = PropagateTransaction::pool_tx(valid_eth_pool_transaction(tx));
         builder.push(&tx);
         assert!(!builder.is_empty());
 
@@ -3014,12 +3309,12 @@ mod tests {
 
     #[test]
     fn test_transaction_builder_eip4844() {
-        let mut builder =
-            PropagateTransactionsBuilder::<TransactionSigned>::full(EthVersion::Eth68);
+        let mut builder = PropagateTransactionsBuilder::full(EthVersion::Eth68, 0);
         assert!(builder.is_empty());
 
-        let mut factory = MockTransactionFactory::default();
-        let tx = PropagateTransaction::pool_tx(Arc::new(factory.create_eip4844()));
+        let mut tx_gen = TransactionGenerator::new(rand::rng());
+        let tx =
+            PropagateTransaction::pool_tx(valid_eth_pool_transaction(tx_gen.gen_eip4844_pooled()));
         builder.push(&tx);
         assert!(!builder.is_empty());
 
@@ -3028,7 +3323,8 @@ mod tests {
         let txs = txs.pooled.unwrap();
         assert_eq!(txs.len(), 1);
 
-        let tx = PropagateTransaction::pool_tx(Arc::new(factory.create_eip1559()));
+        let tx =
+            PropagateTransaction::pool_tx(valid_eth_pool_transaction(tx_gen.gen_eip1559_pooled()));
         builder.push(&tx);
 
         let txs = builder.clone().build();
@@ -3042,7 +3338,7 @@ mod tests {
     async fn test_propagate_full() {
         reth_tracing::init_test_tracing();
 
-        let (mut tx_manager, network) = new_tx_manager().await;
+        let (mut tx_manager, network) = new_eth_tx_manager().await;
         let peer_id = PeerId::random();
 
         // ensure not syncing
@@ -3064,14 +3360,16 @@ mod tests {
         tx_manager
             .on_network_event(NetworkEvent::ActivePeerSession { info: session_info, messages });
         let mut propagate = vec![];
-        let mut factory = MockTransactionFactory::default();
-        let eip1559_tx = Arc::new(factory.create_eip1559());
-        propagate.push(PropagateTransaction::pool_tx(eip1559_tx.clone()));
-        let eip4844_tx = Arc::new(factory.create_eip4844());
-        propagate.push(PropagateTransaction::pool_tx(eip4844_tx.clone()));
+        let mut tx_gen = TransactionGenerator::new(rand::rng());
+        let eip1559_tx = valid_eth_pool_transaction(tx_gen.gen_eip1559_pooled());
+        propagate.push(eip1559_tx.clone());
+        let eip4844_tx = valid_eth_pool_transaction(tx_gen.gen_eip4844_pooled());
+        propagate.push(eip4844_tx.clone());
 
-        let propagated =
-            tx_manager.propagate_transactions(propagate.clone(), PropagationMode::Basic);
+        let propagated = tx_manager.propagate_transactions(
+            propagate.clone().into_iter().map(PropagateTransaction::pool_tx).collect(),
+            PropagationMode::Basic,
+        );
         assert_eq!(propagated.len(), 2);
         let prop_txs = propagated.get(eip1559_tx.transaction.hash()).unwrap();
         assert_eq!(prop_txs.len(), 1);
@@ -3087,15 +3385,79 @@ mod tests {
         peer.seen_transactions.contains(eip4844_tx.transaction.hash());
 
         // propagate again
-        let propagated = tx_manager.propagate_transactions(propagate, PropagationMode::Basic);
+        let propagated = tx_manager.propagate_transactions(
+            propagate.into_iter().map(PropagateTransaction::pool_tx).collect(),
+            PropagationMode::Basic,
+        );
         assert!(propagated.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_full_broadcast_respects_exact_peer_limit() {
+        let (mut manager, network) = new_tx_manager().await;
+        network.handle().update_sync_state(SyncState::Idle);
+        for _ in 0..3 {
+            let id = PeerId::random();
+            let (peer, _rx) = new_mock_session(id, EthVersion::Eth68);
+            manager.peers.insert(id, peer);
+        }
+        let mut tx_gen = TransactionGenerator::new(rand::rng());
+        for limit in [0, 1, 2, 3] {
+            manager.config.propagation_mode = TransactionPropagationMode::Max(limit);
+            // Signer selection can repeat; distinct nonces keep previous cases out of the
+            // peer's seen-transaction cache without bypassing ordinary propagation.
+            let tx =
+                PropagateTransaction::new(tx_gen.transaction().nonce(limit as u64).into_eip1559());
+            let hash = *tx.tx_hash();
+            let propagated = manager.propagate_transactions(vec![tx], PropagationMode::Basic);
+            let peers = propagated.get(&hash).unwrap();
+            assert_eq!(peers.len(), 3);
+            assert_eq!(peers.iter().filter(|kind| kind.is_full()).count(), limit);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_truncated_hash_announcement_not_marked_seen() {
+        reth_tracing::init_test_tracing();
+
+        let (mut tx_manager, network) = new_eth_tx_manager().await;
+        // all peers receive hash announcements only
+        tx_manager.config.propagation_mode = TransactionPropagationMode::Max(0);
+
+        // ensure not syncing
+        network.handle().update_sync_state(SyncState::Idle);
+
+        let peer_id = PeerId::random();
+        let (peer, _rx) = new_mock_session(peer_id, EthVersion::Eth68);
+        tx_manager.peers.insert(peer_id, peer);
+
+        // one more transaction than fits into a single hashes broadcast message
+        let mut tx_gen = TransactionGenerator::new(rand::rng());
+        let txs = (0..=SOFT_LIMIT_COUNT_HASHES_IN_NEW_POOLED_TRANSACTIONS_BROADCAST_MESSAGE)
+            .map(|nonce| {
+                valid_eth_pool_transaction(gen_eip1559_pooled_with_nonce(&mut tx_gen, nonce as u64))
+            })
+            .collect::<Vec<_>>();
+        let last_sent = *txs[txs.len() - 2].hash();
+        let truncated = *txs[txs.len() - 1].hash();
+
+        let propagated = tx_manager.propagate_transactions(
+            txs.into_iter().map(PropagateTransaction::pool_tx).collect(),
+            PropagationMode::Basic,
+        );
+
+        // the truncated hash was not sent, so it must not be tracked as seen by the peer
+        assert!(propagated.get(&truncated).is_none());
+        let peer = tx_manager.peers.get(&peer_id).unwrap();
+        assert!(!peer.seen_transactions.contains(&truncated));
+        assert!(peer.seen_transactions.contains(&last_sent));
     }
 
     #[tokio::test]
     async fn test_propagate_pending_txs_while_initially_syncing() {
         reth_tracing::init_test_tracing();
 
-        let (mut tx_manager, network) = new_tx_manager().await;
+        let (mut tx_manager, network) = new_eth_tx_manager().await;
         let peer_id = PeerId::random();
 
         // Keep the node in initial sync mode.
@@ -3106,17 +3468,19 @@ mod tests {
         let (peer, _rx) = new_mock_session(peer_id, EthVersion::Eth68);
         tx_manager.peers.insert(peer_id, peer);
 
-        let tx = MockTransaction::eip1559();
+        let mut tx_gen = TransactionGenerator::new(rand::rng());
+        let tx = gen_eip1559_pooled_with_nonce(&mut tx_gen, 0);
+        let tx_hash = *tx.hash();
         tx_manager
             .pool
             .add_transaction(reth_transaction_pool::TransactionOrigin::External, tx.clone())
             .await
             .expect("transaction should be accepted into the pool");
 
-        tx_manager.on_new_pending_transactions(vec![*tx.get_hash()]);
+        tx_manager.on_new_pending_transactions(vec![tx_hash]);
 
         let peer = tx_manager.peers.get(&peer_id).expect("peer should exist");
-        assert!(peer.seen_transactions.contains(tx.get_hash()));
+        assert!(peer.seen_transactions.contains(&tx_hash));
     }
 
     #[tokio::test]
@@ -3228,5 +3592,29 @@ mod tests {
         );
 
         network_service_handle.abort();
+    }
+    #[test]
+    fn test_eth72_hashes_builder_sets_cell_mask_for_blob_txs() {
+        let mut tx_gen = TransactionGenerator::new(rand::rng());
+
+        // no blob transactions: the mask stays unset and encodes as a zero mask
+        let mut builder = PooledTransactionsHashesBuilder::new(EthVersion::Eth72);
+        builder.push(&PropagateTransaction::pool_tx(valid_eth_pool_transaction(
+            tx_gen.gen_eip1559_pooled(),
+        )));
+        let msg = builder.build();
+        assert_eq!(msg.as_eth72().unwrap().cell_mask, None);
+
+        // announcing a blob transaction advertises every cell as available
+        let mut builder = PooledTransactionsHashesBuilder::new(EthVersion::Eth72);
+        builder.push(&PropagateTransaction::pool_tx(valid_eth_pool_transaction(
+            tx_gen.gen_eip1559_pooled(),
+        )));
+        builder.push_pooled(valid_eth_pool_transaction(tx_gen.gen_eip4844_pooled()));
+        let msg = builder.build();
+        assert_eq!(
+            msg.as_eth72().unwrap().cell_mask,
+            Some(NewPooledTransactionHashes72::ALL_CELLS_MASK)
+        );
     }
 }

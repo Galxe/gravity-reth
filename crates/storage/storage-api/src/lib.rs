@@ -9,12 +9,19 @@
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 #![cfg_attr(not(feature = "std"), no_std)]
 
+// Keep the original component feature edges without enabling broader revm facade features.
+use revm_bytecode as _;
+use revm_database as _;
+
 extern crate alloc;
 
 // Re-export used error types.
 pub use reth_storage_errors as errors;
 mod account;
 pub use account::*;
+
+mod bal;
+pub use bal::*;
 
 mod block;
 pub use block::*;
@@ -44,6 +51,9 @@ pub use stage_checkpoint::*;
 
 mod state;
 pub use state::*;
+
+mod state_range;
+pub use state_range::*;
 
 mod storage;
 pub use storage::*;

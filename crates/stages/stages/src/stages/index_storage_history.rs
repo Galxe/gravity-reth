@@ -60,6 +60,11 @@ where
         provider: &Provider,
         mut input: ExecInput,
     ) -> Result<ExecOutput, StageError> {
+        // The durable checkpoint determines whether history must be rebuilt. Applying the prune
+        // target first would incorrectly turn an empty-table rebuild into an incremental load.
+        let first_sync = input.checkpoint().block_number == 0;
+        let mut prune_target_applied = false;
+
         if let Some((target_prunable_block, prune_mode)) = self
             .prune_mode
             .map(|mode| {
@@ -73,6 +78,7 @@ where
             .flatten() &&
             target_prunable_block > input.checkpoint().block_number
         {
+            prune_target_applied = true;
             input.checkpoint = Some(StageCheckpoint::new(target_prunable_block));
 
             // Save prune checkpoint only if we don't have one already.
@@ -94,13 +100,14 @@ where
         }
 
         let mut range = input.next_block_range();
-        let first_sync = input.checkpoint().block_number == 0;
 
         // On first sync we might have history coming from genesis. We clear the table since it's
         // faster to rebuild from scratch.
         if first_sync {
             provider.tx_ref().clear::<tables::StoragesHistory>()?;
-            range = 0..=*input.next_block_range().end();
+            if !prune_target_applied {
+                range = 0..=*range.end();
+            }
         }
 
         info!(target: "sync::stages::index_storage_history::exec", ?first_sync, "Collecting indices");
@@ -127,7 +134,7 @@ where
             |key| AddressStorageKey((key.address, key.sharded_key.key)),
         )?;
 
-        Ok(ExecOutput { checkpoint: StageCheckpoint::new(*range.end()), done: true })
+        Ok(ExecOutput::done(StageCheckpoint::new(*range.end())))
     }
 
     /// Unwind the stage.
@@ -239,7 +246,7 @@ mod tests {
         let mut stage = IndexStorageHistoryStage::default();
         let provider = db.factory.database_provider_rw().unwrap();
         let out = stage.execute(&provider, input).unwrap();
-        assert_eq!(out, ExecOutput { checkpoint: StageCheckpoint::new(run_to), done: true });
+        assert_eq!(out, ExecOutput::done(StageCheckpoint::new(run_to)));
         provider.commit().unwrap();
     }
 
@@ -254,6 +261,42 @@ mod tests {
         let out = stage.unwind(&provider, input).unwrap();
         assert_eq!(out, UnwindOutput { checkpoint: StageCheckpoint::new(unwind_to) });
         provider.commit().unwrap();
+    }
+
+    #[tokio::test]
+    async fn prune_bump_rebuilds_history_after_aborted_transaction() {
+        let db = TestStageDB::default();
+        partial_setup(&db);
+        db.commit(|tx| {
+            tx.put::<tables::StoragesHistory>(shard(u64::MAX), list(&[1, 2, 3]))?;
+            Ok(())
+        })
+        .unwrap();
+        let input = || ExecInput { target: Some(20_000), checkpoint: None };
+        let mut stage = IndexStorageHistoryStage {
+            prune_mode: Some(PruneMode::Before(6)),
+            ..Default::default()
+        };
+        let provider = db.factory.database_provider_rw().unwrap();
+        let output = stage.execute(&provider, input()).unwrap();
+        assert_eq!(output, ExecOutput::done(StageCheckpoint::new(20_000)));
+        drop(provider);
+        // Unlike the upstream storage-v2 side database, Gravity's history batch is transactional.
+        assert_eq!(
+            cast(db.table::<tables::StoragesHistory>().unwrap()),
+            BTreeMap::from([(shard(u64::MAX), vec![1, 2, 3])])
+        );
+        let provider = db.factory.provider().unwrap();
+        assert!(provider.get_prune_checkpoint(PruneSegment::StorageHistory).unwrap().is_none());
+        drop(provider);
+
+        let provider = db.factory.database_provider_rw().unwrap();
+        stage.execute(&provider, input()).unwrap();
+        provider.commit().unwrap();
+        assert_eq!(
+            cast(db.table::<tables::StoragesHistory>().unwrap()),
+            BTreeMap::from([(shard(u64::MAX), (6..=MAX_BLOCK).collect())])
+        );
     }
 
     #[tokio::test]
@@ -502,7 +545,7 @@ mod tests {
         };
         let provider = db.factory.database_provider_rw().unwrap();
         let out = stage.execute(&provider, input).unwrap();
-        assert_eq!(out, ExecOutput { checkpoint: StageCheckpoint::new(20000), done: true });
+        assert_eq!(out, ExecOutput::done(StageCheckpoint::new(20000)));
         provider.commit().unwrap();
 
         // verify
@@ -593,10 +636,7 @@ mod tests {
                     return Ok(())
                 }
 
-                assert_eq!(
-                    output,
-                    ExecOutput { checkpoint: StageCheckpoint::new(input.target()), done: true }
-                );
+                assert_eq!(output, ExecOutput::done(StageCheckpoint::new(input.target())));
 
                 let provider = self.db.factory.provider()?;
                 let mut changeset_cursor =

@@ -6,7 +6,7 @@ use alloy_rpc_types_eth::{transaction::TransactionRequest, Index};
 use alloy_rpc_types_trace::{
     filter::TraceFilter,
     opcode::BlockOpcodeGas,
-    parity::{LocalizedTransactionTrace, TraceResults, TraceType},
+    parity::{LocalizedTransactionTrace, TraceResults, TraceResultsWithTransactionHash, TraceType},
     tracerequest::TraceCallRequest,
 };
 use futures::{Stream, StreamExt};
@@ -28,7 +28,8 @@ pub type TraceBlockResult = Result<(Vec<LocalizedTransactionTrace>, BlockId), (R
 pub type TraceBlockOpCodeGasResult = Result<(BlockOpcodeGas, BlockId), (RpcError, BlockId)>;
 
 /// Type alias representing the result of replaying a transaction.
-pub type ReplayTransactionResult = Result<(TraceResults, TxHash), (RpcError, TxHash)>;
+pub type ReplayTransactionResult =
+    Result<(Option<TraceResultsWithTransactionHash>, TxHash), (RpcError, TxHash)>;
 
 /// A type representing the result of calling `trace_call_many` method.
 pub type CallManyTraceResult = Result<

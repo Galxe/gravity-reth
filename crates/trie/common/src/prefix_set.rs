@@ -1,6 +1,7 @@
 use crate::Nibbles;
 use alloc::{sync::Arc, vec::Vec};
 use alloy_primitives::map::{B256Map, B256Set};
+use core::ops::Range;
 
 /// Collection of mutable prefix sets.
 #[derive(Clone, Default, Debug)]
@@ -161,14 +162,18 @@ impl PrefixSetMut {
     /// If not yet sorted, the elements will be sorted and deduplicated.
     pub fn freeze(mut self) -> PrefixSet {
         if self.all {
-            PrefixSet { index: 0, all: true, keys: Arc::new(Vec::new()) }
+            PrefixSet { index: 0, all: true, keys: None }
         } else {
             self.keys.sort_unstable();
             self.keys.dedup();
             // We need to shrink in both the sorted and non-sorted cases because deduping may have
             // occurred either on `freeze`, or during `contains`.
             self.keys.shrink_to_fit();
-            PrefixSet { index: 0, all: false, keys: Arc::new(self.keys) }
+            PrefixSet {
+                index: 0,
+                all: false,
+                keys: (!self.keys.is_empty()).then(|| Arc::new(self.keys)),
+            }
         }
     }
 }
@@ -181,7 +186,7 @@ pub struct PrefixSet {
     /// Flag indicating that any entry should be considered changed.
     all: bool,
     index: usize,
-    keys: Arc<Vec<Nibbles>>,
+    keys: Option<Arc<Vec<Nibbles>>>,
 }
 
 impl PrefixSet {
@@ -205,11 +210,12 @@ impl PrefixSet {
             return true
         }
 
-        while self.index > 0 && &self.keys[self.index] > prefix {
+        let keys = self.keys.as_deref().map(Vec::as_slice).unwrap_or_default();
+        while self.index > 0 && &keys[self.index] > prefix {
             self.index -= 1;
         }
 
-        for (idx, key) in self.keys[self.index..].iter().enumerate() {
+        for (idx, key) in keys[self.index..].iter().enumerate() {
             if key.starts_with(prefix) {
                 self.index += idx;
                 return true
@@ -224,9 +230,64 @@ impl PrefixSet {
         false
     }
 
+    /// Returns whether a key lies in the half-open range `[start, end)`.
+    ///
+    /// Like [`Self::contains`], keeps a position hint that can also rewind for earlier ranges.
+    #[inline]
+    pub fn contains_range(&mut self, range: Range<&Nibbles>) -> bool {
+        if range.start >= range.end {
+            return false
+        }
+        if self.all {
+            return true
+        }
+        let keys = self.keys.as_deref().map(Vec::as_slice).unwrap_or_default();
+        while self.index > 0 && &keys[self.index] >= range.end {
+            self.index -= 1;
+        }
+        for (index, key) in keys[self.index..].iter().enumerate() {
+            if key >= range.start && key < range.end {
+                self.index += index;
+                return true
+            }
+            if key >= range.end {
+                self.index += index;
+                return false
+            }
+        }
+        false
+    }
+
+    /// Returns `true` if any key in the set is at or after `start`.
+    #[inline]
+    pub fn contains_from(&mut self, start: &Nibbles) -> bool {
+        if self.all {
+            return true
+        }
+
+        let keys = self.keys.as_deref().map(Vec::as_slice).unwrap_or_default();
+        while self.index > 0 && &keys[self.index] > start {
+            self.index -= 1;
+        }
+
+        for (idx, key) in keys[self.index..].iter().enumerate() {
+            if key >= start {
+                self.index += idx;
+                return true
+            }
+        }
+
+        false
+    }
+
     /// Returns an iterator over reference to _all_ nibbles regardless of cursor position.
     pub fn iter(&self) -> core::slice::Iter<'_, Nibbles> {
-        self.keys.iter()
+        self.slice().iter()
+    }
+
+    /// Returns the underlying sorted prefixes.
+    pub fn slice(&self) -> &[Nibbles] {
+        self.keys.as_deref().map(Vec::as_slice).unwrap_or_default()
     }
 
     /// Returns true if every entry should be considered changed.
@@ -236,12 +297,12 @@ impl PrefixSet {
 
     /// Returns the number of elements in the set.
     pub fn len(&self) -> usize {
-        self.keys.len()
+        self.slice().len()
     }
 
     /// Returns `true` if the set is empty.
-    pub fn is_empty(&self) -> bool {
-        self.keys.is_empty()
+    pub const fn is_empty(&self) -> bool {
+        !self.all && self.keys.is_none()
     }
 }
 
@@ -256,6 +317,60 @@ impl<'a> IntoIterator for &'a PrefixSet {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_contains_from() {
+        let first = Nibbles::from_nibbles([1, 2, 3]);
+        let middle = Nibbles::from_nibbles([1, 2, 4]);
+        let last = Nibbles::from_nibbles([4, 5, 6]);
+        let mut prefix_set = PrefixSetMut::from([first, middle, last]).freeze();
+
+        assert!(prefix_set.contains_range(&first..&middle));
+        assert!(prefix_set.contains_from(&middle));
+        assert!(prefix_set.contains_from(&last));
+        assert!(!prefix_set.contains_from(&Nibbles::from_nibbles([5])));
+    }
+
+    #[test]
+    fn range_contains_rewinds_and_uses_half_open_bounds() {
+        let keys = [
+            Nibbles::from_nibbles([1, 1]),
+            Nibbles::from_nibbles([2]),
+            Nibbles::from_nibbles([9, 0]),
+            Nibbles::from_nibbles([15, 14]),
+        ];
+        let mut set = PrefixSetMut::default();
+        for key in keys {
+            set.insert(key);
+        }
+        let mut set = set.freeze();
+        for start in (0u8..16).rev() {
+            for end in 0u8..16 {
+                let start = Nibbles::from_nibbles([start]);
+                let end = Nibbles::from_nibbles([end]);
+                set.contains(&Nibbles::from_nibbles([15]));
+                assert_eq!(
+                    set.contains_range(&start..&end),
+                    keys.iter().any(|key| key >= &start && key < &end)
+                );
+            }
+        }
+        let empty = Nibbles::default();
+        assert!(!PrefixSet::default().contains_range(&empty..&Nibbles::from_nibbles([15])));
+        let mut all = PrefixSetMut::all().freeze();
+        assert!(!all.contains_range(&empty..&empty));
+        assert!(all.contains_range(&empty..&Nibbles::from_nibbles([1])));
+    }
+
+    #[test]
+    fn empty_prefix_sets_do_not_allocate() {
+        assert!(PrefixSet::default().keys.is_none());
+        assert!(PrefixSetMut::default().freeze().keys.is_none());
+        let mut all = PrefixSetMut::all().freeze();
+        assert!(all.keys.is_none());
+        assert!(all.contains(&Nibbles::default()));
+        assert!(!all.is_empty());
+    }
 
     #[test]
     fn test_contains_with_multiple_inserts_and_duplicates() {
@@ -287,8 +402,9 @@ mod tests {
         assert!(prefix_set.contains(&Nibbles::from_nibbles_unchecked([1, 2])));
         assert!(prefix_set.contains(&Nibbles::from_nibbles_unchecked([4, 5])));
         assert!(!prefix_set.contains(&Nibbles::from_nibbles_unchecked([7, 8])));
-        assert_eq!(prefix_set.keys.len(), 3); // Length should be 3 (excluding duplicate)
-        assert_eq!(prefix_set.keys.capacity(), 3); // Capacity should be 3 after shrinking
+        assert_eq!(prefix_set.slice().len(), 3); // Length should be 3 (excluding duplicate)
+        assert_eq!(prefix_set.keys.as_ref().unwrap().capacity(), 3); // Capacity should be 3 after
+                                                                     // shrinking
     }
 
     #[test]
@@ -307,8 +423,9 @@ mod tests {
         assert!(prefix_set.contains(&Nibbles::from_nibbles_unchecked([1, 2])));
         assert!(prefix_set.contains(&Nibbles::from_nibbles_unchecked([4, 5])));
         assert!(!prefix_set.contains(&Nibbles::from_nibbles_unchecked([7, 8])));
-        assert_eq!(prefix_set.keys.len(), 3); // Length should be 3 (excluding duplicate)
-        assert_eq!(prefix_set.keys.capacity(), 3); // Capacity should be 3 after shrinking
+        assert_eq!(prefix_set.slice().len(), 3); // Length should be 3 (excluding duplicate)
+        assert_eq!(prefix_set.keys.as_ref().unwrap().capacity(), 3); // Capacity should be 3 after
+                                                                     // shrinking
     }
 
     #[test]

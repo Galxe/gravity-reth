@@ -24,7 +24,7 @@ mod tests {
         let builder = EthRpcConverter::new(EthReceiptConverter::new(MAINNET.clone()));
         let mut db = CacheDB::<reth_revm::db::EmptyDBTyped<reth_errors::ProviderError>>::default();
         let tx = TransactionRequest::default();
-        let result = resolve_transaction(tx, 21000, 0, 1, &mut db, &builder).unwrap();
+        let result = resolve_transaction(tx, 21000, 0, 1, false, &mut db, &builder).unwrap();
 
         // For an empty request, we should get a valid transaction with defaults
         let tx = result.into_inner();
@@ -40,7 +40,7 @@ mod tests {
 
         let tx = TransactionRequest { gas_price: Some(100), ..Default::default() };
 
-        let tx = resolve_transaction(tx, 21000, 0, 1, &mut db, &builder).unwrap();
+        let tx = resolve_transaction(tx, 21000, 0, 1, false, &mut db, &builder).unwrap();
 
         assert_eq!(tx.tx_type(), TxType::Legacy);
 
@@ -60,12 +60,45 @@ mod tests {
             ..Default::default()
         };
 
-        let result = resolve_transaction(tx, 21000, 0, 1, &mut db, &rpc_converter).unwrap();
+        let result = resolve_transaction(tx, 21000, 0, 1, false, &mut db, &rpc_converter).unwrap();
 
         assert_eq!(result.tx_type(), TxType::Eip1559);
         let tx = result.into_inner();
         assert_eq!(tx.max_fee_per_gas(), 200);
         assert_eq!(tx.max_priority_fee_per_gas(), Some(10));
         assert_eq!(tx.gas_price(), None);
+    }
+
+    #[test]
+    fn test_resolve_transaction_wraps_max_nonce_when_nonce_check_disabled() {
+        let mut db = CacheDB::<reth_revm::db::EmptyDBTyped<reth_errors::ProviderError>>::default();
+        let rpc_converter = EthRpcConverter::new(EthReceiptConverter::new(MAINNET.clone()));
+
+        let tx = TransactionRequest { nonce: Some(u64::MAX), ..Default::default() };
+
+        let result = resolve_transaction(tx, 21000, 0, 1, true, &mut db, &rpc_converter).unwrap();
+
+        assert_eq!(result.nonce(), 0);
+    }
+    #[test]
+    fn test_resolve_transaction_rejects_max_state_nonce_in_both_modes() {
+        for disable_nonce_check in [false, true] {
+            for nonce in [None, Some(u64::MAX)] {
+                let mut db =
+                    CacheDB::<reth_revm::db::EmptyDBTyped<reth_errors::ProviderError>>::default();
+                db.insert_account_info(
+                    alloy_primitives::Address::ZERO,
+                    revm::state::AccountInfo { nonce: u64::MAX, ..Default::default() },
+                );
+                let converter = EthRpcConverter::new(EthReceiptConverter::new(MAINNET.clone()));
+                let tx = TransactionRequest { nonce, ..Default::default() };
+                let err =
+                    resolve_transaction(tx, 21000, 0, 1, disable_nonce_check, &mut db, &converter)
+                        .unwrap_err();
+                let err = err.into_rpc_err();
+                assert_eq!(err.code(), -32603);
+                assert_eq!(err.message(), "nonce has max value");
+            }
+        }
     }
 }

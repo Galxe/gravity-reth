@@ -4,7 +4,7 @@
 # Usage:
 #   reth: --build-arg BINARY=reth
 
-FROM rust:1.93 AS builder
+FROM rust:1.95 AS builder
 WORKDIR /app
 
 LABEL org.opencontainers.image.source=https://github.com/paradigmxyz/reth
@@ -35,7 +35,7 @@ ARG RUSTFLAGS=""
 ARG FEATURES=""
 ENV FEATURES=$FEATURES
 
-# Git info for vergen (since .git is excluded from Docker context)
+# Git info for smolgen (since .git is excluded from Docker context)
 ARG VERGEN_GIT_SHA=""
 ARG VERGEN_GIT_DESCRIBE=""
 ARG VERGEN_GIT_DIRTY="false"
@@ -47,10 +47,15 @@ ENV VERGEN_GIT_DIRTY=$VERGEN_GIT_DIRTY
 # Platform-specific RUSTFLAGS: amd64 uses x86-64-v3 (Haswell+) with pclmulqdq for rocksdb
 ARG TARGETPLATFORM
 COPY --exclude=.git . .
+# Separate caches by platform and profile; lock both fetch and build against clone/unpack races.
+# The fetch step has no Depot token and must not invoke sccache.
+RUN --mount=type=cache,id=cargo-registry-$TARGETPLATFORM-$BUILD_PROFILE,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=cargo-git-$TARGETPLATFORM-$BUILD_PROFILE,target=/usr/local/cargo/git,sharing=locked \
+    RUSTC_WRAPPER= cargo fetch --locked
 RUN --mount=type=secret,id=DEPOT_TOKEN,env=SCCACHE_WEBDAV_TOKEN \
-    --mount=type=cache,target=/usr/local/cargo/registry,sharing=shared \
-    --mount=type=cache,target=/usr/local/cargo/git,sharing=shared \
-    --mount=type=cache,target=$SCCACHE_DIR,sharing=shared \
+    --mount=type=cache,id=cargo-registry-$TARGETPLATFORM-$BUILD_PROFILE,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=cargo-git-$TARGETPLATFORM-$BUILD_PROFILE,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=sccache-$TARGETPLATFORM-$BUILD_PROFILE,target=$SCCACHE_DIR,sharing=locked \
     export RUSTC_WRAPPER=sccache SCCACHE_WEBDAV_ENDPOINT=https://cache.depot.dev SCCACHE_DIR=/sccache && \
     sccache --start-server && \
     if [ -n "$RUSTFLAGS" ]; then \

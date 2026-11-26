@@ -5,6 +5,7 @@ use crate::{
     hooks::NodeHooks,
     rpc::{EngineShutdown, EngineValidatorAddOn, EngineValidatorBuilder, RethRpcAddOns, RpcHandle},
     setup::build_networked_pipeline,
+    sync::{BackfillContext, BackfillSyncBuilder, PipelineBackfill},
     AddOns, AddOnsContext, FullNode, LaunchContext, LaunchNode, Node, NodeAdapter,
     NodeBuilderWithComponents, NodeComponents, NodeComponentsBuilder, NodeHandle, NodeTypesAdapter,
     RethFullAdapter,
@@ -16,7 +17,7 @@ use reth_db::{database_metrics::DatabaseMetrics, Database};
 use reth_engine_tree::{
     chain::{ChainEvent, FromOrchestrator},
     engine::{EngineApiKind, EngineApiRequest, EngineRequestHandler},
-    launch::build_engine_orchestrator,
+    launch::EngineOrchestratorBuilder,
     tree::TreeConfig,
 };
 use reth_engine_util::EngineMessageStreamExt;
@@ -38,6 +39,7 @@ use reth_provider::{
     providers::{BlockchainProvider, NodeTypesForProvider},
     BlockNumReader, StorageSettingsCache,
 };
+use reth_rpc_layer::JwtSecret;
 use reth_tasks::TaskExecutor;
 use reth_tokio_util::EventSender;
 use reth_tracing::tracing::{debug, error, info};
@@ -47,13 +49,15 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 
 /// The engine node launcher.
 #[derive(Debug)]
-pub struct EngineNodeLauncher {
+pub struct EngineNodeLauncher<B = PipelineBackfill> {
     /// The task executor for the node.
     pub ctx: LaunchContext,
 
     /// Temporary configuration for engine tree.
     /// After engine is stabilized, this should be configured through node builder.
     pub engine_tree_config: TreeConfig,
+    /// Builds the engine backfill; staged sync remains the default.
+    backfill: B,
 }
 
 impl EngineNodeLauncher {
@@ -63,7 +67,19 @@ impl EngineNodeLauncher {
         data_dir: ChainPath<DataDirPath>,
         engine_tree_config: TreeConfig,
     ) -> Self {
-        Self { ctx: LaunchContext::new(task_executor, data_dir), engine_tree_config }
+        Self {
+            ctx: LaunchContext::new(task_executor, data_dir),
+            engine_tree_config,
+            backfill: PipelineBackfill,
+        }
+    }
+}
+
+impl<B> EngineNodeLauncher<B> {
+    /// Selects the backfill builder while preserving the launcher configuration.
+    pub fn with_backfill<B2>(self, backfill: B2) -> EngineNodeLauncher<B2> {
+        let Self { ctx, engine_tree_config, .. } = self;
+        EngineNodeLauncher { ctx, engine_tree_config, backfill }
     }
 
     async fn launch_node<N, DB, T, CB, AO>(
@@ -81,8 +97,12 @@ impl EngineNodeLauncher {
         CB: NodeComponentsBuilder<T>,
         AO: RethRpcAddOns<NodeAdapter<T, CB::Components>>
             + EngineValidatorAddOn<NodeAdapter<T, CB::Components>>,
+        B: BackfillSyncBuilder<
+            NodeTypesWithDBAdapter<N, DB>,
+            <<CB::Components as NodeComponents<T>>::Network as BlockDownloaderProvider>::Client,
+        >,
     {
-        let Self { ctx, engine_tree_config } = self;
+        let Self { ctx, engine_tree_config, mut backfill } = self;
         let NodeBuilderWithComponents {
             adapter: NodeTypesAdapter { database },
             components_builder,
@@ -105,7 +125,7 @@ impl EngineNodeLauncher {
             // ensure certain settings take effect
             .with_adjusted_configs()
             // Create the provider factory
-            .with_provider_factory::<_, <CB::Components as NodeComponents<T>>::Evm>().await?
+            .with_provider_factory_and_recovery::<_, <CB::Components as NodeComponents<T>>::Evm>(|factory| backfill.recover(factory)).await?
             .inspect(|_| {
                 info!(target: "reth::cli", "Database opened");
             })
@@ -196,8 +216,12 @@ impl EngineNodeLauncher {
 
         let beacon_engine_handle = ConsensusEngineHandle::new(consensus_engine_tx.clone());
 
-        // extract the jwt secret from the args if possible
-        let jwt_secret = ctx.auth_jwt_secret()?;
+        // No auth server consumes this secret, so avoid reading or creating its file.
+        let jwt_secret = if ctx.node_config().rpc.disable_auth_server {
+            JwtSecret::random()
+        } else {
+            ctx.auth_jwt_secret()?
+        };
 
         let add_ons_ctx = AddOnsContext {
             node: ctx.node_adapter().clone(),
@@ -205,6 +229,7 @@ impl EngineNodeLauncher {
             beacon_engine_handle: beacon_engine_handle.clone(),
             jwt_secret,
             engine_events: event_sender.clone(),
+            sender_recovery_cache: ctx.sender_recovery_cache().cloned(),
         };
         let validator_builder = add_ons.engine_validator_builder();
 
@@ -241,23 +266,33 @@ impl EngineNodeLauncher {
             EngineApiKind::Ethereum
         };
 
-        let mut orchestrator = build_engine_orchestrator(
+        let (backfill_client, backfill_factory) =
+            (network_client.clone(), ctx.provider_factory().clone());
+        let mut orchestrator = EngineOrchestratorBuilder {
             engine_kind,
-            consensus.clone(),
-            network_client.clone(),
-            Box::pin(consensus_engine_stream),
+            consensus: consensus.clone(),
+            client: network_client.clone(),
+            incoming_requests: Box::pin(consensus_engine_stream),
             pipeline,
-            ctx.task_executor().clone(),
-            ctx.provider_factory().clone(),
-            ctx.blockchain_db().clone(),
+            pipeline_task_spawner: ctx.task_executor().clone(),
+            provider: ctx.provider_factory().clone(),
+            blockchain_db: ctx.blockchain_db().clone(),
             pruner,
-            ctx.components().payload_builder_handle().clone(),
-            engine_validator,
-            engine_tree_config,
-            ctx.sync_metrics_tx(),
-            ctx.components().evm_config().clone(),
-            ctx.task_executor().clone(),
-        );
+            payload_builder: ctx.components().payload_builder_handle().clone(),
+            payload_validator: engine_validator,
+            tree_config: engine_tree_config,
+            sync_metrics_tx: ctx.sync_metrics_tx(),
+            evm_config: ctx.components().evm_config().clone(),
+            runtime: ctx.task_executor().clone(),
+        }
+        .build_with_backfill(|pipeline, runtime| {
+            backfill.build(BackfillContext::new(
+                pipeline,
+                backfill_client,
+                backfill_factory,
+                runtime,
+            ))
+        })?;
 
         info!(target: "reth::cli", "Consensus engine initialized");
 
@@ -372,7 +407,7 @@ impl EngineNodeLauncher {
                             }
                         }
                     }
-                    payload = built_payloads.select_next_some(), if !built_payloads.is_terminated() => {
+                    Some(payload) = built_payloads.next(), if !built_payloads.is_terminated() => {
                         if let Some(executed_block) = payload.executed_block() {
                             debug!(target: "reth::cli", block=?executed_block.recovered_block.num_hash(),  "inserting built payload");
                             // Bridge the v2.3.0 `BuiltPayloadExecutedBlock` into the gravity-form
@@ -455,7 +490,7 @@ impl EngineNodeLauncher {
     }
 }
 
-impl<N, DB, T, CB, AO> LaunchNode<NodeBuilderWithComponents<T, CB, AO>> for EngineNodeLauncher
+impl<N, DB, T, CB, AO, B> LaunchNode<NodeBuilderWithComponents<T, CB, AO>> for EngineNodeLauncher<B>
 where
     T: FullNodeTypes<
         Types = N,
@@ -468,6 +503,10 @@ where
     AO: RethRpcAddOns<NodeAdapter<T, CB::Components>>
         + EngineValidatorAddOn<NodeAdapter<T, CB::Components>>
         + 'static,
+    B: BackfillSyncBuilder<
+            NodeTypesWithDBAdapter<N, DB>,
+            <<CB::Components as NodeComponents<T>>::Network as BlockDownloaderProvider>::Client,
+        > + 'static,
 {
     type Node = NodeHandle<NodeAdapter<T, CB::Components>, AO>;
     type Future = Pin<Box<dyn Future<Output = eyre::Result<Self::Node>> + Send>>;

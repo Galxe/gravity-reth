@@ -24,6 +24,7 @@ alloy-eip7928 = { workspace = true, features = ["rlp"], optional = true }
 alloy-eips.workspace = true
 alloy-primitives = { workspace = true, features = ["map"] }
 alloy-rlp = { workspace = true, features = ["derive"] }
+alloy-trie.workspace = true
 alloy-consensus.workspace = true
 
 bytes.workspace = true
@@ -49,10 +50,12 @@ arbitrary = { workspace = true, features = ["derive"] }
 proptest.workspace = true
 proptest-arbitrary-interop.workspace = true
 rand.workspace = true
+test-case.workspace = true
 
 [features]
 default = ["std"]
 std = [
+    "alloy-trie/std",
     "alloy-chains/std",
     "alloy-consensus/std",
     "alloy-eip7928?/std",
@@ -69,6 +72,7 @@ std = [
     "reth-chainspec/std",
 ]
 arbitrary = [
+    "alloy-trie/arbitrary",
     "reth-ethereum-primitives/arbitrary",
     "alloy-chains/arbitrary",
     "dep:alloy-eip7928",
@@ -83,6 +87,7 @@ arbitrary = [
     "reth-primitives-traits/arbitrary",
 ]
 serde = [
+    "alloy-trie/serde",
     "dep:serde",
     "alloy-chains/serde",
     "alloy-consensus/serde",

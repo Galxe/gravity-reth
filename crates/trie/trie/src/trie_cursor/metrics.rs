@@ -1,5 +1,8 @@
-use super::{TrieCursor, TrieStorageCursor};
-use crate::{BranchNodeCompact, Nibbles};
+use super::TrieCursor;
+use crate::{
+    proof_v2::cursor::{ResettableTrieCursor, TrieStorageCursor},
+    BranchNodeCompact, Nibbles,
+};
 use alloy_primitives::B256;
 use reth_primitives_traits::FastInstant as Instant;
 use reth_storage_errors::db::DatabaseError;
@@ -17,8 +20,8 @@ use reth_metrics::metrics::{self, Histogram};
 #[cfg(feature = "metrics")]
 #[derive(Clone, Debug)]
 pub struct TrieCursorMetrics {
-    /// Histogram tracking overall time spent in database operations
-    overall_duration: Histogram,
+    /// Histogram tracking overall time spent in database operations, in seconds.
+    overall_duration_seconds: Histogram,
     /// Histogram for `next()` operations
     next_histogram: Histogram,
     /// Histogram for `seek()` operations
@@ -34,8 +37,8 @@ impl TrieCursorMetrics {
         let trie_type_str = trie_type.as_str();
 
         Self {
-            overall_duration: metrics::histogram!(
-                "trie.cursor.overall_duration",
+            overall_duration_seconds: metrics::histogram!(
+                "trie.cursor.overall_duration_seconds",
                 "type" => trie_type_str
             ),
             next_histogram: metrics::histogram!(
@@ -64,7 +67,7 @@ impl TrieCursorMetrics {
         self.next_histogram.record(cache.next_count as f64);
         self.seek_histogram.record(cache.seek_count as f64);
         self.seek_exact_histogram.record(cache.seek_exact_count as f64);
-        self.overall_duration.record(cache.total_duration.as_secs_f64());
+        self.overall_duration_seconds.record(cache.total_duration.as_secs_f64());
         cache.reset();
     }
 }
@@ -124,6 +127,9 @@ impl TrieCursorMetricsCache {
 
 /// A wrapper around a [`TrieCursor`] that tracks metrics for cursor operations.
 ///
+/// This observer preserves the underlying cursor's read view and reset errors; it does not
+/// create a snapshot or install itself in a factory.
+///
 /// This implementation counts the number of times each cursor operation is called:
 /// - `next()` - Move to the next entry
 /// - `seek()` - Seek to a key or the next greater key
@@ -177,14 +183,55 @@ impl<'metrics, C: TrieCursor> TrieCursor for InstrumentedTrieCursor<'metrics, C>
     fn current(&mut self) -> Result<Option<Nibbles>, DatabaseError> {
         self.cursor.current()
     }
+}
 
-    fn reset(&mut self) {
+impl<C: ResettableTrieCursor> ResettableTrieCursor for InstrumentedTrieCursor<'_, C> {
+    fn reset(&mut self) -> Result<(), DatabaseError> {
         self.cursor.reset()
     }
 }
 
-impl<'metrics, C: TrieStorageCursor> TrieStorageCursor for InstrumentedTrieCursor<'metrics, C> {
-    fn set_hashed_address(&mut self, hashed_address: B256) {
+impl<C: TrieStorageCursor> TrieStorageCursor for InstrumentedTrieCursor<'_, C> {
+    fn set_hashed_address(&mut self, hashed_address: B256) -> Result<(), DatabaseError> {
         self.cursor.set_hashed_address(hashed_address)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::trie_cursor::{mock::MockTrieCursorFactory, TrieCursorFactory};
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn observer_preserves_trie_reads_and_counts_operations() {
+        let keys = [Nibbles::from_nibbles([1]), Nibbles::from_nibbles([2])];
+        let factory = MockTrieCursorFactory::new(
+            keys.into_iter()
+                .map(|key| (key, BranchNodeCompact::default()))
+                .collect::<BTreeMap<_, _>>(),
+            Default::default(),
+        );
+        let mut expected = factory.account_trie_cursor().unwrap();
+        let mut cache = TrieCursorMetricsCache::default();
+        {
+            let mut cursor =
+                InstrumentedTrieCursor::new(factory.account_trie_cursor().unwrap(), &mut cache);
+            assert_eq!(cursor.seek_exact(keys[0]).unwrap(), expected.seek_exact(keys[0]).unwrap());
+            assert_eq!(cursor.current().unwrap(), expected.current().unwrap());
+            assert_eq!(cursor.next().unwrap(), expected.next().unwrap());
+            assert_eq!(cursor.next().unwrap(), expected.next().unwrap());
+            assert_eq!(
+                cursor.seek(Nibbles::new()).unwrap(),
+                expected.seek(Nibbles::new()).unwrap()
+            );
+        }
+        assert_eq!((cache.seek_count, cache.seek_exact_count, cache.next_count), (1, 1, 2));
+        let copy = cache;
+        cache.extend(&copy);
+        assert_eq!((cache.seek_count, cache.seek_exact_count, cache.next_count), (2, 2, 4));
+        cache.reset();
+        assert_eq!((cache.seek_count, cache.seek_exact_count, cache.next_count), (0, 0, 0));
+        assert_eq!(cache.total_duration, Duration::ZERO);
     }
 }

@@ -45,19 +45,7 @@ impl<'a, TX: DbTx> DatabaseProof<'a, TX>
         address: Address,
         slots: &[B256],
     ) -> Result<AccountProof, StateProofError> {
-        let nodes_sorted = input.nodes.into_sorted();
-        let state_sorted = input.state.into_sorted();
-        Self::from_tx(tx)
-            .with_trie_cursor_factory(InMemoryTrieCursorFactory::new(
-                DatabaseTrieCursorFactory::new(tx),
-                &nodes_sorted,
-            ))
-            .with_hashed_cursor_factory(HashedPostStateCursorFactory::new(
-                DatabaseHashedCursorFactory::new(tx),
-                &state_sorted,
-            ))
-            .with_prefix_sets_mut(input.prefix_sets)
-            .account_proof(address, slots)
+        with_overlay(tx, input, |proof| proof.account_proof(address, slots))
     }
 
     fn overlay_multiproof(
@@ -65,19 +53,7 @@ impl<'a, TX: DbTx> DatabaseProof<'a, TX>
         input: TrieInput,
         targets: MultiProofTargets,
     ) -> Result<MultiProof, StateProofError> {
-        let nodes_sorted = input.nodes.into_sorted();
-        let state_sorted = input.state.into_sorted();
-        Self::from_tx(tx)
-            .with_trie_cursor_factory(InMemoryTrieCursorFactory::new(
-                DatabaseTrieCursorFactory::new(tx),
-                &nodes_sorted,
-            ))
-            .with_hashed_cursor_factory(HashedPostStateCursorFactory::new(
-                DatabaseHashedCursorFactory::new(tx),
-                &state_sorted,
-            ))
-            .with_prefix_sets_mut(input.prefix_sets)
-            .multiproof(targets)
+        with_overlay(tx, input, |proof| proof.multiproof(targets))
     }
 }
 
@@ -152,4 +128,24 @@ impl<'a, TX: DbTx> DatabaseStorageProof<'a, TX>
             .with_prefix_set_mut(prefix_set)
             .storage_multiproof(targets)
     }
+}
+
+// Keep sorting, cursor layering and prefix invalidation identical across the legacy proof entries.
+fn with_overlay<'a, TX: DbTx, R>(
+    tx: &'a TX,
+    input: TrieInput,
+    f: impl FnOnce(
+        Proof<
+            InMemoryTrieCursorFactory<'_, DatabaseTrieCursorFactory<'a, TX>>,
+            HashedPostStateCursorFactory<'_, DatabaseHashedCursorFactory<'a, TX>>,
+        >,
+    ) -> R,
+) -> R {
+    let nodes = input.nodes.into_sorted();
+    let state = input.state.into_sorted();
+    f(Proof::new(
+        InMemoryTrieCursorFactory::new(DatabaseTrieCursorFactory::new(tx), &nodes),
+        HashedPostStateCursorFactory::new(DatabaseHashedCursorFactory::new(tx), &state),
+    )
+    .with_prefix_sets_mut(input.prefix_sets))
 }

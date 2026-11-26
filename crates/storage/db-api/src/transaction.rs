@@ -12,6 +12,14 @@ pub trait DbTx: Debug + Send + Sync {
     /// `DupCursor` type for this read-only transaction
     type DupCursor<T: DupSort>: DbDupCursorRO<T> + DbCursorRO<T> + Send + Sync;
 
+    /// Whether reads from this table are pinned to one snapshot for this transaction's lifetime.
+    ///
+    /// Callers may retain an iterator across queries only when this returns true. A live database
+    /// iterator can otherwise keep an older implicit snapshot than subsequent point reads.
+    fn is_fixed_snapshot<T: Table>(&self) -> bool {
+        false
+    }
+
     /// Get value by an owned key
     fn get<T: Table>(&self, key: T::Key) -> Result<Option<T::Value>, DatabaseError>;
     /// Get value by a reference to the encoded key, especially useful for "raw" keys

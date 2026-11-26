@@ -13,7 +13,7 @@ use crate::{
     HashBuilder, Nibbles, TRIE_ACCOUNT_RLP_MAX_SIZE,
 };
 use alloy_consensus::EMPTY_ROOT_HASH;
-use alloy_primitives::{keccak256, Address, B256};
+use alloy_primitives::{keccak256, map::B256Map, Address, B256, U256};
 use alloy_rlp::{BufMut, Encodable};
 use alloy_trie::proof::AddedRemovedKeys;
 use reth_execution_errors::{StateRootError, StorageRootError};
@@ -22,7 +22,7 @@ use tracing::{debug, instrument, trace};
 
 /// The default updates after which root algorithms should return intermediate progress rather than
 /// finishing the computation.
-const DEFAULT_INTERMEDIATE_THRESHOLD: u64 = 100_000;
+pub(crate) const DEFAULT_INTERMEDIATE_THRESHOLD: u64 = 100_000;
 
 #[cfg(feature = "metrics")]
 use crate::metrics::{StateRootMetrics, TrieRootMetrics};
@@ -36,6 +36,10 @@ pub struct StateRoot<T, H> {
     pub hashed_cursor_factory: H,
     /// A set of prefix sets that have changed.
     pub prefix_sets: TriePrefixSets,
+    /// Whether every child of a changed branch path must be walked.
+    walk_all_changed_branch_children: bool,
+    /// Whether destroyed storage tries are represented by explicit stored-node removals.
+    materialize_destroyed_storage_nodes: bool,
     /// Previous intermediate state.
     previous_state: Option<IntermediateStateRootState>,
     /// The number of updates after which the intermediate progress should be returned.
@@ -56,6 +60,8 @@ impl<T, H> StateRoot<T, H> {
             trie_cursor_factory,
             hashed_cursor_factory,
             prefix_sets: TriePrefixSets::default(),
+            walk_all_changed_branch_children: false,
+            materialize_destroyed_storage_nodes: false,
             previous_state: None,
             threshold: DEFAULT_INTERMEDIATE_THRESHOLD,
             #[cfg(feature = "metrics")]
@@ -66,6 +72,26 @@ impl<T, H> StateRoot<T, H> {
     /// Set the prefix sets.
     pub fn with_prefix_sets(mut self, prefix_sets: TriePrefixSets) -> Self {
         self.prefix_sets = prefix_sets;
+        self
+    }
+
+    /// Configures the walker to visit all children of changed branch paths.
+    ///
+    /// When updates are retained, also removes stored descendants hidden by a changed branch's
+    /// tree mask. Regenerated branch updates take precedence over these deletions.
+    pub const fn with_walk_all_changed_branch_children(mut self, enabled: bool) -> Self {
+        self.walk_all_changed_branch_children = enabled;
+        self
+    }
+
+    /// Uses explicit legacy storage-node removals for destroyed accounts when retaining updates.
+    ///
+    /// Disabled by default: existing callers retain whole-storage `is_deleted` updates. This mode
+    /// enumerates the legacy trie cursor for each destroyed account, propagating read errors.
+    /// Factories must expose one immutable view for both calculation and node enumeration; this
+    /// does not change the production nested trie or interpret its native table encoding.
+    pub const fn with_materialized_destroyed_storage_nodes(mut self, enabled: bool) -> Self {
+        self.materialize_destroyed_storage_nodes = enabled;
         self
     }
 
@@ -94,6 +120,8 @@ impl<T, H> StateRoot<T, H> {
             hashed_cursor_factory,
             prefix_sets: self.prefix_sets,
             threshold: self.threshold,
+            walk_all_changed_branch_children: self.walk_all_changed_branch_children,
+            materialize_destroyed_storage_nodes: self.materialize_destroyed_storage_nodes,
             previous_state: self.previous_state,
             #[cfg(feature = "metrics")]
             metrics: self.metrics,
@@ -107,6 +135,8 @@ impl<T, H> StateRoot<T, H> {
             hashed_cursor_factory: self.hashed_cursor_factory,
             prefix_sets: self.prefix_sets,
             threshold: self.threshold,
+            walk_all_changed_branch_children: self.walk_all_changed_branch_children,
+            materialize_destroyed_storage_nodes: self.materialize_destroyed_storage_nodes,
             previous_state: self.previous_state,
             #[cfg(feature = "metrics")]
             metrics: self.metrics,
@@ -178,6 +208,7 @@ where
                 account_root_state.walker_stack,
                 self.prefix_sets.account_prefix_set,
             )
+            .with_walk_all_changed_branch_children(self.walk_all_changed_branch_children)
             .with_deletions_retained(retain_updates);
             let account_node_iter = TrieNodeIter::state_trie(walker, hashed_account_cursor)
                 .with_last_hashed_key(account_root_state.last_hashed_key);
@@ -213,6 +244,7 @@ where
                     self.metrics.storage_trie.clone(),
                 )
                 .with_intermediate_state(Some(storage_state.state))
+                .with_walk_all_changed_branch_children(self.walk_all_changed_branch_children)
                 .with_threshold(remaining_threshold);
 
                 let storage_result = storage_root_calculator.calculate(retain_updates)?;
@@ -238,7 +270,8 @@ where
             // no intermediate state, create new hash builder and node iter for state root
             // calculation
             let hash_builder = HashBuilder::default().with_updates(retain_updates);
-            let walker = TrieWalker::state_trie(trie_cursor, self.prefix_sets.account_prefix_set)
+            let walker = TrieWalker::state_trie(trie_cursor, self.prefix_sets.account_prefix_set)?
+                .with_walk_all_changed_branch_children(self.walk_all_changed_branch_children)
                 .with_deletions_retained(retain_updates);
             let node_iter = TrieNodeIter::state_trie(walker, hashed_account_cursor);
             (hash_builder, node_iter)
@@ -272,6 +305,7 @@ where
                         #[cfg(feature = "metrics")]
                         self.metrics.storage_trie.clone(),
                     )
+                    .with_walk_all_changed_branch_children(self.walk_all_changed_branch_children)
                     .with_threshold(remaining_threshold);
 
                     let storage_result = storage_root_calculator.calculate(retain_updates)?;
@@ -310,7 +344,28 @@ where
 
         let removed_keys = account_node_iter.walker.take_removed_keys();
         let StateRootContext { mut trie_updates, hashed_entries_walked, .. } = storage_ctx;
-        trie_updates.finalize(hash_builder, removed_keys, self.prefix_sets.destroyed_accounts);
+        if self.materialize_destroyed_storage_nodes && retain_updates {
+            let mut destroyed_nodes = B256Map::default();
+            for address in self.prefix_sets.destroyed_accounts {
+                let mut cursor = self.trie_cursor_factory.storage_trie_cursor(address)?;
+                let mut entry = cursor.seek(Nibbles::default())?;
+                let mut paths = Vec::new();
+                while let Some((path, _)) = entry {
+                    paths.push(path);
+                    entry = cursor.next()?;
+                }
+                if !paths.is_empty() {
+                    destroyed_nodes.insert(address, paths);
+                }
+            }
+            trie_updates.finalize_with_destroyed_storage_nodes(
+                hash_builder,
+                removed_keys,
+                destroyed_nodes,
+            );
+        } else {
+            trie_updates.finalize(hash_builder, removed_keys, self.prefix_sets.destroyed_accounts);
+        }
 
         let stats = tracker.finish();
 
@@ -465,6 +520,8 @@ pub struct StorageRoot<T, H> {
     pub hashed_address: B256,
     /// The set of storage slot prefixes that have changed.
     pub prefix_set: PrefixSet,
+    /// Whether every child of a changed branch path must be walked.
+    walk_all_changed_branch_children: bool,
     /// Previous intermediate state.
     previous_state: Option<IntermediateRootState>,
     /// The number of updates after which the intermediate progress should be returned.
@@ -506,6 +563,7 @@ impl<T, H> StorageRoot<T, H> {
             hashed_cursor_factory,
             hashed_address,
             prefix_set,
+            walk_all_changed_branch_children: false,
             previous_state: None,
             threshold: DEFAULT_INTERMEDIATE_THRESHOLD,
             #[cfg(feature = "metrics")]
@@ -516,6 +574,15 @@ impl<T, H> StorageRoot<T, H> {
     /// Set the changed prefixes.
     pub fn with_prefix_set(mut self, prefix_set: PrefixSet) -> Self {
         self.prefix_set = prefix_set;
+        self
+    }
+
+    /// Configures the walker to visit all children of changed branch paths.
+    ///
+    /// When updates are retained, also removes stored descendants hidden by a changed branch's
+    /// tree mask. Regenerated branch updates take precedence over these deletions.
+    pub const fn with_walk_all_changed_branch_children(mut self, enabled: bool) -> Self {
+        self.walk_all_changed_branch_children = enabled;
         self
     }
 
@@ -544,6 +611,7 @@ impl<T, H> StorageRoot<T, H> {
             hashed_cursor_factory,
             hashed_address: self.hashed_address,
             prefix_set: self.prefix_set,
+            walk_all_changed_branch_children: self.walk_all_changed_branch_children,
             previous_state: self.previous_state,
             threshold: self.threshold,
             #[cfg(feature = "metrics")]
@@ -558,6 +626,7 @@ impl<T, H> StorageRoot<T, H> {
             hashed_cursor_factory: self.hashed_cursor_factory,
             hashed_address: self.hashed_address,
             prefix_set: self.prefix_set,
+            walk_all_changed_branch_children: self.walk_all_changed_branch_children,
             previous_state: self.previous_state,
             threshold: self.threshold,
             #[cfg(feature = "metrics")]
@@ -618,28 +687,79 @@ where
         let mut hashed_storage_cursor =
             self.hashed_cursor_factory.hashed_storage_cursor(self.hashed_address)?;
 
-        // short circuit on empty storage
-        if hashed_storage_cursor.is_storage_empty()? {
+        // Changed prefixes still need to walk cached nodes to record removals.
+        if self.previous_state.is_none() &&
+            (!retain_updates || self.prefix_set.is_empty()) &&
+            hashed_storage_cursor.is_storage_empty()?
+        {
             return Ok(StorageRootProgress::Complete(
                 EMPTY_ROOT_HASH,
                 0,
-                StorageTrieUpdates::deleted(),
+                StorageTrieUpdates::default(),
             ))
         }
 
+        let mut trie_cursor = self.trie_cursor_factory.storage_trie_cursor(self.hashed_address)?;
+        StorageRootCalculation {
+            hashed_address: self.hashed_address,
+            prefix_set: self.prefix_set,
+            previous_state: self.previous_state,
+            walk_all_changed_branch_children: self.walk_all_changed_branch_children,
+            threshold: self.threshold,
+            retain_updates,
+        }
+        .calculate(
+            &mut trie_cursor,
+            &mut hashed_storage_cursor,
+            #[cfg(feature = "metrics")]
+            &self.metrics,
+        )
+    }
+}
+
+/// Parameters for a storage root calculation using pre-created cursors.
+pub(crate) struct StorageRootCalculation {
+    pub(crate) hashed_address: B256,
+    pub(crate) prefix_set: PrefixSet,
+    pub(crate) previous_state: Option<IntermediateRootState>,
+    pub(crate) walk_all_changed_branch_children: bool,
+    pub(crate) threshold: u64,
+    pub(crate) retain_updates: bool,
+}
+
+impl StorageRootCalculation {
+    /// Calculates with cursors already bound to `hashed_address`. All reads must share one view.
+    pub(crate) fn calculate<TC, HC>(
+        self,
+        trie_cursor: &mut TC,
+        hashed_storage_cursor: &mut HC,
+        #[cfg(feature = "metrics")] metrics: &TrieRootMetrics,
+    ) -> Result<StorageRootProgress, StorageRootError>
+    where
+        TC: TrieCursor,
+        HC: crate::hashed_cursor::HashedStorageCursor<Value = U256>,
+    {
+        let Self {
+            hashed_address,
+            prefix_set,
+            previous_state,
+            walk_all_changed_branch_children,
+            threshold,
+            retain_updates,
+        } = self;
+        let hashed_storage_cursor = BorrowedHashedCursor(hashed_storage_cursor);
         let mut tracker = TrieTracker::default();
         let mut trie_updates = StorageTrieUpdates::default();
 
-        let trie_cursor = self.trie_cursor_factory.storage_trie_cursor(self.hashed_address)?;
-
-        let (mut hash_builder, mut storage_node_iter) = match self.previous_state {
+        let (mut hash_builder, mut storage_node_iter) = match previous_state {
             Some(state) => {
                 let hash_builder = state.hash_builder.with_updates(retain_updates);
                 let walker = TrieWalker::<_>::storage_trie_from_stack(
                     trie_cursor,
                     state.walker_stack,
-                    self.prefix_set,
+                    prefix_set,
                 )
+                .with_walk_all_changed_branch_children(walk_all_changed_branch_children)
                 .with_deletions_retained(retain_updates);
                 let node_iter = TrieNodeIter::storage_trie(walker, hashed_storage_cursor)
                     .with_last_hashed_key(state.last_hashed_key);
@@ -647,7 +767,8 @@ where
             }
             None => {
                 let hash_builder = HashBuilder::default().with_updates(retain_updates);
-                let walker = TrieWalker::storage_trie(trie_cursor, self.prefix_set)
+                let walker = TrieWalker::storage_trie(trie_cursor, prefix_set)?
+                    .with_walk_all_changed_branch_children(walk_all_changed_branch_children)
                     .with_deletions_retained(retain_updates);
                 let node_iter = TrieNodeIter::storage_trie(walker, hashed_storage_cursor);
                 (hash_builder, node_iter)
@@ -672,7 +793,7 @@ where
                     // Check if we need to return intermediate progress
                     let total_updates_len =
                         storage_node_iter.walker.removed_keys_len() + hash_builder.updates_len();
-                    if retain_updates && total_updates_len as u64 >= self.threshold {
+                    if retain_updates && total_updates_len as u64 >= threshold {
                         let (walker_stack, walker_deleted_keys) = storage_node_iter.walker.split();
                         trie_updates.removed_nodes.extend(walker_deleted_keys);
                         let (hash_builder, hash_builder_updates) = hash_builder.split();
@@ -702,12 +823,12 @@ where
         let stats = tracker.finish();
 
         #[cfg(feature = "metrics")]
-        self.metrics.record(stats);
+        metrics.record(stats);
 
         trace!(
             target: "trie::storage_root",
             %root,
-            hashed_address = %self.hashed_address,
+            hashed_address = %hashed_address,
             duration = ?stats.duration(),
             branches_added = stats.branches_added(),
             leaves_added = stats.leaves_added(),
@@ -716,6 +837,24 @@ where
 
         let storage_slots_walked = stats.leaves_added() as usize;
         Ok(StorageRootProgress::Complete(root, storage_slots_walked, trie_updates))
+    }
+}
+
+/// Borrows a hashed cursor without changing the public cursor trait's implementations.
+struct BorrowedHashedCursor<'a, C>(&'a mut C);
+
+impl<C: HashedCursor> HashedCursor for BorrowedHashedCursor<'_, C> {
+    type Value = C::Value;
+    fn seek(
+        &mut self,
+        key: B256,
+    ) -> Result<Option<(B256, Self::Value)>, reth_storage_errors::db::DatabaseError> {
+        self.0.seek(key)
+    }
+    fn next(
+        &mut self,
+    ) -> Result<Option<(B256, Self::Value)>, reth_storage_errors::db::DatabaseError> {
+        self.0.next()
     }
 }
 
@@ -735,5 +874,68 @@ impl TrieType {
             Self::State => "state",
             Self::Storage => "storage",
         }
+    }
+}
+
+#[cfg(test)]
+mod empty_storage_updates_tests {
+    use super::*;
+    use crate::{
+        hashed_cursor::noop::NoopHashedCursorFactory, trie_cursor::noop::NoopTrieCursorFactory,
+    };
+
+    #[test]
+    fn empty_storage_does_not_mark_the_trie_deleted() {
+        for changed_prefix in [false, true] {
+            let prefixes = if changed_prefix {
+                crate::prefix_set::PrefixSetMut::from([Nibbles::unpack(B256::ZERO)]).freeze()
+            } else {
+                Default::default()
+            };
+            let (root, walked, updates) = StorageRoot::new_hashed(
+                NoopTrieCursorFactory::default(),
+                NoopHashedCursorFactory::default(),
+                B256::ZERO,
+                prefixes,
+                #[cfg(feature = "metrics")]
+                TrieRootMetrics::new(TrieType::Storage),
+            )
+            .root_with_updates()
+            .unwrap();
+            assert_eq!(root, EMPTY_ROOT_HASH);
+            assert_eq!(walked, 0);
+            assert_eq!(updates, StorageTrieUpdates::default());
+        }
+    }
+}
+
+#[cfg(test)]
+mod materialized_destroyed_storage_tests {
+    use super::*;
+    use crate::{
+        hashed_cursor::mock::MockHashedCursorFactory, trie_cursor::mock::MockTrieCursorFactory,
+    };
+
+    #[test]
+    fn explicit_destroyed_node_mode_propagates_original_cursor_error_and_default_still_wipes() {
+        let address = B256::with_last_byte(42);
+        let prefixes = TriePrefixSets {
+            destroyed_accounts: [address].into_iter().collect(),
+            ..Default::default()
+        };
+        let (_, original) =
+            StateRoot::new(MockTrieCursorFactory::default(), MockHashedCursorFactory::default())
+                .with_prefix_sets(prefixes.clone())
+                .root_with_updates()
+                .unwrap();
+        assert!(original.storage_tries[&address].is_deleted());
+        let result =
+            StateRoot::new(MockTrieCursorFactory::default(), MockHashedCursorFactory::default())
+                .with_prefix_sets(prefixes)
+                .with_materialized_destroyed_storage_nodes(true)
+                .root_with_updates();
+        assert!(
+            matches!(result, Err(StateRootError::Database(reth_storage_errors::db::DatabaseError::Other(message))) if message == format!("storage trie for {address:?} not found"))
+        );
     }
 }

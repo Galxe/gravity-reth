@@ -1,3 +1,6 @@
+use crate::{updates::TrieUpdatesSorted, HashedPostStateSorted};
+use alloc::sync::Arc;
+
 use crate::{prefix_set::TriePrefixSetsMut, updates::TrieUpdates, HashedPostState};
 
 /// Inputs for trie-related computations.
@@ -121,5 +124,71 @@ impl TrieInput {
     pub fn cleared(mut self) -> Self {
         self.clear();
         self
+    }
+}
+
+/// Sorted variant of [`TrieInput`] for efficient proof generation.
+///
+/// This type holds sorted versions of trie data structures, which eliminates the need
+/// for expensive sorting operations during multiproof generation.
+#[derive(Default, Debug, Clone)]
+pub struct TrieInputSorted {
+    /// Sorted cached in-memory intermediate trie nodes.
+    pub nodes: Arc<TrieUpdatesSorted>,
+    /// Sorted in-memory overlay hashed state.
+    pub state: Arc<HashedPostStateSorted>,
+    /// Prefix sets for computation.
+    pub prefix_sets: TriePrefixSetsMut,
+}
+
+impl TrieInputSorted {
+    /// Create new sorted trie input.
+    pub const fn new(
+        nodes: Arc<TrieUpdatesSorted>,
+        state: Arc<HashedPostStateSorted>,
+        prefix_sets: TriePrefixSetsMut,
+    ) -> Self {
+        Self { nodes, state, prefix_sets }
+    }
+
+    /// Create from unsorted [`TrieInput`] by sorting.
+    pub fn from_unsorted(input: TrieInput) -> Self {
+        Self {
+            nodes: Arc::new(input.nodes.into_sorted()),
+            state: Arc::new(input.state.into_sorted()),
+            prefix_sets: input.prefix_sets,
+        }
+    }
+}
+
+#[cfg(test)]
+mod sorted_input_tests {
+    use super::*;
+    use crate::{prefix_set::PrefixSetMut, BranchNodeCompact, Nibbles};
+    use alloc::vec;
+    use alloy_primitives::{map::HashMap, B256};
+
+    #[test]
+    fn sorted_input_reuses_sorted_values_and_keeps_dirty_prefixes() {
+        let path = Nibbles::from_nibbles([1]);
+        let address = B256::with_last_byte(1);
+        let nodes = TrieUpdates {
+            account_nodes: HashMap::from_iter([(path, BranchNodeCompact::default())]),
+            ..Default::default()
+        };
+        let state = HashedPostState {
+            accounts: HashMap::from_iter([(address, None)]),
+            ..Default::default()
+        };
+        let prefixes = TriePrefixSetsMut {
+            account_prefix_set: PrefixSetMut::from(vec![Nibbles::unpack(address)]),
+            ..Default::default()
+        };
+        let expected_nodes = nodes.clone().into_sorted();
+        let expected_state = state.clone().into_sorted();
+        let actual = TrieInputSorted::from_unsorted(TrieInput::new(nodes, state, prefixes));
+        assert_eq!(actual.nodes.as_ref(), &expected_nodes);
+        assert_eq!(actual.state.as_ref(), &expected_state);
+        assert!(actual.prefix_sets.freeze().account_prefix_set.contains(&Nibbles::unpack(address)));
     }
 }

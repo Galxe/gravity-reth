@@ -34,7 +34,7 @@ use reth_chainspec::{ChainSpec, EthChainSpec, EthereumHardforks, MAINNET};
 use reth_ethereum_primitives::{Block, EthPrimitives};
 use reth_evm::{
     eth::NextEvmEnvAttributes, execute::BlockExecutionError, parallel_execute::ParallelExecutor,
-    ConfigureEvm, EvmEnv, NextBlockEnvAttributes, ParallelDatabase,
+    ConfigureEvm, EvmEnv, NextBlockEnvAttributes, ParallelDatabase, SenderRecoveryCache,
 };
 use reth_primitives_traits::{constants::GRAVITY_TX_GAS_LIMIT_CAP, SealedBlock, SealedHeader};
 use revm::{
@@ -60,6 +60,9 @@ use {
 
 pub use alloy_evm::EthEvm;
 pub use gravity::{GravityChainReader, GravityEvmConfig, ProviderChainReader};
+
+mod convert;
+pub use convert::ParallelTxEnv;
 
 mod config;
 use alloy_evm::eth::spec::EthExecutorSpec;
@@ -117,6 +120,8 @@ pub struct EthEvmConfig<C = ChainSpec, EvmFactory = EthEvmFactory> {
     pub executor_factory: EthBlockExecutorFactory<RethReceiptBuilder, Arc<C>, EvmFactory>,
     /// Ethereum block assembler.
     pub block_assembler: EthBlockAssembler<C>,
+    /// Cache of recovered transaction senders, if enabled.
+    pub sender_recovery_cache: Option<SenderRecoveryCache>,
 }
 
 impl EthEvmConfig {
@@ -143,6 +148,7 @@ impl<ChainSpec, EvmFactory> EthEvmConfig<ChainSpec, EvmFactory> {
     pub fn new_with_evm_factory(chain_spec: Arc<ChainSpec>, evm_factory: EvmFactory) -> Self {
         Self {
             block_assembler: EthBlockAssembler::new(chain_spec.clone()),
+            sender_recovery_cache: None,
             executor_factory: EthBlockExecutorFactory::new(
                 RethReceiptBuilder::default(),
                 chain_spec,
@@ -154,6 +160,11 @@ impl<ChainSpec, EvmFactory> EthEvmConfig<ChainSpec, EvmFactory> {
     /// Returns the chain spec associated with this configuration.
     pub const fn chain_spec(&self) -> &Arc<ChainSpec> {
         self.executor_factory.spec()
+    }
+    /// Shares recovered senders with transaction ingress and RPC.
+    pub fn with_sender_recovery_cache(mut self, cache: SenderRecoveryCache) -> Self {
+        self.sender_recovery_cache = Some(cache);
+        self
     }
 }
 
@@ -415,10 +426,16 @@ where
         payload: &ExecutionData,
     ) -> Result<impl ExecutableTxIterator<Self>, Self::Error> {
         let txs = payload.payload.transactions().clone();
-        let convert = |tx: Bytes| {
+        let sender_recovery_cache = self.sender_recovery_cache.clone();
+        let convert = move |tx: Bytes| {
             let tx =
                 TxTy::<Self::Primitives>::decode_2718_exact(tx.as_ref()).map_err(AnyError::new)?;
-            let signer = tx.try_recover().map_err(AnyError::new)?;
+            let signer = if let Some(cache) = &sender_recovery_cache {
+                cache.recover(&tx)
+            } else {
+                tx.try_recover()
+            }
+            .map_err(AnyError::new)?;
             Ok::<_, AnyError>(tx.with_signer(signer))
         };
 

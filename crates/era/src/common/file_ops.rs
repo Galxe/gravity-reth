@@ -3,7 +3,7 @@
 use crate::e2s::{error::E2sError, types::Version};
 use std::{
     fs::File,
-    io::{Read, Seek, Write},
+    io::{self, Read, Seek, Write},
     path::Path,
 };
 
@@ -241,6 +241,35 @@ impl EraFileType {
         format!("{network_name}-{era_number:05}{era_count}-{hash}{}", self.extension())
     }
 
+    /// Detects the ERA file type from the files in `dir`.
+    ///
+    /// Returns the single recognized type, `None` if the directory has no ERA files, or an error if
+    /// it mixes formats.
+    pub fn from_dir(dir: impl AsRef<Path>) -> io::Result<Option<Self>> {
+        let mut found: Option<Self> = None;
+        for entry in std::fs::read_dir(dir)? {
+            if let Some(name) = entry?.file_name().to_str() &&
+                let Some(era_type) = Self::from_filename(name)
+            {
+                match found {
+                    Some(existing) if existing != era_type => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!(
+                                "directory mixes ERA formats ({} and {}); import one at a time",
+                                existing.extension(),
+                                era_type.extension(),
+                            ),
+                        ));
+                    }
+                    _ => found = Some(era_type),
+                }
+            }
+        }
+
+        Ok(found)
+    }
+
     /// Detect file type from a URL, defaulting to `Era`.
     ///
     /// Resolves by file extension when the URL names a file; otherwise falls back to the `era1`
@@ -333,5 +362,23 @@ mod tests {
             Some(EraFileType::Ere)
         );
         assert_eq!(EraFileType::from_filename("mainnet-00000-abcd1234.txt"), None);
+    }
+
+    #[test]
+    fn from_dir_detects_single_format() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("mainnet-00000-aaaaaaaa.era1"), b"x").unwrap();
+        std::fs::write(dir.path().join("mainnet-00001-bbbbbbbb.era1"), b"x").unwrap();
+
+        assert_eq!(EraFileType::from_dir(dir.path()).unwrap(), Some(EraFileType::Era1));
+    }
+
+    #[test]
+    fn from_dir_errors_on_mixed_formats() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("mainnet-00000-aaaaaaaa.era1"), b"x").unwrap();
+        std::fs::write(dir.path().join("mainnet-00000-bbbbbbbb.era"), b"x").unwrap();
+
+        assert!(EraFileType::from_dir(dir.path()).is_err());
     }
 }

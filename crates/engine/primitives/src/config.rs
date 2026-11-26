@@ -12,6 +12,22 @@ pub const DEFAULT_PERSISTENCE_BACKPRESSURE_THRESHOLD: u64 = 16;
 /// How close to the canonical head we persist blocks.
 pub const DEFAULT_MEMORY_BLOCK_BUFFER_TARGET: u64 = 0;
 
+/// The largest gap for which the tree will be used to sync individual blocks by downloading them.
+///
+/// This is the default threshold, and represents the distance (gap) from the local head to a
+/// new (canonical) block, e.g. the forkchoice head block. If the block distance from the local head
+/// exceeds this threshold, the pipeline will be used to backfill the gap more efficiently.
+///
+/// E.g.: Local head `block.number` is 100 and the forkchoice head `block.number` is 133 (more than
+/// an epoch has slots), then this exceeds the threshold at which the pipeline should be used to
+/// backfill this gap.
+pub const DEFAULT_BACKFILL_RUN_THRESHOLD: u64 = EPOCH_SLOTS;
+
+/// Largest supported live-sync gap, matching the peer header response limit of 1024.
+///
+/// The range downloader requires a complete response and cannot yet split larger requests.
+pub const MAX_BACKFILL_RUN_THRESHOLD: u64 = 1024;
+
 /// The size of proof targets chunk to spawn in one multiproof calculation.
 pub const DEFAULT_MULTIPROOF_TASK_CHUNK_SIZE: usize = 5;
 
@@ -106,6 +122,8 @@ pub struct TreeConfig {
     /// Number of pending blocks that cannot be executed due to missing parent and
     /// are kept in cache.
     block_buffer_limit: u32,
+    /// Largest gap closed by live block downloads before backfill is required.
+    backfill_run_threshold: u64,
     /// Number of invalid headers to keep in cache.
     max_invalid_header_cache_length: u32,
     /// Number of cache hits before an invalid header entry is evicted and reprocessed.
@@ -181,9 +199,8 @@ pub struct TreeConfig {
     share_execution_cache_with_payload_builder: bool,
     /// Whether to suppress persistence cycles while building a payload.
     ///
-    /// When enabled, persistence is deferred from the moment an FCU with payload attributes
-    /// arrives until the next FCU without attributes. This avoids persistence I/O competing
-    /// with block building on latency-sensitive chains.
+    /// When enabled, retained-engine persistence is deferred while a payload job is active.
+    /// This avoids persistence I/O competing with block building on latency-sensitive chains.
     suppress_persistence_during_build: bool,
     /// Whether to disable BAL (Block Access List, EIP-7928) based parallel execution.
     /// When disabled, uses the sequential execution path even when a BAL is available.
@@ -213,6 +230,7 @@ impl Default for TreeConfig {
             memory_block_buffer_target: DEFAULT_MEMORY_BLOCK_BUFFER_TARGET,
             persistence_backpressure_threshold: DEFAULT_PERSISTENCE_BACKPRESSURE_THRESHOLD,
             block_buffer_limit: DEFAULT_BLOCK_BUFFER_LIMIT,
+            backfill_run_threshold: DEFAULT_BACKFILL_RUN_THRESHOLD,
             max_invalid_header_cache_length: DEFAULT_MAX_INVALID_HEADER_CACHE_LENGTH,
             invalid_header_hit_eviction_threshold: DEFAULT_INVALID_HEADER_HIT_EVICTION_THRESHOLD,
             max_execute_block_batch_size: DEFAULT_MAX_EXECUTE_BLOCK_BATCH_SIZE,
@@ -290,6 +308,7 @@ impl TreeConfig {
             memory_block_buffer_target,
             persistence_backpressure_threshold,
             block_buffer_limit,
+            backfill_run_threshold: DEFAULT_BACKFILL_RUN_THRESHOLD,
             max_invalid_header_cache_length,
             invalid_header_hit_eviction_threshold,
             max_execute_block_batch_size,
@@ -342,6 +361,11 @@ impl TreeConfig {
     /// Return the block buffer limit.
     pub const fn block_buffer_limit(&self) -> u32 {
         self.block_buffer_limit
+    }
+
+    /// Return the largest gap closed by live block downloads.
+    pub const fn backfill_run_threshold(&self) -> u64 {
+        self.backfill_run_threshold
     }
 
     /// Return the maximum invalid cache header length.
@@ -478,6 +502,20 @@ impl TreeConfig {
         self
     }
 
+    /// Setter for backfill run threshold.
+    ///
+    /// Clamps the threshold to [`MAX_BACKFILL_RUN_THRESHOLD`] and grows the block buffer to twice
+    /// the clamped threshold so it can retain disconnected blocks while downloading the gap,
+    /// with room for incoming payloads.
+    pub const fn with_backfill_run_threshold(mut self, backfill_run_threshold: u64) -> Self {
+        self.backfill_run_threshold = clamp_backfill_run_threshold(backfill_run_threshold);
+        let buffer_limit = self.backfill_run_threshold as u32 * 2;
+        if buffer_limit > self.block_buffer_limit {
+            self.block_buffer_limit = buffer_limit;
+        }
+        self
+    }
+
     /// Setter for maximum invalid header cache length.
     pub const fn with_max_invalid_header_cache_length(
         mut self,
@@ -581,9 +619,16 @@ impl TreeConfig {
         self
     }
 
-    /// Whether or not to use state root task
+    /// Returns whether the configured host has enough parallelism for the state-root task.
+    pub const fn has_enough_parallelism(&self) -> bool {
+        self.has_enough_parallelism
+    }
+
+    /// Returns whether engine validation should use the state-root task.
+    ///
+    /// Explicit serial fallback and legacy-root configuration take precedence over parallelism.
     pub const fn use_state_root_task(&self) -> bool {
-        self.has_enough_parallelism && !self.legacy_state_root
+        self.has_enough_parallelism && !self.legacy_state_root && !self.state_root_fallback
     }
 
     /// Returns whether cache metrics recording is disabled.
@@ -759,8 +804,30 @@ impl TreeConfig {
     }
 }
 
+/// Clamp requests to the peer header response limit.
+const fn clamp_backfill_run_threshold(threshold: u64) -> u64 {
+    if threshold > MAX_BACKFILL_RUN_THRESHOLD {
+        MAX_BACKFILL_RUN_THRESHOLD
+    } else {
+        threshold
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn backfill_threshold_grows_block_buffer() {
+        let default = TreeConfig::default();
+        for (threshold, expected, buffer_limit) in
+            [(0, 0, 64), (500, 500, 1000), (1024, 1024, 2048), (u64::MAX, 1024, 2048)]
+        {
+            let config = default.clone().with_backfill_run_threshold(threshold);
+            assert_eq!(config.backfill_run_threshold(), expected);
+            assert_eq!(config.block_buffer_limit(), buffer_limit);
+        }
+        let config = default.with_block_buffer_limit(2000).with_backfill_run_threshold(500);
+        assert_eq!(config.block_buffer_limit(), 2000);
+    }
     use super::TreeConfig;
 
     #[test]

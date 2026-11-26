@@ -34,8 +34,9 @@ pub struct DatabaseArgs {
     #[arg(long = "db.max-background-jobs")]
     pub max_background_jobs: Option<i32>,
     /// Maximum number of open files.
-    /// Lower values if you hit OS file descriptor limits.
-    /// Default: 10000
+    /// Overrides the automatic budget shared across `RocksDB` shards. Without an override,
+    /// hosts with at least 128K descriptors per instance keep all SST files open; other hosts
+    /// use a finite cache capped at 10000 files per instance, leaving descriptor headroom.
     #[arg(long = "db.max-open-files")]
     pub max_open_files: Option<i32>,
     /// Maximum number of write buffers (memtables).

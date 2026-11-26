@@ -69,7 +69,7 @@ Database:
           Maximum number of background jobs for compaction and flush. Higher values increase parallelism but use more CPU. Default: 14
 
       --db.max-open-files <MAX_OPEN_FILES>
-          Maximum number of open files. Lower values if you hit OS file descriptor limits. Default: 10000
+          Maximum number of open files. Overrides the automatic budget shared across `RocksDB` shards. Without an override, hosts with at least 128K descriptors per instance keep all SST files open; other hosts use a finite cache capped at 10000 files per instance, leaving descriptor headroom
 
       --db.max-write-buffer-number <MAX_WRITE_BUFFER_NUMBER>
           Maximum number of write buffers (memtables). More buffers allow absorbing write spikes but use more memory. Default: 6
@@ -89,6 +89,16 @@ Database:
       --db.sharding-directories <SHARDING_DIRECTORIES>
           Semicolon separated `RocksDB` sharding directories. Accepts 2 or 3 paths. Always creates 3 databases (state, `account_trie`, `storage_trie`). - 0 paths (default): Creates subdirs under --datadir: state/, `account_trie`/, `storage_trie`/ - 2 paths: First dir contains state + `account_trie`; second dir contains `storage_trie` - 3 paths: First dir is state, second is `account_trie`, third is `storage_trie`
 
+      --file-type <FILE_TYPE>
+          The ERA file format to export: `era1` writes `.era1` files, `ere` writes `.ere` files.
+
+          Possible values:
+          - era1: Execution blocks written in the `.era1` format
+          - ere:  Execution blocks written in the `.ere` format
+          - era:  Consensus-layer `.era` format. Not exportable from an execution client; selecting it is an error
+
+          [default: era1]
+
       --first-block-number <first-block-number>
           Optional first block number to export from the db.
           It is by default 0.
@@ -101,9 +111,9 @@ Database:
           The maximum number of blocks per file, it can help you to decrease the size of the files.
           Must be less than or equal to 8192.
 
-      --path <EXPORT_ERA1_PATH>
-          The directory path where to export era1 files.
-          The block data are read from the database.
+      --path <EXPORT_PATH>
+          The directory where the exported ERA files are written.
+          Defaults to `<data-dir>/<chain>/<format>-export/`, where `<format>` is `era1` or `ere`.
 
 Logging:
       --log.stdout.format <FORMAT>

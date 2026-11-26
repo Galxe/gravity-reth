@@ -6,7 +6,7 @@ use alloy_rlp::EMPTY_STRING_CODE;
 use reth_chainspec::{Chain, ChainSpec, HOLESKY, MAINNET};
 use reth_primitives_traits::Account;
 use reth_provider::test_utils::{create_test_provider_factory, insert_genesis};
-use reth_trie::{proof::Proof, AccountProof, Nibbles, StorageProof};
+use reth_trie::{proof::Proof, AccountProof, MultiProofTargets, Nibbles, StorageProof, TrieInput};
 use reth_trie_db::DatabaseProof;
 use std::{
     str::FromStr,
@@ -93,6 +93,21 @@ fn testspec_proofs() {
             "proof for {target:?} does not match"
         );
         assert_eq!(account_proof.verify(root), Ok(()));
+        // Exercise both legacy overlay entrypoints against the same independent geth vectors.
+        let overlay =
+            Proof::overlay_account_proof(provider.tx_ref(), TrieInput::default(), target, &[])
+                .unwrap();
+        assert_eq!(overlay.proof, expected_proof);
+        assert_eq!(overlay.verify(root), Ok(()));
+        let multiproof = Proof::overlay_multiproof(
+            provider.tx_ref(),
+            TrieInput::default(),
+            MultiProofTargets::account(keccak256(target)),
+        )
+        .unwrap();
+        let from_multi = multiproof.account_proof(target, &[]).unwrap();
+        assert_eq!(from_multi.proof, expected_proof);
+        assert_eq!(from_multi.verify(root), Ok(()));
     }
 }
 
@@ -119,6 +134,31 @@ fn testspec_empty_storage_proof() {
         assert_eq!(proof.verify(account_proof.storage_root), Ok(()));
     }
     assert_eq!(account_proof.verify(root), Ok(()));
+}
+
+#[test]
+fn empty_state_trie_account_proof() {
+    // Empty database => empty account (state) trie, root == EMPTY_ROOT_HASH.
+    // The account proof generation has no `empty()` sentinel of its own, yet the hash builder
+    // still emits the empty-root node, so the raw proof is the lone `0x80` sentinel. The
+    // empty-array (geth) normalization happens only at the EIP-1186 response layer
+    // (`AccountProof::into_eip1186_response`), keeping this internal proof unchanged.
+    let factory = create_test_provider_factory();
+
+    let target = address!("0x1ed9b1dd266b607ee278726d324b855a093394a6");
+
+    let provider = factory.provider().unwrap();
+    let proof = Proof::from_tx(provider.tx_ref());
+    let account_proof = proof.account_proof(target, &[]).unwrap();
+    assert_eq!(account_proof.info, None, "absent account should have no info");
+    assert_eq!(account_proof.storage_root, EMPTY_ROOT_HASH);
+    assert_eq!(
+        account_proof.proof,
+        vec![Bytes::from([EMPTY_STRING_CODE])],
+        "empty account trie yields the 0x80 sentinel at the proof layer, got {:?}",
+        account_proof.proof
+    );
+    assert_eq!(account_proof.verify(EMPTY_ROOT_HASH), Ok(()));
 }
 
 #[test]

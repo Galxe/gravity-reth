@@ -1,24 +1,27 @@
 //! Testing gossiping of transactions.
+use crate::utils::{funded_transaction, poll_until};
 use alloy_consensus::TxLegacy;
-use alloy_primitives::{Signature, U256};
-use futures::StreamExt;
+use alloy_primitives::{map::B256Set, Signature, TxHash, U256};
 use reth_ethereum_primitives::TransactionSigned;
 use reth_network::{
-    test_utils::{NetworkEventStream, Testnet},
+    test_utils::{NetworkEventStream, PeerHandle, Testnet},
     transactions::config::{
         TransactionIngressPolicy, TransactionPropagationKind, TransactionsManagerConfig,
     },
-    NetworkEvent, NetworkEventListenerProvider, Peers,
+    NetworkEventListenerProvider, Peers,
 };
-use reth_network_api::{events::PeerEvent, PeerKind, PeersInfo};
+use reth_network_api::{PeerKind, PeersInfo};
+use reth_network_peers::PeerId;
 use reth_provider::test_utils::ExtendedAccount;
 use reth_transaction_pool::{
     test_utils::TransactionGenerator, AddedTransactionOutcome, PoolTransaction, TransactionPool,
 };
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use tokio::join;
 
 use crate::provider_with_genesis_block;
+
+const TIMEOUT: Duration = Duration::from_secs(30);
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_tx_gossip() {
@@ -159,7 +162,7 @@ async fn test_tx_ingress_policy_trusted_only() {
 
     // ensure the sender has balance
     let sender = tx.sender();
-    provider.add_account(sender, ExtendedAccount::new(0, U256::from(100_000_000)));
+    provider.add_account(sender, ExtendedAccount::new(0, U256::from(10u128.pow(18))));
 
     // insert the tx in peer1's pool
     let outcome_0 = peer_1_handle.pool().unwrap().add_external_transaction(tx).await.unwrap();
@@ -183,7 +186,7 @@ async fn test_tx_ingress_policy_trusted_only() {
 
     // ensure the sender has balance
     let sender = tx.sender();
-    provider.add_account(sender, ExtendedAccount::new(0, U256::from(100_000_000)));
+    provider.add_account(sender, ExtendedAccount::new(0, U256::from(10u128.pow(18))));
 
     // insert pending tx in peer1's pool
     let outcome_1 = peer_1_handle.pool().unwrap().add_external_transaction(tx).await.unwrap();
@@ -195,6 +198,81 @@ async fn test_tx_ingress_policy_trusted_only() {
 
     assert!(buff.contains(&outcome_0.hash));
     assert!(buff.contains(&outcome_1.hash));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_tx_propagation_policy_trusted_only_on_connect() {
+    reth_tracing::init_test_tracing();
+
+    let provider = provider_with_genesis_block();
+    let net = Testnet::create_with(3, provider.clone()).await;
+    let net = net
+        .with_eth_pool_config_and_policy(Default::default(), TransactionPropagationKind::Trusted);
+    let handle = net.spawn();
+
+    let [peer0, untrusted, trusted] = handle.peers() else { unreachable!() };
+    let pool0 = peer0.pool().unwrap();
+
+    // insert the tx before connecting, so it can only be learned from the announcement of the
+    // pending pool sent on session establishment
+    let pending = pool0.add_external_transaction(funded_transaction(&provider)).await.unwrap().hash;
+
+    connect_untrusted_and_trusted(peer0, untrusted, trusted).await;
+
+    // ensure the trusted peer learns about the pending tx
+    wait_for_announcement(trusted, peer0, pending).await;
+
+    // announcements to a peer are delivered in order, so the untrusted peer receives any
+    // announcement sent on session establishment before this one
+    let marker = pool0.add_external_transaction(funded_transaction(&provider)).await.unwrap().hash;
+    peer0.transactions().unwrap().propagate_hash_to(marker, *untrusted.peer_id());
+
+    // ensure the untrusted peer never learned about the pending tx
+    let announced = wait_for_announcement(untrusted, peer0, marker).await;
+    assert!(!announced.contains(&pending));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_tx_propagation_policy_trusted_only_get_pooled_transactions() {
+    reth_tracing::init_test_tracing();
+
+    let provider = provider_with_genesis_block();
+    let net = Testnet::create_with(3, provider.clone()).await;
+    let net = net
+        .with_eth_pool_config_and_policy(Default::default(), TransactionPropagationKind::Trusted);
+    let handle = net.spawn();
+
+    let [peer0, untrusted, trusted] = handle.peers() else { unreachable!() };
+
+    let pending = peer0
+        .pool()
+        .unwrap()
+        .add_external_transaction(funded_transaction(&provider))
+        .await
+        .unwrap()
+        .hash;
+
+    connect_untrusted_and_trusted(peer0, untrusted, trusted).await;
+
+    // ensure the untrusted peer can't request the pending tx
+    let txs = untrusted
+        .transactions()
+        .unwrap()
+        .get_pooled_transactions_from(*peer0.peer_id(), vec![pending])
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(txs.is_empty());
+
+    // ensure the trusted peer can
+    let txs = trusted
+        .transactions()
+        .unwrap()
+        .get_pooled_transactions_from(*peer0.peer_id(), vec![pending])
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(txs.iter().map(|tx| *tx.hash()).collect::<Vec<_>>(), vec![pending]);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -262,11 +340,12 @@ async fn test_sending_invalid_transactions() {
     let peer0 = &handle.peers()[0];
     let peer1 = &handle.peers()[1];
 
+    let mut peer1_events = NetworkEventStream::new(peer1.network().event_listener());
+
     // connect all the peers
     handle.connect_peers().await;
 
     assert_eq!(peer0.network().num_connected_peers(), 1);
-    let mut peer1_events = peer1.network().event_listener();
     let mut tx_listener = peer1.pool().unwrap().new_transactions_listener();
 
     for idx in 0..10 {
@@ -284,25 +363,57 @@ async fn test_sending_invalid_transactions() {
         peer0.network().send_transactions(*peer1.peer_id(), vec![Arc::new(tx)]);
     }
 
-    // await disconnect for bad tx spam
-    if let Some(ev) = peer1_events.next().await {
-        match ev {
-            NetworkEvent::Peer(PeerEvent::SessionClosed { peer_id, .. }) => {
-                assert_eq!(peer_id, *peer0.peer_id());
-            }
-            NetworkEvent::ActivePeerSession { .. } |
-            NetworkEvent::Peer(PeerEvent::SessionEstablished { .. }) => {
-                panic!("unexpected SessionEstablished event")
-            }
-            NetworkEvent::Peer(PeerEvent::PeerAdded(_)) => {
-                panic!("unexpected PeerAdded event")
-            }
-            NetworkEvent::Peer(PeerEvent::PeerRemoved(_)) => {
-                panic!("unexpected PeerRemoved event")
-            }
-        }
-    }
+    // The listener also receives connection events, and PeerAdded can still be queued after
+    // connect_peers returns. Wait specifically for the disconnect after bad transaction spam.
+    let (peer_id, _) = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        peer1_events.next_session_closed(),
+    )
+    .await
+    .expect("peer did not disconnect after invalid transaction spam")
+    .expect("network event stream ended before disconnect");
+    assert_eq!(peer_id, *peer0.peer_id());
 
     // ensure txs never made it to the pool
     assert!(tx_listener.try_recv().is_err());
+}
+
+/// Connects `peer` to `untrusted` as a basic peer and to `trusted` as a trusted peer, and waits
+/// until the transactions managers of all peers handled the new sessions.
+async fn connect_untrusted_and_trusted<Pool>(
+    peer: &PeerHandle<Pool>,
+    untrusted: &PeerHandle<Pool>,
+    trusted: &PeerHandle<Pool>,
+) {
+    peer.add_peer(untrusted);
+    peer.add_trusted_peer(trusted);
+
+    wait_for_active_peers(peer, &[*untrusted.peer_id(), *trusted.peer_id()]).await;
+    wait_for_active_peers(untrusted, &[*peer.peer_id()]).await;
+    wait_for_active_peers(trusted, &[*peer.peer_id()]).await;
+}
+
+/// Waits until the transactions manager of `peer` has active sessions with all `peers`.
+async fn wait_for_active_peers<Pool>(peer: &PeerHandle<Pool>, peers: &[PeerId]) {
+    let transactions = peer.transactions().unwrap();
+    poll_until("sessions", async || {
+        let active = transactions.get_active_peers().await.unwrap();
+        peers.iter().all(|peer| active.contains(peer)).then_some(())
+    })
+    .await
+}
+
+/// Waits until `peer` learned from `announcer` that it has `hash`, and returns all hashes `peer`
+/// knows `announcer` has.
+async fn wait_for_announcement<Pool>(
+    peer: &PeerHandle<Pool>,
+    announcer: &PeerHandle<Pool>,
+    hash: TxHash,
+) -> B256Set {
+    let transactions = peer.transactions().unwrap();
+    poll_until("announcement", async || {
+        let hashes = transactions.get_peer_transaction_hashes(*announcer.peer_id()).await.unwrap();
+        hashes.contains(&hash).then_some(hashes)
+    })
+    .await
 }

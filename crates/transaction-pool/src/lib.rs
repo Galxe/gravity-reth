@@ -276,6 +276,10 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 
+// Keep the original component feature edges without enabling broader revm facade features.
+use revm_interpreter as _;
+use revm_primitives as _;
+
 pub use imbl::OrdMap;
 
 pub use crate::{
@@ -288,7 +292,7 @@ pub use crate::{
         REPLACE_BLOB_PRICE_BUMP, TXPOOL_MAX_ACCOUNT_SLOTS_PER_SENDER,
         TXPOOL_SUBPOOL_MAX_SIZE_MB_DEFAULT, TXPOOL_SUBPOOL_MAX_TXS_DEFAULT,
     },
-    error::PoolResult,
+    error::{PoolResult, RawPoolTransactionError},
     ordering::{CoinbaseTipOrdering, Priority, TransactionOrdering},
     pool::{
         blob_tx_priority, fee_delta, state::SubPool, AddedTransactionOutcome,
@@ -297,16 +301,17 @@ pub use crate::{
     },
     traits::*,
     validate::{
-        EthTransactionValidator, TransactionValidationOutcome, TransactionValidationTaskExecutor,
-        TransactionValidator, ValidPoolTransaction,
+        EthTransactionValidator, StatefulValidationFn, StatelessValidationFn,
+        TransactionValidationOutcome, TransactionValidationTaskExecutor, TransactionValidator,
+        ValidPoolTransaction,
     },
 };
 use crate::{identifier::TransactionId, pool::PoolInner};
 use alloy_eips::{
     eip4844::{BlobAndProofV1, BlobAndProofV2, BlobCellsAndProofsV1},
-    eip7594::BlobTransactionSidecarVariant,
+    eip7594::{BlobCellMask, BlobTransactionSidecarVariant},
 };
-use alloy_primitives::{map::AddressSet, Address, TxHash, B128, B256, U256};
+use alloy_primitives::{map::AddressSet, Address, TxHash, B256, U256};
 use aquamarine as _;
 use reth_chainspec::{ChainSpecProvider, EthereumHardforks};
 use reth_eth_wire_types::HandleMempoolData;
@@ -509,11 +514,8 @@ where
         if transactions.is_empty() {
             return Vec::new()
         }
-        let validated = self
-            .pool
-            .validator()
-            .validate_transactions(transactions.into_iter().map(|tx| (origin, tx)))
-            .await;
+        let validated =
+            self.pool.validator().validate_transactions_with_origin(origin, transactions).await;
         self.pool.add_transactions(origin, validated)
     }
 
@@ -826,9 +828,16 @@ where
     fn get_blobs_for_versioned_hashes_v4(
         &self,
         versioned_hashes: &[B256],
-        indices_bitarray: B128,
+        cell_mask: BlobCellMask,
     ) -> Result<Vec<Option<BlobCellsAndProofsV1>>, BlobStoreError> {
-        self.pool.blob_store().get_by_versioned_hashes_v4(versioned_hashes, indices_bitarray)
+        self.pool.blob_store().get_by_versioned_hashes_v4(versioned_hashes, cell_mask)
+    }
+
+    fn has_blobs_for_versioned_hashes(
+        &self,
+        versioned_hashes: &[B256],
+    ) -> Result<Vec<bool>, BlobStoreError> {
+        self.pool.blob_store().has_versioned_hashes(versioned_hashes)
     }
 
     fn blob_store(&self) -> Box<dyn BlobStore> {

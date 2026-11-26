@@ -2,6 +2,9 @@ use alloy_primitives::{B256, U256};
 use reth_primitives_traits::Account;
 use reth_storage_errors::db::DatabaseError;
 
+/// Opt-in observers for hashed cursor operations.
+pub mod metrics;
+
 /// Implementation of hashed state cursor traits for the post state.
 mod post_state;
 pub use post_state::*;
@@ -10,7 +13,7 @@ pub use post_state::*;
 pub mod noop;
 
 /// Mock trie cursor implementations.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 pub mod mock;
 
 /// The factory trait for creating cursors over the hashed state.
@@ -45,6 +48,9 @@ pub trait HashedCursor {
 
 /// The cursor for iterating over hashed storage entries.
 pub trait HashedStorageCursor: HashedCursor {
-    /// Returns `true` if there are no entries for a given key.
+    /// Returns `true` if the address configured when constructing this cursor has no storage.
+    ///
+    /// May be called immediately after construction, without first seeking. This may change
+    /// the cursor position; seek before iterating entries afterward.
     fn is_storage_empty(&mut self) -> Result<bool, DatabaseError>;
 }

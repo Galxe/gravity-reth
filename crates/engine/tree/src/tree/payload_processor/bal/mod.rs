@@ -1,12 +1,9 @@
 //! BAL-driven parallel block execution.
 //!
-//! The engine uses this path when an Amsterdam block carries a decoded EIP-7928
-//! Block-Level Access List (BAL). Workers execute transactions against revm's BAL state. The
-//! main thread commits worker results to a canonical executor in transaction order.
-//!
-//! Consensus validation checks the BAL item-cost bound before this path runs. This path validates
-//! the rebuilt block-level BAL hash after post-execution. It does not yet run per-transaction
-//! fragment checks. It does not yet report rich undeclared-access diagnostics.
+//! This is an opt-in library helper. Gravity's engine and SDK pipeline do not select this path.
+//! Workers execute against a supplied decoded BAL; the caller owns fork activation and block
+//! validation. The ordered commit loop follows the pinned serial executor's block-gas admission.
+//! It returns the rebuilt BAL for the caller to validate against the block header.
 
 mod ordered_outputs;
 mod worker;

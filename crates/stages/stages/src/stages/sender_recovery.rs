@@ -1,13 +1,9 @@
-use alloy_primitives::{Address, TxNumber};
+use alloy_primitives::{Address, BlockNumber, TxNumber};
 use reth_config::config::SenderRecoveryConfig;
 use reth_consensus::ConsensusError;
 use reth_db::static_file::TransactionMask;
 use reth_db_api::{
-    cursor::DbCursorRW,
-    table::Value,
-    tables,
-    transaction::{DbTx, DbTxMut},
-    DbTxUnwindExt, RawValue,
+    cursor::DbCursorRW, table::Value, tables, transaction::DbTxMut, DbTxUnwindExt, RawValue,
 };
 use reth_primitives_traits::{GotExpected, NodePrimitives, SignedTransaction};
 use reth_provider::{
@@ -127,6 +123,24 @@ where
             input.next_block_range_with_transaction_threshold(provider, self.commit_threshold)?;
         let end_block = *block_range.end();
 
+        let expected_blocks = block_range
+            .end()
+            .checked_sub(*block_range.start())
+            .and_then(|span| span.checked_add(1))
+            .and_then(|span| usize::try_from(span).ok())
+            .ok_or(ProviderError::InvalidStorageOutput)?;
+        let indices = provider.block_body_indices_range(block_range.clone())?;
+        // Range readers discard keys and may skip missing rows. Do not zip later blocks to
+        // earlier numbers, or begin sender writes with an incomplete body-index range.
+        if indices.len() != expected_blocks {
+            for block in block_range {
+                if provider.block_body_indices(block)?.is_none() {
+                    return Err(ProviderError::BlockBodyIndicesNotFound(block).into())
+                }
+            }
+            return Err(ProviderError::InvalidStorageOutput.into())
+        }
+
         // No transactions to walk over
         if tx_range.is_empty() {
             info!(target: "sync::stages::sender_recovery", ?tx_range, "Target transaction already reached");
@@ -151,8 +165,33 @@ where
 
         let tx_batch_sender = setup_range_recovery(provider);
 
+        let mut blocks_with_indices = block_range.zip(indices).peekable();
         for range in batch {
-            recover_range(range, provider, tx_batch_sender.clone(), &mut senders_cursor)?;
+            let block_numbers = range.clone().fold(Vec::new(), |mut blocks, tx| {
+                while let Some((block, indices)) = blocks_with_indices.peek() {
+                    if indices.tx_num_range().contains(&tx) {
+                        blocks.push(*block);
+                        return blocks
+                    }
+                    blocks_with_indices.next();
+                }
+                blocks
+            });
+            let expected_transactions = range
+                .end
+                .checked_sub(range.start)
+                .and_then(|len| usize::try_from(len).ok())
+                .ok_or(ProviderError::InvalidStorageOutput)?;
+            if block_numbers.len() != expected_transactions {
+                return Err(ProviderError::BlockNumberForTransactionIndexNotFound.into())
+            }
+            recover_range(
+                range,
+                block_numbers,
+                provider,
+                tx_batch_sender.clone(),
+                &mut senders_cursor,
+            )?;
         }
 
         Ok(ExecOutput {
@@ -188,12 +227,13 @@ where
 
 fn recover_range<Provider, CURSOR>(
     tx_range: Range<TxNumber>,
+    block_numbers: Vec<BlockNumber>,
     provider: &Provider,
     tx_batch_sender: mpsc::Sender<Vec<(Range<u64>, RecoveryResultSender)>>,
     senders_cursor: &mut CURSOR,
 ) -> Result<(), StageError>
 where
-    Provider: DBProvider + HeaderProvider + StaticFileProviderFactory,
+    Provider: HeaderProvider + StaticFileProviderFactory,
     CURSOR: DbCursorRW<tables::TransactionSenders>,
 {
     debug!(target: "sync::stages::sender_recovery", ?tx_range, "Sending batch for processing");
@@ -224,10 +264,12 @@ where
                 Err(error) => {
                     return match *error {
                         SenderRecoveryStageError::FailedRecovery(err) => {
-                            // get the block number for the bad transaction
-                            let block_number = provider
-                                .tx_ref()
-                                .get::<tables::TransactionBlocks>(err.tx)?
+                            debug_assert_eq!(err.tx, tx_range.start + processed_transactions);
+                            // TransactionBlocks stores block-end transaction indices, not every tx.
+                            // Recovery results arrive in order, matching the prefetched body
+                            // indices.
+                            let block_number = *block_numbers
+                                .get(processed_transactions as usize)
                                 .ok_or(ProviderError::BlockNumberForTransactionIndexNotFound)?;
 
                             // fetch the sealed header so we can use it in the sender recovery
@@ -301,7 +343,7 @@ where
                 // Read the raw value, and let the rayon worker to decompress & decode.
                 let chunk = match static_file_provider.fetch_range_with_predicate(
                     StaticFileSegment::Transactions,
-                    chunk_range.clone(),
+                    chunk_range,
                     |cursor, number| {
                         Ok(cursor
                             .get_one::<TransactionMask<
@@ -417,11 +459,12 @@ mod tests {
         stage_test_suite_ext, ExecuteStageTestRunner, StageTestRunner, StorageKind,
         TestRunnerError, TestStageDB, UnwindStageTestRunner,
     };
-    use alloy_primitives::{BlockNumber, B256};
+    use alloy_consensus::SignableTransaction;
+    use alloy_primitives::{BlockNumber, Signature, B256, U256};
     use assert_matches::assert_matches;
-    use reth_db_api::cursor::DbCursorRO;
+    use reth_db_api::{cursor::DbCursorRO, transaction::DbTx};
     use reth_ethereum_primitives::{Block, TransactionSigned};
-    use reth_primitives_traits::{SealedBlock, SignerRecoverable};
+    use reth_primitives_traits::{Block as _, SealedBlock, SignerRecoverable};
     use reth_provider::{
         providers::StaticFileWriter, BlockBodyIndicesProvider, DatabaseProviderFactory,
         PruneCheckpointWriter, StaticFileProviderFactory, TransactionsProvider,
@@ -429,10 +472,93 @@ mod tests {
     use reth_prune_types::{PruneCheckpoint, PruneMode};
     use reth_stages_api::StageUnitCheckpoint;
     use reth_testing_utils::generators::{
-        self, random_block, random_block_range, BlockParams, BlockRangeParams,
+        self, random_block, random_block_range, random_tx, BlockParams, BlockRangeParams,
     };
 
     stage_test_suite_ext!(SenderRecoveryTestRunner, sender_recovery);
+
+    /// The failed transaction is inside its block, where `TransactionBlocks` has no exact entry.
+    #[tokio::test]
+    async fn execute_unrecoverable_sender_before_last_transaction() {
+        let mut rng = generators::rng();
+        let runner = SenderRecoveryTestRunner::default();
+        let input = ExecInput { target: Some(2), checkpoint: Some(StageCheckpoint::new(0)) };
+        let genesis =
+            random_block(&mut rng, 0, BlockParams { tx_count: Some(0), ..Default::default() });
+        let valid =
+            random_block(&mut rng, 1, BlockParams { tx_count: Some(2), ..Default::default() });
+        let mut invalid =
+            random_block(&mut rng, 2, BlockParams { tx_count: Some(2), ..Default::default() })
+                .into_block();
+        invalid.body.transactions[0] =
+            random_tx(&mut rng).into_signed(Signature::new(U256::ZERO, U256::ZERO, false)).into();
+        let invalid = invalid.seal_slow();
+        runner
+            .db
+            .insert_blocks([&genesis, &valid, &invalid].into_iter(), StorageKind::Static)
+            .unwrap();
+        for _ in 0..2 {
+            let provider = runner.db.factory.database_provider_rw().unwrap();
+            let result = runner.stage().execute(&provider, input);
+            drop(provider);
+            assert_matches!(result, Err(StageError::Block {
+                block,
+                error: BlockErrorKind::Validation(ConsensusError::TransactionSignerRecoveryError),
+            }) if block.block.number == 2);
+            // V1 senders are transactional DB rows, so a failed provider must roll back its prefix.
+            runner.db.factory.database_provider_rw().unwrap().commit().unwrap();
+            let provider = runner.db.factory.database_provider_ro().unwrap();
+            assert_eq!(provider.count_entries::<tables::TransactionSenders>().unwrap(), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_rejects_incomplete_body_indices_before_writing_senders() {
+        for missing_row in [true, false] {
+            let mut rng = generators::rng();
+            let runner = SenderRecoveryTestRunner::default();
+            let blocks = random_block_range(
+                &mut rng,
+                0..=3,
+                BlockRangeParams { parent: Some(B256::ZERO), tx_count: 2..3, ..Default::default() },
+            );
+            runner.db.insert_blocks(blocks.iter(), StorageKind::Static).unwrap();
+            {
+                let provider = runner.db.factory.database_provider_rw().unwrap();
+                if missing_row {
+                    provider.tx_ref().delete::<tables::BlockBodyIndices>(2, None).unwrap();
+                } else {
+                    let mut body = provider.block_body_indices(2).unwrap().unwrap();
+                    body.tx_count = 0;
+                    provider.tx_ref().put::<tables::BlockBodyIndices>(2, body).unwrap();
+                }
+                provider.commit().unwrap();
+            }
+            let provider = runner.db.factory.database_provider_rw().unwrap();
+            let result = runner.stage().execute(
+                &provider,
+                ExecInput { target: Some(3), checkpoint: Some(StageCheckpoint::new(0)) },
+            );
+            if missing_row {
+                assert_matches!(
+                    result,
+                    Err(StageError::DatabaseIntegrity(ProviderError::BlockBodyIndicesNotFound(2)))
+                );
+            } else {
+                assert_matches!(
+                    result,
+                    Err(StageError::DatabaseIntegrity(
+                        ProviderError::BlockNumberForTransactionIndexNotFound
+                    ))
+                );
+            }
+            // Even the failing transaction remains alive here: no sender prefix may be written.
+            assert_eq!(provider.count_entries::<tables::TransactionSenders>().unwrap(), 0);
+            provider.commit().unwrap();
+            let provider = runner.db.factory.database_provider_ro().unwrap();
+            assert_eq!(provider.count_entries::<tables::TransactionSenders>().unwrap(), 0);
+        }
+    }
 
     /// Execute a block range with a single transaction
     #[tokio::test]

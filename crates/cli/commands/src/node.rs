@@ -58,6 +58,7 @@ pub struct NodeCommand<C: ChainSpecParser, Ext: clap::Args + fmt::Debug = NoArgs
     /// - `HTTP_RPC_PORT`: default - `instance` + 1
     /// - `WS_RPC_PORT`: default + `instance` * 2 - 2
     /// - `IPC_PATH`: default + `-instance`
+    /// - `AUTH_IPC_PATH`: default + `-instance`, unless `--auth-ipc.path` is set
     #[arg(long, value_name = "INSTANCE", global = true, value_parser = value_parser!(u16).range(1..=200))]
     pub instance: Option<u16>,
 
@@ -213,10 +214,17 @@ where
         };
 
         let data_dir = node_config.datadir();
+        let snapshot_lock = crate::snapshot_lock::SnapshotLock::acquire(
+            &data_dir,
+            self.db.sharding_directories,
+            false,
+        )?;
         let db_path = data_dir.db();
 
         tracing::info!(target: "reth::cli", path = ?db_path, "Opening database");
         let database = Arc::new(init_db(db_path.clone(), self.db.database_args())?);
+        // The runner can cancel the command on SIGTERM before workers finish flushing.
+        ctx.task_executor.retain_resource(snapshot_lock);
 
         if with_unused_ports {
             node_config = node_config.with_unused_ports();
@@ -236,6 +244,31 @@ impl<C: ChainSpecParser, Ext: clap::Args + fmt::Debug> NodeCommand<C, Ext> {
         Some(&self.chain)
     }
 }
+impl<C, Ext> NodeCommand<C, Ext>
+where
+    C: ChainSpecParser,
+    C::ChainSpec: EthChainSpec,
+    Ext: clap::Args + fmt::Debug,
+{
+    /// Loads (or generates) the p2p secret key from the datadir of the configured chain.
+    ///
+    /// This resolves the datadir for the configured chain and reads the secret key from its
+    /// default location, without starting the network.
+    pub fn p2p_secret_key(&self) -> eyre::Result<secp256k1::SecretKey> {
+        let data_dir = self.datadir.clone().resolve_datadir(self.chain.chain());
+        Ok(self.network.secret_key(data_dir.p2p_secret())?)
+    }
+
+    /// Derives the peer id from the configured p2p secret key without starting the network.
+    ///
+    /// Loads the p2p secret key via [`p2p_secret_key`](Self::p2p_secret_key) and returns the
+    /// corresponding [`PeerId`](reth_network_peers::PeerId).
+    pub fn peer_id(&self) -> eyre::Result<reth_network_peers::PeerId> {
+        let sk = self.p2p_secret_key()?;
+        Ok(reth_network_peers::pk2id(&sk.public_key(secp256k1::SECP256K1)))
+    }
+}
+
 /// No Additional arguments
 #[derive(Debug, Clone, Copy, Default, Args)]
 #[non_exhaustive]

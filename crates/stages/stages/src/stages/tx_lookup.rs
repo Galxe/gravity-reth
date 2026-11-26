@@ -157,7 +157,7 @@ where
                         info!(
                             target: "sync::stages::transaction_lookup",
                             ?append_only,
-                            progress = %format!("{:.2}%", (index as f64 / total_hashes as f64) * 100.0),
+                            progress = %format_args!("{:.2}%", (index as f64 / total_hashes as f64) * 100.0),
                             "Inserting hashes"
                         );
                     }
@@ -179,11 +179,10 @@ where
             }
         }
 
-        Ok(ExecOutput {
-            checkpoint: StageCheckpoint::new(input.target())
+        Ok(ExecOutput::done(
+            StageCheckpoint::new(input.target())
                 .with_entities_stage_checkpoint(stage_checkpoint(provider)?),
-            done: true,
-        })
+        ))
     }
 
     /// Unwind the stage.

@@ -28,7 +28,7 @@ Options:
 
           Max number of instances is 200. It is chosen in a way so that it's not possible to have port numbers that conflict with each other.
 
-          Changes to the following port numbers: - `DISCOVERY_PORT`: default + `instance` - 1 - `AUTH_PORT`: default + `instance` * 100 - 100 - `HTTP_RPC_PORT`: default - `instance` + 1 - `WS_RPC_PORT`: default + `instance` * 2 - 2 - `IPC_PATH`: default + `-instance`
+          Changes to the following port numbers: - `DISCOVERY_PORT`: default + `instance` - 1 - `AUTH_PORT`: default + `instance` * 100 - 100 - `HTTP_RPC_PORT`: default - `instance` + 1 - `WS_RPC_PORT`: default + `instance` * 2 - 2 - `IPC_PATH`: default + `-instance` - `AUTH_IPC_PATH`: default + `-instance`, unless `--auth-ipc.path` is set
 
       --with-unused-ports
           Sets all ports to unused, allowing the OS to choose random unused ports when sockets are bound.
@@ -139,7 +139,7 @@ Networking:
           [default: 200]
 
       --trusted-peers <TRUSTED_PEERS>
-          Comma separated enode URLs of trusted peers for P2P connections.
+          Comma separated enode URLs or ENRs of trusted peers for P2P connections.
 
           --trusted-peers enode://abcd@192.168.0.1:30303
 
@@ -147,7 +147,7 @@ Networking:
           Connect to or accept from trusted peers only
 
       --bootnodes <BOOTNODES>
-          Comma separated enode URLs for P2P discovery bootstrap.
+          Comma separated enode URLs or ENRs for P2P discovery bootstrap.
 
           Will fall back to a network-specific default if not specified.
 
@@ -249,7 +249,7 @@ Networking:
           [default: 131072]
 
       --max-tx-pending-fetch <COUNT>
-          Max capacity of cache of hashes for transactions pending fetch.
+          Maximum number of announced transaction hashes to track, including inflight requests.
 
           [default: 25600]
 
@@ -334,6 +334,22 @@ RPC:
 
           Servers listening on a loopback address never compress responses.
 
+      --http.compression <ALGOS>
+          Comma-separated list of allowed compression algorithms for HTTP responses.
+
+          If not specified, all supported algorithms are enabled.
+
+          Client `Accept-Encoding` quality values select among allowed algorithms; ties prefer zstd > br > gzip > deflate. Omitted quality values default to 1; without an acceptable allowed algorithm, the response is uncompressed. List order is ignored.
+
+          [possible values: zstd, gzip, deflate, br]
+
+      --http.decompression <ALGOS>
+          Comma-separated list of allowed decompression algorithms for HTTP requests.
+
+          Request decompression is disabled when not specified.
+
+          [possible values: zstd, gzip, deflate, br]
+
       --http.api <HTTP_API>
           Rpc Modules to be configured for the HTTP server
 
@@ -374,7 +390,9 @@ RPC:
       --ipc.permissions <IPC_SOCKET_PERMISSIONS>
           Set the permissions for the IPC socket file, in octal format.
 
-          If not specified, the permissions will be set by the system's umask.
+          Accepts modes up to `0o7777`, with an optional `0o` prefix. If not specified, the permissions will be set by the system's umask.
+
+          Startup fails if the mode is invalid or the platform cannot apply it before binding the socket, which includes macOS.
 
       --authrpc.addr <AUTH_ADDR>
           Auth server address to listen on
@@ -393,13 +411,18 @@ RPC:
 
           If no path is provided, a secret will be generated and stored in the datadir under `<DIR>/<CHAIN_ID>/jwt.hex`. For mainnet this would be `~/.local/share/reth/mainnet/jwt.hex` by default.
 
+      --authrpc.jwtsecret-hex <HEX>
+          Hex encoded JWT secret to use for the authenticated engine-API RPC server.
+
+          This will enforce JWT authentication for all requests coming from the consensus layer. Cannot be used together with `--authrpc.jwtsecret`.
+
       --auth-ipc
           Enable auth engine API over IPC
 
       --auth-ipc.path <AUTH_IPC_PATH>
-          Filename for auth IPC socket/pipe within the datadir
+          Path for the auth IPC socket/pipe. Explicit paths are used unchanged.
 
-          [default: <CACHE_DIR>_engine_api.ipc]
+          If omitted, uses `/tmp/reth_engine_api.ipc`, with `-<instance>` appended when `--instance` is set. Applications can override this default via `DefaultRpcServerArgs`.
 
       --disable-auth-server
           Disable the auth/engine API server.
@@ -415,7 +438,9 @@ RPC:
           Disable built-in RPC request metrics
 
       --rpc.max-request-size <RPC_MAX_REQUEST_SIZE>
-          Set the maximum RPC request payload size for both HTTP and WS in megabytes
+          Set the maximum RPC request payload size for both HTTP and WS in megabytes.
+
+          For compressed HTTP requests, this limit applies to both the compressed and decompressed payloads.
 
           [default: 15]
 
@@ -465,7 +490,9 @@ RPC:
           [default: 20000]
 
       --rpc.gascap <GAS_CAP>
-          Maximum gas limit for `eth_call` and call tracing RPC methods
+          Maximum gas limit for `eth_call`, `eth_estimateGas`, and call tracing RPC methods.
+
+          The calls of an `eth_callMany`, `trace_callMany` or `debug_traceCallMany` request share it.
 
           [default: 50000000]
 
@@ -477,7 +504,7 @@ RPC:
       --rpc.txfeecap <TX_FEE_CAP>
           Maximum eth transaction fee (in ether) that can be sent via the RPC APIs (0 = no cap)
 
-          [default: 1.0]
+          [default: 1]
 
       --rpc.max-simulate-blocks <BLOCKS_COUNT>
           Maximum number of blocks for `eth_simulateV1` call
@@ -513,18 +540,33 @@ RPC:
           Path to file containing disallowed addresses, json-encoded list of strings. Block validation API will reject blocks containing transactions from these addresses
 
 RPC State Cache:
+      --rpc-cache.max-blocks-bytes <MAX_BLOCKS_BYTES>
+          Maximum estimated block payload bytes. Zero disables caching
+
+          [default: 2147483648]
+
+      --rpc-cache.max-receipts-bytes <MAX_RECEIPTS_BYTES>
+          Maximum estimated receipt payload bytes. Zero disables caching
+
+          [default: 1073741824]
+
+      --rpc-cache.idle-timeout <IDLE_TIMEOUT>
+          Evict unused payloads after this duration. Zero disables expiration
+
+          [default: 1h]
+
       --rpc-cache.max-blocks <MAX_BLOCKS>
           Max number of blocks in cache
 
-          [default: 5000]
+          [default: 1000]
 
       --rpc-cache.max-receipts <MAX_RECEIPTS>
           Max number receipts in cache
 
-          [default: 2000]
+          [default: 500]
 
       --rpc-cache.max-headers <MAX_HEADERS>
-          Max number of headers in cache
+          Legacy compatibility option; the RPC header cache is no longer used
 
           [default: 1000]
 
@@ -541,7 +583,7 @@ RPC State Cache:
       --rpc-cache.max-cached-tx-hashes <MAX_CACHED_TX_HASHES>
           Maximum number of transaction hashes to cache for transaction lookups
 
-          [default: 30000]
+          [default: 100000]
 
 Gas Price Oracle:
       --gpo.blocks <BLOCKS>
@@ -552,7 +594,7 @@ Gas Price Oracle:
       --gpo.ignoreprice <IGNORE_PRICE>
           Gas Price below which gpo will ignore transactions
 
-          [default: 0]
+          [default: 2]
 
       --gpo.maxprice <MAX_PRICE>
           Maximum transaction priority fee(or gasprice before London Fork) to be recommended by gpo
@@ -570,7 +612,7 @@ Gas Price Oracle:
       --rpc.send-raw-transaction-sync-timeout <SECONDS>
           Timeout for `send_raw_transaction_sync` RPC method
 
-          [default: 30s]
+          [default: 30]
 
       --testing.skip-invalid-transactions
           Skip invalid transactions in `testing_buildBlockV1` instead of failing.
@@ -830,7 +872,7 @@ Database:
           Maximum number of background jobs for compaction and flush. Higher values increase parallelism but use more CPU. Default: 14
 
       --db.max-open-files <MAX_OPEN_FILES>
-          Maximum number of open files. Lower values if you hit OS file descriptor limits. Default: 10000
+          Maximum number of open files. Overrides the automatic budget shared across `RocksDB` shards. Without an override, hosts with at least 128K descriptors per instance keep all SST files open; other hosts use a finite cache capped at 10000 files per instance, leaving descriptor headroom
 
       --db.max-write-buffer-number <MAX_WRITE_BUFFER_NUMBER>
           Maximum number of write buffers (memtables). More buffers allow absorbing write spikes but use more memory. Default: 6
@@ -868,6 +910,13 @@ Dev testnet:
 
           Parses strings using [`humantime::parse_duration`]
           --dev.block-time 12s
+
+      --dev.finality-depth <FINALITY_DEPTH>
+          Number of confirmations required before a block is finalized.
+
+          A depth of `1` finalizes the canonical head immediately.
+
+          [default: 64]
 
       --dev.payload-wait-time <PAYLOAD_WAIT_TIME>
           Time to wait after initiating payload building before resolving.
@@ -1002,6 +1051,12 @@ Engine:
 
           [default: 0]
 
+      --engine.backfill-threshold <BACKFILL_RUN_THRESHOLD>
+          Largest live block download gap before backfill; values above 1024 are clamped
+
+          [env: RETH_ENGINE_BACKFILL_THRESHOLD=]
+          [default: 32]
+
       --engine.invalid-header-cache-hit-eviction-threshold <INVALID_HEADER_HIT_EVICTION_THRESHOLD>
           Configure how many cache hits an invalid header can accumulate before it is evicted and reprocessed.
 
@@ -1017,6 +1072,11 @@ Engine:
 
       --engine.disable-prewarming
           Disable parallel prewarming
+
+      --engine.sender-recovery-cache
+          Cache recovered transaction senders across ingress and payload execution
+
+          [env: RETH_ENGINE_SENDER_RECOVERY_CACHE=]
 
       --engine.disable-parallel-sparse-trie
           Disable the parallel sparse trie in the engine
@@ -1045,6 +1105,9 @@ Engine:
 
           [default: 1]
 
+      --cpu-cores <COUNT>
+          Override the available CPU count for node thread pools and parallel execution decisions. Does not change CPU affinity. Explicit thread counts take precedence
+
       --engine.disable-precompile-cache
           Disable precompile cache
 
@@ -1060,10 +1123,10 @@ Engine:
           Allow unwinding canonical header to ancestor during forkchoice updates. See `TreeConfig::unwind_canonical_header` for more details
 
       --engine.storage-worker-count <STORAGE_WORKER_COUNT>
-          Configure the number of storage proof workers in the Tokio blocking pool. If not specified, defaults to 2x available parallelism
+          Configure the number of storage proof workers in the Tokio blocking pool. If not specified or zero, defaults to 2x available parallelism
 
       --engine.account-worker-count <ACCOUNT_WORKER_COUNT>
-          Configure the number of account proof workers in the Tokio blocking pool. If not specified, defaults to the same count as storage workers
+          Configure the number of account proof workers in the Tokio blocking pool. If not specified or zero, defaults to 2x available parallelism
 
       --engine.prewarming-threads <PREWARMING_THREADS>
           Configure the number of prewarming threads. If not specified, defaults to available parallelism
@@ -1108,7 +1171,7 @@ Engine:
       --engine.suppress-persistence-during-build
           Suppress persistence while building a payload.
 
-          When enabled, persistence cycles are deferred from the moment an FCU with payload attributes arrives until the next FCU clears the build. Useful on chains with short block times where persistence I/O can interfere with block building latency.
+          When enabled, retained-engine persistence cycles are deferred while a payload job is active. Useful on chains with short block times where persistence I/O can interfere with building.
 
       --engine.disable-bal-parallel-execution
           Disable BAL (Block Access List, EIP-7928) based parallel execution

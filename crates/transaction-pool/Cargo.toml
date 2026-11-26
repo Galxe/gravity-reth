@@ -24,6 +24,7 @@ reth-execution-types.workspace = true
 reth-fs-util.workspace = true
 reth-storage-api.workspace = true
 reth-tasks.workspace = true
+reth-lru.workspace = true
 
 # gravity
 gravity-primitives.workspace = true
@@ -55,7 +56,6 @@ aquamarine.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 rustc-hash.workspace = true
-schnellru.workspace = true
 serde = { workspace = true, features = ["derive", "rc"] }
 serde_json.workspace = true
 bitflags.workspace = true
@@ -81,6 +81,7 @@ assert_matches.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 futures.workspace = true
+criterion.workspace = true
 
 [features]
 config-from-env = ["gravity-primitives/config-from-env"]
@@ -135,3 +136,8 @@ arbitrary = [
     "revm/arbitrary",
     "imbl/arbitrary",
 ]
+
+[[bench]]
+name = "saturated_pool"
+harness = false
+required-features = ["test-utils"]

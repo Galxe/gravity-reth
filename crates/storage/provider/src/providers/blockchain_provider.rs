@@ -28,10 +28,11 @@ use reth_db_api::{
 };
 use reth_ethereum_primitives::{Block, EthPrimitives, Receipt, TransactionSigned};
 use reth_evm::{ConfigureEvm, EvmEnv};
-use reth_execution_types::ExecutionOutcome;
+use reth_execution_types::{ExecutionOutcome, RecoveredBlockAndExecutionOutput};
 use reth_node_types::{BlockTy, HeaderTy, NodeTypesWithDB, ReceiptTy, TxTy};
 use reth_primitives_traits::{
-    Account, BlockBody, NodePrimitives, RecoveredBlock, SealedBlock, SealedHeader, StorageEntry,
+    Account, BlockBody, NodePrimitives, RecoveredBlock, SealedBlock, SealedHeader,
+    SealedOrRecoveredBlock, StorageEntry,
 };
 use reth_prune_types::{PruneCheckpoint, PruneSegment};
 use reth_stages_types::{StageCheckpoint, StageId};
@@ -41,7 +42,7 @@ use reth_storage_api::{
 };
 use reth_storage_errors::provider::ProviderResult;
 use reth_trie::{HashedPostState, KeccakKeyHasher};
-use revm_database::BundleState;
+use revm::database::BundleState;
 use std::{
     ops::{Add, RangeBounds, RangeInclusive, Sub},
     sync::Arc,
@@ -339,11 +340,19 @@ impl<N: ProviderNodeTypes> BlockReader for BlockchainProvider<N> {
         self.consistent_provider()?.find_block_by_hash(hash, source)
     }
 
+    fn find_sealed_or_recovered_block(
+        &self,
+        hash: B256,
+        source: BlockSource,
+    ) -> ProviderResult<Option<SealedOrRecoveredBlock<Self::Block>>> {
+        self.consistent_provider()?.find_sealed_or_recovered_block(hash, source)
+    }
+
     fn block(&self, id: BlockHashOrNumber) -> ProviderResult<Option<Self::Block>> {
         self.consistent_provider()?.block(id)
     }
 
-    fn pending_block(&self) -> ProviderResult<Option<RecoveredBlock<Self::Block>>> {
+    fn pending_block(&self) -> ProviderResult<Option<Arc<RecoveredBlock<Self::Block>>>> {
         if self.read_memory.is_some() {
             return self.consistent_provider()?.pending_block()
         }
@@ -352,7 +361,7 @@ impl<N: ProviderNodeTypes> BlockReader for BlockchainProvider<N> {
 
     fn pending_block_and_receipts(
         &self,
-    ) -> ProviderResult<Option<(RecoveredBlock<Self::Block>, Vec<Self::Receipt>)>> {
+    ) -> ProviderResult<Option<RecoveredBlockAndExecutionOutput<Self::Block, Self::Receipt>>> {
         if self.read_memory.is_some() {
             return self.consistent_provider()?.pending_block_and_receipts()
         }
@@ -545,6 +554,11 @@ impl<N: ProviderNodeTypes> PruneCheckpointReader for BlockchainProvider<N> {
 
     fn get_prune_checkpoints(&self) -> ProviderResult<Vec<(PruneSegment, PruneCheckpoint)>> {
         self.consistent_provider()?.get_prune_checkpoints()
+    }
+    fn get_prune_checkpoints_for_availability(
+        &self,
+    ) -> ProviderResult<Vec<(PruneSegment, PruneCheckpoint)>> {
+        self.consistent_provider()?.get_prune_checkpoints_for_availability()
     }
 }
 
@@ -967,7 +981,7 @@ mod tests {
         self, random_block, random_block_range, random_changeset_range, random_eoa_accounts,
         random_receipt, BlockParams, BlockRangeParams,
     };
-    use revm_database::BundleState;
+    use revm::database::BundleState;
     use std::{
         ops::{Bound, Deref, Range, RangeBounds},
         sync::Arc,
@@ -1385,15 +1399,15 @@ mod tests {
 
         // Assertions related to the pending block
 
+        let pending_block = provider.pending_block()?.unwrap();
         assert_eq!(
-            provider.pending_block()?,
-            Some(RecoveredBlock::new_sealed(block.clone(), block.senders().unwrap()))
+            *pending_block,
+            RecoveredBlock::new_sealed(block.clone(), block.senders().unwrap())
         );
 
-        assert_eq!(
-            provider.pending_block_and_receipts()?,
-            Some((RecoveredBlock::new_sealed(block.clone(), block.senders().unwrap()), vec![]))
-        );
+        let pending = provider.pending_block_and_receipts()?.unwrap();
+        assert!(Arc::ptr_eq(&pending_block, pending.block()));
+        assert!(pending.execution_output().receipts.is_empty());
 
         Ok(())
     }
@@ -2041,7 +2055,7 @@ mod tests {
         };
         use reth_trie::{HashedPostState, HashedStorage, TrieInput};
         use reth_trie_db::nested_hash::NestedStateRoot;
-        use revm_database::OriginalValuesKnown;
+        use revm::database::OriginalValuesKnown;
 
         let (provider, _, blocks, _) = provider_with_random_blocks(
             &mut generators::rng(),

@@ -128,8 +128,7 @@ macro_rules! tables {
         // Table marker types.
         $(
             $(#[$attr])*
-            ///
-            #[doc = concat!("Marker type representing a database table mapping [`", stringify!($key), "`] to ", tables!(@value_doc $key, $value, $($($generic),*)?), ".")]
+            #[doc = concat!("\n\nMarker type representing a database table mapping [`", stringify!($key), "`] to ", tables!(@value_doc $key, $value, $($($generic),*)?), ".")]
             $(
                 #[doc = concat!("\n\nThis table's `DUPSORT` subkey is [`", stringify!($subkey), "`].")]
             )?
@@ -152,6 +151,7 @@ macro_rules! tables {
             {
                 const NAME: &'static str = table_names::$name;
                 const DUPSORT: bool = tables!(@bool $($subkey)?);
+                const TABLE: Option<Tables> = Some(Tables::$name);
 
                 type Key = $key;
                 type Value = $value;

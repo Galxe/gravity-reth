@@ -5,6 +5,8 @@
 pub struct ForwardInMemoryCursor<'a, K, V> {
     /// The reference to the pre-sorted collection of entries.
     entries: std::slice::Iter<'a, (K, V)>,
+    /// Original collection, retained so a caller can explicitly rewind an exhausted scan.
+    original_entries: &'a [(K, V)],
     is_empty: bool,
 }
 
@@ -14,7 +16,12 @@ impl<'a, K, V> ForwardInMemoryCursor<'a, K, V> {
     /// The cursor expects all of the entries have been sorted in advance.
     #[inline]
     pub fn new(entries: &'a [(K, V)]) -> Self {
-        Self { entries: entries.iter(), is_empty: entries.is_empty() }
+        Self { entries: entries.iter(), original_entries: entries, is_empty: entries.is_empty() }
+    }
+
+    /// Rewinds the cursor to the start of its original collection.
+    pub fn reset(&mut self) {
+        self.entries = self.original_entries.iter();
     }
 
     /// Returns `true` if the cursor is empty, regardless of its position.
